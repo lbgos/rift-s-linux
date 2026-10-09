@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Rift S",
+  "version": "0.1.0",
+  "identifier": "dev.lbgos.rifts-settings",
+  "build": {"beforeDevCommand":"pnpm dev","devUrl":"http://127.0.0.1:1420","beforeBuildCommand":"pnpm build","frontendDist":"../dist"},
+  "app": {"windows":[{"label":"main","title":"Rift S","width":1280,"height":800,"minWidth":1000,"minHeight":650,"decorations":false,"backgroundColor":"#232427"}],"security":{"csp":"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"}},
+  "bundle": {"active":false}
+}

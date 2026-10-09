@@ -43,6 +43,16 @@ The install puts the SteamVR driver in `/usr/local/share/steamvr-monado`. Regist
 
 Unit tests build with the default `BUILD_TESTING=ON` and run with `ctest --test-dir build`.
 
+## Settings app
+
+`settings-app/` is a small desktop app (Tauri + React) for the headset. It shows tracking state for the headset and controllers, the room boundary, and lets you set software IPD, recenter, start room setup, export logs and restart SteamVR. It talks to SteamVR through OpenVR, so SteamVR has to be running.
+
+```
+cd settings-app
+pnpm install
+pnpm tauri build
+```
+
 ## License
 
 Boost Software License 1.0, the same as Monado. See `LICENSE`. Third-party files keep their own licenses in `LICENSES/`.
