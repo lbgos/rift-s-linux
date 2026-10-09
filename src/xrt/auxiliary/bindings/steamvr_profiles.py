@@ -82,14 +82,15 @@ def main():
         for idx, component in enumerate(p.components):
             subpath_name = component.steamvr_path
 
-            input_source[subpath_name] = {
+            # Optional extension components must not replace the base source type.
+            source = input_source.setdefault(subpath_name, {
                 "type": component.subpath_type,
                 "binding_image_point": [0, 0],  # TODO
                 "order": idx
-            }
+            })
 
             for req in get_required_components(component.subpath_type):
-                input_source[subpath_name][req] = req in component.components_for_subpath
+                source[req] = source.get(req, False) or req in component.components_for_subpath
 
         j = {
             "json_id": "input_profile",
@@ -109,6 +110,26 @@ def main():
             "input_source": input_source
 
         }
+
+        # Monado owns the compositor binding, including native room setup.
+        if p.name == "/interaction_profiles/oculus/touch_controller":
+            j["controller_type"] = "monado_oculus_touch"
+            j["compatibility_mode_controller_type"] = "oculus_touch"
+            j["legacy_binding"] = "{oculus}/input/legacy_bindings_touch.json"
+            # The driver exposes Touch's menu button as the system button.
+            j["input_source"]["/input/system"] = j["input_source"].pop("/input/menu")
+            # SteamVR resolves these poses through the Touch render model. The
+            # compositor's Pointer action binds /pose/tip, not OpenXR /pose/aim.
+            for pose in ("raw", "tip", "handgrip", "openxr_aim", "openxr_grip"):
+                input_source["/pose/" + pose] = {
+                    "type": "pose",
+                    "binding_image_point": [0, 0],
+                    "order": len(input_source),
+                }
+            j["default_bindings"] = [{
+                "app_key": "openvr.component.vrcompositor",
+                "binding_url": "monado_touch_compositor.json",
+            }]
 
         f = open_file(args, fname)
 

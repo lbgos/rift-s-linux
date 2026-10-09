@@ -288,10 +288,10 @@ render_distortion_buffer_init(struct render_resources *r,
                               struct xrt_device *xdev,
                               bool pre_rotate)
 {
-	struct render_buffer bufs[RENDER_DISTORTION_IMAGES_SIZE];
-	VkDeviceMemory device_memories[RENDER_DISTORTION_IMAGES_SIZE];
-	VkImage images[RENDER_DISTORTION_IMAGES_SIZE];
-	VkImageView image_views[RENDER_DISTORTION_IMAGES_SIZE];
+	struct render_buffer bufs[RENDER_DISTORTION_IMAGES_SIZE] = {0};
+	VkDeviceMemory device_memories[RENDER_DISTORTION_IMAGES_SIZE] = {0};
+	VkImage images[RENDER_DISTORTION_IMAGES_SIZE] = {0};
+	VkImageView image_views[RENDER_DISTORTION_IMAGES_SIZE] = {0};
 	VkCommandBuffer upload_buffer = VK_NULL_HANDLE;
 	VkResult ret;
 
@@ -416,4 +416,41 @@ render_distortion_images_ensure(struct render_resources *r,
 	}
 
 	return true;
+}
+
+/* The caller has waited for rendering to finish. Reuse images/descriptors and
+ * upload new UVs; no Vulkan pipeline, swapchain or session rebuild is needed. */
+bool
+render_distortion_images_update(struct render_resources *r, struct xrt_device *xdev)
+{
+	struct vk_bundle *vk = r->vk;
+	struct render_buffer bufs[RENDER_DISTORTION_IMAGES_SIZE] = {0};
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	VkResult ret = VK_SUCCESS;
+	for (uint32_t i = 0; i < r->view_count; i++) {
+		ret = create_and_fill_in_distortion_buffer_for_view(vk, xdev, &bufs[i], &bufs[r->view_count + i],
+		                                                    &bufs[2 * r->view_count + i], i,
+		                                                    r->distortion.pre_rotated);
+		if (ret != VK_SUCCESS) {
+			goto cleanup;
+		}
+	}
+	struct vk_cmd_pool *pool = &r->distortion_pool;
+	vk_cmd_pool_lock(pool);
+	ret = vk_cmd_pool_create_and_begin_cmd_buffer_locked(vk, pool, 0, &cmd);
+	if (ret == VK_SUCCESS) {
+		VkExtent2D extent = {RENDER_DISTORTION_IMAGE_DIMENSIONS, RENDER_DISTORTION_IMAGE_DIMENSIONS};
+		for (uint32_t i = 0; i < RENDER_DISTORTION_IMAGES_COUNT(r); i++) {
+			/* UNDEFINED discards the completed image contents; handles remain stable. */
+			queue_upload_for_first_level_and_layer_locked(vk, cmd, bufs[i].buffer, r->distortion.images[i],
+			                                              extent);
+		}
+		ret = vk_cmd_pool_end_submit_wait_and_free_cmd_buffer_locked(vk, pool, cmd);
+	}
+	vk_cmd_pool_unlock(pool);
+cleanup:
+	for (uint32_t i = 0; i < RENDER_DISTORTION_IMAGES_COUNT(r); i++) {
+		render_buffer_fini(vk, &bufs[i]);
+	}
+	return ret == VK_SUCCESS;
 }

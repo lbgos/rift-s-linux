@@ -26,13 +26,17 @@
 #include <stdio.h>
 #include <time.h>
 #include <assert.h>
+#include <ctype.h>
+#include <unistd.h>
 
 #include "math/m_api.h"
+#include "util/u_debug.h"
 #include "math/m_vec3.h"
 
 #include "os/os_time.h"
 
 #include "util/u_device.h"
+#include "util/u_distortion_mesh.h"
 #include "util/u_trace_marker.h"
 #include "util/u_var.h"
 
@@ -40,6 +44,8 @@
 
 #include "rift_s_hmd.h"
 
+
+DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
 static xrt_result_t
 rift_s_get_tracked_pose(struct xrt_device *xdev,
@@ -125,8 +131,8 @@ rift_s_hmd_handle_report(struct rift_s_hmd *hmd, timepoint_ns local_ts, rift_s_h
 		accel = m_vec3_sub(raw_accel, imu_calibration->accel.offset_at_0C);
 		gyro = m_vec3_sub(raw_gyro, imu_calibration->gyro.offset);
 
-		math_matrix_3x3_transform_vec3(&imu_calibration->accel.rectification, &raw_accel, &accel);
-		math_matrix_3x3_transform_vec3(&imu_calibration->gyro.rectification, &raw_gyro, &gyro);
+		math_matrix_3x3_transform_vec3(&imu_calibration->accel.rectification, &accel, &accel);
+		math_matrix_3x3_transform_vec3(&imu_calibration->gyro.rectification, &gyro, &gyro);
 
 		/* FIXME: This doesn't seem to produce the right numbers, but it's OK - we don't use it anyway */
 		hmd->temperature = temperature_scale * (s->temperature - temperature_offset) + 25;
@@ -153,7 +159,7 @@ static xrt_result_t
 rift_s_compute_distortion(struct xrt_device *xdev, uint32_t view, float u, float v, struct xrt_uv_triplet *result)
 {
 	struct rift_s_hmd *hmd = (struct rift_s_hmd *)(xdev);
-	u_compute_distortion_panotools(&hmd->distortion_vals[view], u, v, result);
+	rift_s_optics_compute(&hmd->optics[view], u, v, result);
 	return XRT_SUCCESS;
 }
 
@@ -172,6 +178,69 @@ dump_fw_block(struct os_hid_device *handle, uint8_t block_id) {
 	return 0;
 }
 #endif
+
+/* Parse a positive projection-tangent scale from the environment; 1.0 if unset or invalid. */
+DEBUG_GET_ONCE_NUM_OPTION(rift_s_ipd_mm, "RIFT_S_IPD_MM", 63.5)
+
+static float
+parse_fov_scale(const char *name)
+{
+	const char *text = getenv(name);
+	if (text == NULL) {
+		return 1.0f;
+	}
+	char *end;
+	const float parsed = strtof(text, &end);
+	const bool consumed = end != text;
+	while (isspace((unsigned char)*end)) {
+		end++;
+	}
+	struct rift_s_optics check;
+	if (consumed && *end == '\0' && rift_s_optics_init(&check, 0, 0.0635f, parsed, parsed)) {
+		return parsed;
+	}
+	RIFT_S_WARN("Invalid %s; using 1.0", name);
+	return 1.0f;
+}
+
+/* Re-read the IPD file at most twice a second; ignores missing or out-of-range values. */
+static void
+rift_s_poll_ipd(struct rift_s_hmd *hmd)
+{
+	int64_t now = os_monotonic_get_ns();
+	if (now < hmd->ipd_next_poll_ns || hmd->ipd_path[0] == '\0') {
+		return;
+	}
+	hmd->ipd_next_poll_ns = now + 500 * 1000000ll;
+	FILE *f = fopen(hmd->ipd_path, "r");
+	if (f == NULL) {
+		return;
+	}
+	float mm = 0;
+	if (fscanf(f, "%f", &mm) == 1 && mm >= 50.0f && mm <= 80.0f && fabsf(mm / 1000.0f - hmd->ipd_m) > 1e-5f) {
+		hmd->ipd_m = mm / 1000.0f;
+		RIFT_S_INFO("Rift S IPD set to %.1f mm", mm);
+	}
+	fclose(f);
+}
+
+static xrt_result_t
+rift_s_get_view_poses(struct xrt_device *xdev,
+                      const struct xrt_vec3 *default_eye_relation,
+                      int64_t at_timestamp_ns,
+                      enum xrt_view_type view_type,
+                      uint32_t view_count,
+                      struct xrt_space_relation *out_head_relation,
+                      struct xrt_fov *out_fovs,
+                      struct xrt_pose *out_poses)
+{
+	struct rift_s_hmd *hmd = (struct rift_s_hmd *)xdev;
+	rift_s_poll_ipd(hmd);
+	struct xrt_vec3 eye_relation = *default_eye_relation;
+	eye_relation.x = hmd->ipd_m;
+	return u_device_get_view_poses(xdev, &eye_relation, at_timestamp_ns, view_type, view_count, out_head_relation,
+	                               out_fovs, out_poses);
+}
 
 static void
 rift_s_hmd_destroy(struct xrt_device *xdev)
@@ -218,12 +287,22 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 
 	hmd->base.update_inputs = u_device_noop_update_inputs;
 	hmd->base.get_tracked_pose = rift_s_get_tracked_pose;
-	hmd->base.get_view_poses = u_device_get_view_poses;
+	hmd->base.get_view_poses = rift_s_get_view_poses;
+	hmd->ipd_m = debug_get_num_option_rift_s_ipd_mm() / 1000.0f;
+	if (hmd->ipd_m < 0.05f || hmd->ipd_m > 0.08f) {
+		hmd->ipd_m = 0.0635f;
+	}
+	snprintf(hmd->ipd_path, sizeof(hmd->ipd_path), "%s/rift-s-ipd.conf", getenv("HOME"));
+	rift_s_poll_ipd(hmd);
+	RIFT_S_INFO("Rift S IPD %.1f mm", hmd->ipd_m * 1000.0f);
 	hmd->base.destroy = rift_s_hmd_destroy;
 	hmd->base.name = XRT_DEVICE_GENERIC_HMD;
 	hmd->base.device_type = XRT_DEVICE_TYPE_HMD;
 
 	hmd->tracker = rift_s_system_get_tracker(sys);
+	hmd->base.camera = hmd->tracker->base.camera;
+	hmd->base.supported.orientation_tracking = true;
+	hmd->base.supported.position_tracking = hmd->tracker->tracking.slam_enabled;
 
 	// Print name.
 	snprintf(hmd->base.str, XRT_DEVICE_NAME_LEN, "Oculus Rift S");
@@ -248,9 +327,7 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 	dump_fw_block(hid_hmd, 0x12);
 #endif
 
-	// Set up display details
-	// FIXME: These are all wrong and should be derived from HMD reports
-	// refresh rate
+	// Native display layout and 80 Hz refresh rate.
 	hmd->base.hmd->screens[0].nominal_frame_interval_ns = time_s_to_ns(1.0f / 80.0f);
 
 	/* In the Rift S, there's one panel that is rotated
@@ -280,44 +357,23 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 	hmd->base.hmd->views[0].viewport.y_pixels = 0;
 	hmd->base.hmd->views[1].viewport.y_pixels = view_h;
 
-	/* FIXME: Incorrection distortion taken from the Rift CV1 for now */
-	const double display_w_meters = 0.149760f / 2.0; // Per-eye width
-	const double display_h_meters = 0.093600f;
-	const double lens_sep = 0.074f;
-	const double hFOV = DEG_TO_RAD(105.0);
-
-	// center of projection
-	const double hCOP = lens_sep / 2.0;
-	const double vCOP = display_h_meters / 2.0;
-
-	struct u_panotools_values distortion_vals = {
-	    .distortion_k = {0.819f, -0.241f, 0.324f, 0.098f, 0.0},
-	    .aberration_k = {0.9952420f, 1.0f, 1.0008074f},
-	    .scale = display_w_meters -
-	             lens_sep / 2.0, // Assume distortion is across the larger distance from lens center to edge
-	    .lens_center = {display_w_meters - hCOP, vCOP},
-	    .viewport_size = {display_w_meters, display_h_meters},
-	};
-
-	if (
-	    /* right eye */
-	    !math_compute_fovs(display_w_meters, hCOP, hFOV, display_h_meters, vCOP, 0.0,
-	                       &hmd->base.hmd->distortion.fov[1]) ||
-	    /*
-	     * left eye - same as right eye, except the horizontal center of projection is moved in the opposite
-	     * direction now
-	     */
-	    !math_compute_fovs(display_w_meters, display_w_meters - hCOP, hFOV, display_h_meters, vCOP, 0.0,
-	                       &hmd->base.hmd->distortion.fov[0])) {
-		// If those failed, it means our math was impossible.
-		RIFT_S_ERROR("Failed to setup basic device info");
-		goto cleanup;
+	// RIFT_S_FOV_SCALE scales all projection tangents, RIFT_S_FOV_SCALE_Y only the vertical ones.
+	const float fov_scale = parse_fov_scale("RIFT_S_FOV_SCALE");
+	const float fov_scale_y = parse_fov_scale("RIFT_S_FOV_SCALE_Y");
+	for (uint8_t eye = 0; eye < 2; eye++) {
+		// The lens centre follows the IPD at creation; the mesh is built once.
+		if (!rift_s_optics_init(&hmd->optics[eye], eye, hmd->ipd_m, fov_scale, fov_scale_y)) {
+			RIFT_S_ERROR("Failed to initialise Rift S optics");
+			goto cleanup;
+		}
+		hmd->base.hmd->distortion.fov[eye] = hmd->optics[eye].fov;
+		const struct xrt_fov *fov = &hmd->optics[eye].fov;
+		RIFT_S_INFO("Rift S eye %u FOV tan: left=%.6f right=%.6f up=%.6f down=%.6f; scale=%.6f, vertical scale=%.6f",
+		            eye, tanf(fov->angle_left), tanf(fov->angle_right), tanf(fov->angle_up), tanf(fov->angle_down),
+		            fov_scale, fov_scale_y);
+		RIFT_S_INFO("Rift S eye %u lens centre (%.2f, %.2f) px at IPD %.1f mm", eye,
+		            hmd->optics[eye].lens_center_px.x, hmd->optics[eye].lens_center_px.y, hmd->ipd_m * 1000.0f);
 	}
-
-	hmd->distortion_vals[0] = distortion_vals;
-	// Move the lens center for the right view
-	distortion_vals.lens_center.x = hCOP;
-	hmd->distortion_vals[1] = distortion_vals;
 
 	hmd->base.hmd->distortion.models = XRT_DISTORTION_MODEL_COMPUTE;
 	hmd->base.hmd->distortion.preferred = XRT_DISTORTION_MODEL_COMPUTE;
@@ -349,6 +405,11 @@ cleanup:
 void
 rift_s_hmd_set_proximity(struct rift_s_hmd *hmd, bool prox_sensor)
 {
+	if (debug_get_bool_option_steamvr_bench()) {
+		prox_sensor = true;
+	}
+	rift_s_tracker_set_standby(hmd->tracker, !prox_sensor);
+
 	/* Enable the screen if the prox sensor is triggered, or turn it off otherwise. */
 	if (prox_sensor != hmd->display_on) {
 		struct os_hid_device *hid_hmd = rift_s_system_hid_handle(hmd->sys);

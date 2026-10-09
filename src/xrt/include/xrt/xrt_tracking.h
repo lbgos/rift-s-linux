@@ -298,6 +298,13 @@ struct xrt_tracked_psvr
 struct xrt_tracked_slam
 {
 	/*!
+	 * Discard the current tracking session, including queued sensor data and
+	 * predicted poses. Sinks remain valid. Returns zero on success.
+	 * Optional: drivers must hold an untracked pose if restart is unavailable.
+	 */
+	int (*restart)(struct xrt_tracked_slam *);
+
+	/*!
 	 * Called by the owning @ref xrt_device to get the last estimated pose
 	 * of the SLAM tracker.
 	 */

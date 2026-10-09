@@ -9,6 +9,8 @@ add_library(
 	internal/blobwatch.h
 	internal/correspondence_search.c
 	internal/correspondence_search.h
+	internal/constrained_pose.cpp
+	internal/constrained_pose.h
 	internal/debug_draw.cpp
 	internal/debug_draw.h
 	internal/lambdatwist/cubic.h
@@ -31,6 +33,7 @@ target_link_libraries(
 	constellation_tracker
 	PRIVATE
 		xrt-interfaces
+		Eigen3::Eigen
 		aux_os
 		aux_util
 		aux_math

@@ -13,9 +13,11 @@
 
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
+#include "xrt/xrt_results.h"
 
 #include "blobwatch.h"
 #include "pose_metrics.h"
+#include "constrained_pose.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +39,8 @@ struct tracking_sample_device_state
 	struct xrt_vec3 prior_pos_error;
 	struct xrt_vec3 prior_rot_error;
 	float gravity_error_rad; /* Gravity vector uncertainty in radians 0..M_PI */
+	bool trusted_position;
+	bool reliable_heading;
 
 	/* Last observed pose, in world space */
 	bool have_last_seen_pose;
@@ -46,6 +50,7 @@ struct tracking_sample_device_state
 	int found_pose_view_id;     /* Set to the camera ID where the device was found */
 	struct xrt_pose final_pose; /* Global pose that was detected */
 
+	struct constellation_constrained_result joint_result;
 	struct pose_metrics score;
 	struct pose_metrics_blob_match_info blob_match_info;
 };
@@ -79,6 +84,10 @@ struct constellation_tracking_sample
 	struct tracking_sample_frame views[CONSTELLATION_MAX_CAMERAS];
 	uint8_t n_views;
 
+	/* HMD pose at capture time in the OpenXR world, for logging positions relative to the head */
+	struct xrt_pose P_xrworld_hmd;
+	bool have_hmd_pose;
+
 	bool need_long_analysis;
 
 	bool long_analysis_found_new_blobs;
@@ -88,6 +97,28 @@ struct constellation_tracking_sample *
 constellation_tracking_sample_new(void);
 void
 constellation_tracking_sample_free(struct constellation_tracking_sample *sample);
+
+// Reject held or failed HMD queries before constructing world-space camera views.
+bool
+constellation_tracking_sample_set_hmd_pose(struct constellation_tracking_sample *sample,
+                                           xrt_result_t result,
+                                           const struct xrt_space_relation *relation);
+
+/* Mark the other devices' published assignments in this exposure. Original blob indices are
+ * preserved for joint verification and arbitration; inherited temporal labels are ignored. */
+unsigned
+constellation_tracking_sample_exclude_published(const struct constellation_tracking_sample *sample,
+                                                 unsigned device_index,
+                                                 struct constellation_constrained_view *views,
+                                                 unsigned num_views);
+
+/* A world position relative to the head, in the head's heading frame (OpenXR axes): x right, y up,
+ * -z forward. Head pitch and roll are removed, so "forward" and "below" mean the same thing
+ * wherever the user looks. */
+void
+constellation_head_relative_position(const struct xrt_pose *P_xrworld_hmd,
+                                     const struct xrt_vec3 *position,
+                                     struct xrt_vec3 *out);
 
 #ifdef __cplusplus
 }

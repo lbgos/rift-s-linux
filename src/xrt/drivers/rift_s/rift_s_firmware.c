@@ -18,6 +18,7 @@
 /* Oculus Rift S Driver - firmware JSON parsing functions */
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #include "util/u_json.h"
 #include "util/u_misc.h"
@@ -31,6 +32,43 @@
 #define JSON_VEC3(a, b, c) u_json_get_vec3_array(u_json_get(a, b), c)
 #define JSON_MATRIX_3X3_ARRAY(a, b, c) u_json_get_float_array(u_json_get(a, b), c.v, 9)
 #define JSON_MATRIX_4x4_ARRAY(a, b, c) u_json_get_float_array(u_json_get(a, b), c.v, 16)
+
+struct rift_s_tracked_imu_calibration
+rift_s_controller_gyro_calibration_for_imu(const struct rift_s_tracked_imu_calibration *factory,
+                                         const char *descriptor)
+{
+	struct rift_s_tracked_imu_calibration gyro = *factory;
+	if (strcmp(descriptor, "LSM6DSL") == 0) {
+		// Windows multiplies in double precision, then stores each coefficient as float.
+		const double factor = 0.8714285714285714;
+		for (unsigned i = 0; i < 9; i++)
+			gyro.matrix.v[i] = (float)(gyro.matrix.v[i] * factor);
+		gyro.offset.x = (float)(gyro.offset.x * factor);
+		gyro.offset.y = (float)(gyro.offset.y * factor);
+		gyro.offset.z = (float)(gyro.offset.z * factor);
+	}
+	return gyro;
+}
+
+static bool
+parse_tracked_imu_calibration(const cJSON *obj, const char *name, struct rift_s_tracked_imu_calibration *out)
+{
+	float values[12];
+	const cJSON *array = u_json_get(obj, name);
+	if (!cJSON_IsArray(array) || cJSON_GetArraySize(array) != 12)
+		return false;
+	size_t count = u_json_get_float_array(array, values, 12);
+	if (count != 12)
+		return false;
+	for (unsigned i = 0; i < 12; i++) {
+		if (!isfinite(values[i]))
+			return false;
+	}
+	*out = (struct rift_s_tracked_imu_calibration){.num_values = (unsigned)count};
+	memcpy(out->matrix.v, values, sizeof(out->matrix.v));
+	out->offset = (struct xrt_vec3){values[9], values[10], values[11]};
+	return true;
+}
 
 int
 rift_s_parse_proximity_threshold(char *json_string, int *proximity_threshold)
@@ -52,6 +90,28 @@ fail:
 	RIFT_S_WARN("Unrecognised Rift S Proximity Threshold JSON data.\n%s", json_string);
 	cJSON_Delete(json_root);
 	return -1;
+}
+
+/* Parse LensOpticalCenterPixelCoord from the lens calibration block (0x12). */
+int
+rift_s_parse_lens_centers(char *json_string, struct xrt_vec2 centers[2])
+{
+	cJSON *json_root = cJSON_Parse(json_string);
+	const cJSON *coords = cJSON_IsObject(json_root) ? u_json_get(json_root, "LensOpticalCenterPixelCoord") : NULL;
+	const char *names[2] = {"Left", "Right"};
+
+	for (int eye = 0; eye < 2; eye++) {
+		float xy[2];
+		if (coords == NULL || u_json_get_float_array(u_json_get(coords, names[eye]), xy, 2) != 2) {
+			RIFT_S_WARN("Unrecognised Rift S lens calibration JSON data.");
+			cJSON_Delete(json_root);
+			return -1;
+		}
+		centers[eye] = (struct xrt_vec2){xy[0], xy[1]};
+	}
+
+	cJSON_Delete(json_root);
+	return 0;
 }
 
 static bool
@@ -312,7 +372,12 @@ json_read_lensing_model(const cJSON *lensing_model, struct rift_s_lensing_model 
 		return false;
 	}
 
-	model->num_points = cJSON_GetArrayItem(array, 0)->valueint;
+	const cJSON *count = cJSON_GetArrayItem(array, 0);
+	if (!cJSON_IsNumber(count) || count->valuedouble < 0 || count->valuedouble > 4 ||
+	    count->valuedouble != count->valueint) {
+		return false;
+	}
+	model->num_points = count->valueint;
 
 	for (int j = 0; j < 4; j++) {
 		const cJSON *item = cJSON_GetArrayItem(array, j + 1);
@@ -355,10 +420,10 @@ rift_s_controller_parse_imu_calibration(char *json_string, struct rift_s_control
 	if (!JSON_VEC3(obj, "ImuPosition", &c->imu_position))
 		goto fail;
 
-	if (!JSON_MATRIX_4x4_ARRAY(obj, "AccCalibration", c->accel_calibration))
+	if (!parse_tracked_imu_calibration(obj, "AccCalibration", &c->accel_calibration))
 		goto fail;
 
-	if (!JSON_MATRIX_4x4_ARRAY(obj, "GyroCalibration", c->gyro_calibration))
+	if (!parse_tracked_imu_calibration(obj, "GyroCalibration", &c->gyro_calibration))
 		goto fail;
 
 	/* LED positions */
@@ -367,8 +432,15 @@ rift_s_controller_parse_imu_calibration(char *json_string, struct rift_s_control
 		goto fail;
 	}
 
-	c->num_leds = cJSON_GetArraySize(leds);
+	int num_leds = cJSON_GetArraySize(leds);
+	if (num_leds <= 0 || num_leds > UINT8_MAX) {
+		goto fail;
+	}
+	c->num_leds = num_leds;
 	c->leds = calloc(c->num_leds, sizeof(struct rift_s_led));
+	if (c->leds == NULL) {
+		goto fail;
+	}
 	i = 0;
 	cJSON_ArrayForEach(item, leds)
 	{
@@ -384,12 +456,19 @@ rift_s_controller_parse_imu_calibration(char *json_string, struct rift_s_control
 	}
 
 	c->num_lensing_models = cJSON_GetArraySize(leds);
+	if (c->num_lensing_models <= 0) {
+		goto fail;
+	}
 	c->lensing_models = calloc(c->num_lensing_models, sizeof(struct rift_s_lensing_model));
+	if (c->lensing_models == NULL) {
+		goto fail;
+	}
 	i = 0;
 	cJSON_ArrayForEach(item, leds)
 	{
 		if (!json_read_lensing_model(leds, c->lensing_models + i, i))
 			goto fail;
+		i++;
 	}
 
 	if (!JSON_MATRIX_3X3_ARRAY(json_root, "gyro_m", c->gyro.rectification) ||

@@ -387,6 +387,7 @@ enum ETrackedDeviceProperty
 	Prop_ManufacturerSerialNumber_String		= 1049,
 	Prop_ComputedSerialNumber_String			= 1050,
 	Prop_EstimatedDeviceFirstUseTime_Int32		= 1051,
+	Prop_AllowCameraToggle_Bool                  = 1055, // SteamVR camera toggle control
 
 	// Properties that are unique to TrackedDeviceClass_HMD
 	Prop_ReportsTimeSinceVSync_Bool				= 2000,
@@ -2078,6 +2079,7 @@ enum ECameraVideoStreamFormat
 	CVS_FORMAT_YUYV16 = 5,		// 16 bits per pixel
 	CVS_FORMAT_BAYER16BG = 6,   // 16 bits per pixel, 10-bit BG-format Bayer, see https://docs.opencv.org/3.1.0/de/d25/imgproc_color_conversions.html
 	CVS_FORMAT_MJPEG = 7,       // variable-sized MJPEG Open DML format, see https://www.loc.gov/preservation/digital/formats/fdd/fdd000063.shtml
+	CVS_FORMAT_RGBX32 = 8,      // Full-sized pixels, 4BPP, LSB = RED
 	CVS_MAX_FORMATS
 };
 

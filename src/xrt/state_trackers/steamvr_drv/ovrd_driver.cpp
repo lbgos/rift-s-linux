@@ -15,9 +15,18 @@
 #include <cassert>
 #include <array>
 #include <thread>
+#include <mutex>
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
 
 #include "math/m_api.h"
 #include "ovrd_log.hpp"
+#include "ovrd_pose.hpp"
+#include "ovrd_display.hpp"
+#include "ovrd_camera.hpp"
+#include "ovrd_roomsetup_guard_process.hpp"
+#include <memory>
 #include "openvr_driver.h"
 
 extern "C" {
@@ -52,11 +61,78 @@ extern "C" {
 //! controllers, but input mapping may be incomplete or not ideal.
 DEBUG_GET_ONCE_BOOL_OPTION(emulate_index_controller, "STEAMVR_EMULATE_INDEX_CONTROLLER", false)
 
-DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 140)
+DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
+
+DEBUG_GET_ONCE_BOOL_OPTION(native_room_setup, "STEAMVR_NATIVE_ROOM_SETUP", true)
+DEBUG_GET_ONCE_BOOL_OPTION(native_room_setup_vrlink, "STEAMVR_NATIVE_ROOM_SETUP_VRLINK", false)
+
+// The recommended size already matches the panel-centre pixel density. SteamVR adds its own GPU-based
+// supersampling on top, so the upstream 140 % default for Monado's compositor would apply twice.
+DEBUG_GET_ONCE_NUM_OPTION(scale_percentage, "XRT_COMPOSITOR_SCALE_PERCENTAGE", 100)
 
 #define MODELNUM_LEN (XRT_DEVICE_NAME_LEN + 9) // "[Monado] "
 
 #define OPENVR_BONE_COUNT 31
+
+static bool
+is_rift_s_touch(const struct xrt_device *xdev)
+{
+	static const char prefix[] = "Oculus Rift S";
+	return xdev->name == XRT_DEVICE_TOUCH_CONTROLLER && strncmp(xdev->str, prefix, sizeof(prefix) - 1) == 0;
+}
+
+// DebugRequest bench commands expire so a stopped script cannot hold a trigger.
+// Commands: bench x y z pitch trigger; bench6 x y z pitch yaw roll trigger.
+// Angles are radians. "bench off" returns to tracking.
+struct BenchInput
+{
+	std::mutex mutex;
+	xrt_pose pose = XRT_POSE_IDENTITY;
+	float trigger = 0;
+	int64_t until_ns = 0;
+
+	void request(const char *request, char *response, uint32_t size)
+	{
+		if (size) response[0] = 0;
+		if (!debug_get_bool_option_steamvr_bench()) return;
+		std::lock_guard lock(mutex);
+		if (strcmp(request, "bench off") == 0) {
+			until_ns = 0;
+			if (size) snprintf(response, size, "ok");
+			return;
+		}
+		float x, y, z, pitch, yaw = 0, roll = 0, value;
+		char extra;
+		bool parsed = sscanf(request, "bench6 %f %f %f %f %f %f %f %c", &x, &y, &z, &pitch, &yaw, &roll, &value, &extra) == 7;
+		if (!parsed) parsed = sscanf(request, "bench %f %f %f %f %f %c", &x, &y, &z, &pitch, &value, &extra) == 5;
+		if (!parsed || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+		    !std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll) || !std::isfinite(value)) return;
+		pose = XRT_POSE_IDENTITY;
+		pose.position = {x, y, z};
+		const xrt_vec3 angles{pitch, yaw, roll};
+		math_quat_from_euler_angles(&angles, &pose.orientation);
+		trigger = std::clamp(value, 0.0f, 1.0f);
+		until_ns = os_monotonic_get_ns() + 500 * U_TIME_1MS_IN_NS;
+		if (size) snprintf(response, size, "ok");
+	}
+
+	bool sample(xrt_pose &out, float &value)
+	{
+		if (!debug_get_bool_option_steamvr_bench()) return false;
+		std::lock_guard lock(mutex);
+		if (os_monotonic_get_ns() >= until_ns) return false;
+		out = pose;
+		value = trigger;
+		return true;
+	}
+};
+
+static void bench_relation(xrt_space_relation &relation, const xrt_pose &pose)
+{
+	relation = XRT_SPACE_RELATION_ZERO;
+	relation.pose = pose;
+	relation.relation_flags = XRT_SPACE_RELATION_BITMASK_ALL;
+}
 
 // Debug define(s), always off.
 #undef DUMP_POSE
@@ -76,14 +152,14 @@ struct MonadoInputComponent
 
 struct SteamVRDriverControl
 {
-	const char *steamvr_control_path;
+	std::string steamvr_control_path;
 	vr::VRInputComponentHandle_t control_handle;
 };
 
 struct SteamVRDriverControlInput : SteamVRDriverControl
 {
 	enum xrt_input_type monado_input_type;
-	enum xrt_input_name monado_input_name;
+	struct xrt_input *monado_input;
 
 	struct MonadoInputComponent component;
 };
@@ -93,56 +169,6 @@ struct SteamVRDriverControlOutput : SteamVRDriverControl
 	enum xrt_output_type monado_output_type;
 	enum xrt_output_name monado_output_name;
 };
-
-static void
-copy_vec3(struct xrt_vec3 *from, double *to)
-{
-	to[0] = from->x;
-	to[1] = from->y;
-	to[2] = from->z;
-}
-
-static void
-copy_quat(struct xrt_quat *from, vr::HmdQuaternion_t *to)
-{
-	to->x = from->x;
-	to->y = from->y;
-	to->z = from->z;
-	to->w = from->w;
-}
-
-static void
-apply_pose(struct xrt_space_relation *rel, vr::DriverPose_t *m_pose)
-{
-	if ((rel->relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0) {
-		copy_quat(&rel->pose.orientation, &m_pose->qRotation);
-	} else {
-		m_pose->result = vr::TrackingResult_Running_OutOfRange;
-		m_pose->poseIsValid = false;
-	}
-
-	if ((rel->relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0) {
-		copy_vec3(&rel->pose.position, m_pose->vecPosition);
-	} else {
-	}
-
-	if ((rel->relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) != 0) {
-		// linear velocity in world space
-		copy_vec3(&rel->linear_velocity, m_pose->vecVelocity);
-	}
-
-	if ((rel->relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) != 0) {
-		// angular velocity reported by monado in world space,
-		// expected by steamvr to be in "controller space"
-		struct xrt_quat orientation_inv;
-		math_quat_invert(&rel->pose.orientation, &orientation_inv);
-
-		struct xrt_vec3 vel;
-		math_quat_rotate_derivative(&orientation_inv, &rel->angular_velocity, &vel);
-
-		copy_vec3(&vel, m_pose->vecAngularVelocity);
-	}
-}
 
 #define OPENVR_BONE_COUNT 31
 
@@ -368,8 +394,11 @@ hand_joint_set_to_bone_transform(struct xrt_hand_joint_set hand_joint_set,
 class CDeviceDriver_Monado_Controller : public vr::ITrackedDeviceServerDriver
 {
 public:
-	CDeviceDriver_Monado_Controller(struct xrt_instance *xinst, struct xrt_device *xdev, enum xrt_hand hand)
-	    : m_xdev(xdev), m_hand(hand)
+	CDeviceDriver_Monado_Controller(struct xrt_instance *xinst,
+	                                struct xrt_device *xdev,
+	                                enum xrt_hand hand,
+	                                struct xrt_device *xhmd = NULL)
+	    : m_xdev(xdev), m_xhmd(xhmd), m_hand(hand)
 	{
 		ovrd_log("Creating Controller %s\n", xdev->str);
 
@@ -403,6 +432,16 @@ public:
 			}
 			break;
 		case XRT_DEVICE_TOUCH_CONTROLLER:
+			if (is_rift_s_touch(xdev)) {
+				if (hand == XRT_HAND_LEFT) {
+					m_render_model = "oculus_rifts_controller_left";
+				}
+				if (hand == XRT_HAND_RIGHT) {
+					m_render_model = "oculus_rifts_controller_right";
+				}
+				m_grip_to_model = rift_s_touch_grip_to_model(hand);
+				break;
+			}
 			if (hand == XRT_HAND_LEFT) {
 				m_render_model = "oculus_cv1_controller_left";
 			}
@@ -444,37 +483,53 @@ public:
 	{
 		enum xrt_input_type monado_input_type = XRT_GET_INPUT_TYPE(monado_input_name);
 
-		SteamVRDriverControlInput in;
+		SteamVRDriverControlInput in{};
 
 		in.monado_input_type = monado_input_type;
 		in.steamvr_control_path = steamvr_control_path;
-		in.monado_input_name = monado_input_name;
+		in.monado_input = NULL;
+		for (uint32_t i = 0; i < m_xdev->input_count; i++) {
+			if (m_xdev->inputs[i].name == monado_input_name) {
+				in.monado_input = &m_xdev->inputs[i];
+				break;
+			}
+		}
+		if (in.monado_input == NULL) {
+			ovrd_log("Skipping unsupported input %s on %s\n", steamvr_control_path, m_xdev->str);
+			return;
+		}
 		if (component != NULL) {
 			in.component = *component;
 		} else {
 			in.component.has_component = false;
 		}
 
+		vr::EVRInputError err = vr::VRInputError_None;
 		if (monado_input_type == XRT_INPUT_TYPE_BOOLEAN) {
-			vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, steamvr_control_path,
+			err = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, steamvr_control_path,
 			                                            &in.control_handle);
 
 		} else if (monado_input_type == XRT_INPUT_TYPE_VEC1_MINUS_ONE_TO_ONE) {
-			vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
+			err = vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
 			                                           &in.control_handle, vr::VRScalarType_Absolute,
 			                                           vr::VRScalarUnits_NormalizedTwoSided);
 
 		} else if (monado_input_type == XRT_INPUT_TYPE_VEC1_ZERO_TO_ONE) {
-			vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
+			err = vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
 			                                           &in.control_handle, vr::VRScalarType_Absolute,
 			                                           vr::VRScalarUnits_NormalizedOneSided);
 
 		} else if (monado_input_type == XRT_INPUT_TYPE_VEC2_MINUS_ONE_TO_ONE) {
 			// 2D values are added as 2 1D values
 			// usually those are [-1,1]
-			vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
+			err = vr::VRDriverInput()->CreateScalarComponent(m_ulPropertyContainer, steamvr_control_path,
 			                                           &in.control_handle, vr::VRScalarType_Absolute,
 			                                           vr::VRScalarUnits_NormalizedTwoSided);
+		}
+
+		if (err != vr::VRInputError_None) {
+			ovrd_log("Failed to create input %s on %s: %d\n", steamvr_control_path, m_xdev->str, err);
+			return;
 		}
 
 		m_input_controls.push_back(in);
@@ -493,7 +548,7 @@ public:
 		out.steamvr_control_path = steamvr_control_path;
 		out.monado_output_name = monado_output_name;
 
-		vr::VRDriverInput()->CreateHapticComponent(m_ulPropertyContainer, out.steamvr_control_path,
+		vr::VRDriverInput()->CreateHapticComponent(m_ulPropertyContainer, out.steamvr_control_path.c_str(),
 		                                           &out.control_handle);
 
 		m_output_controls.push_back(out);
@@ -507,11 +562,11 @@ public:
 	{
 		enum xrt_input_type monado_input_type = XRT_GET_INPUT_TYPE(monado_input_name);
 
-		SteamVRDriverControlInput in;
+		SteamVRDriverControlInput in{};
 
 		in.monado_input_type = monado_input_type;
 		in.steamvr_control_path = steamvr_control_path;
-		in.monado_input_name = monado_input_name;
+		in.monado_input = NULL;
 		in.component.has_component = false;
 
 		vr::EVRInputError err = vr::VRDriverInput()->CreateSkeletonComponent(
@@ -772,6 +827,14 @@ public:
 		enum xrt_input_name monado_input_name = b->input;
 		const char *steamvr_path = b->steamvr_path;
 
+		// SteamVR's oculus_touch bindings toggle the dashboard from the left /input/system and leave the
+		// right one (Oculus button) unbound. The Touch left menu button is the equivalent, so publish it
+		// as system. Without this nothing can open the dashboard.
+		if (m_xdev->name == XRT_DEVICE_TOUCH_CONTROLLER && m_hand == XRT_HAND_LEFT &&
+		    strcmp(steamvr_path, "/input/menu/click") == 0) {
+			steamvr_path = "/input/system/click";
+		}
+
 		enum xrt_input_type monado_input_type = XRT_GET_INPUT_TYPE(monado_input_name);
 
 		switch (monado_input_type) {
@@ -809,6 +872,10 @@ public:
 
 		for (size_t i = 0; i < p->binding_count; i++) {
 			struct binding_template *b = &p->bindings[i];
+			const char *hand_path = m_hand == XRT_HAND_LEFT ? "/user/hand/left" : "/user/hand/right";
+			if (strcmp(b->subaction_path, hand_path) != 0) {
+				continue;
+			}
 
 			if (b->input != 0) {
 				AddMonadoInput(b);
@@ -894,12 +961,14 @@ public:
 			}
 
 			m_input_profile = std::string("{monado}/input/") + std::string(p->steamvr_input_profile_path);
-			m_controller_type = p->steamvr_controller_type;
+			m_controller_type = m_xdev->name == XRT_DEVICE_TOUCH_CONTROLLER ? "monado_oculus_touch"
+			                                                            : p->steamvr_controller_type;
 		}
 
 		ovrd_log("Using input profile %s\n", m_input_profile.c_str());
 		ovrd_log("Using render model%s\n", m_render_model);
 		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_InputProfilePath_String, m_input_profile.c_str());
+		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ControllerType_String, m_controller_type);
 		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_RenderModelName_String, m_render_model);
 		vr::VRProperties()->SetStringProperty(m_ulPropertyContainer, vr::Prop_ModelNumber_String, m_xdev->str);
 
@@ -951,8 +1020,7 @@ public:
 	void
 	DebugRequest(const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize)
 	{
-		if (unResponseBufferSize >= 1)
-			pchResponseBuffer[0] = 0;
+		m_bench.request(pchRequest, pchResponseBuffer, unResponseBufferSize);
 	}
 
 	vr::DriverPose_t
@@ -1002,12 +1070,42 @@ public:
 
 		struct xrt_pose *offset = &m_xdev->tracking_origin->initial_offset;
 
-		struct xrt_relation_chain chain = {};
-		m_relation_chain_push_relation(&chain, &rel);
-		m_relation_chain_push_pose_if_not_identity(&chain, offset);
-		m_relation_chain_resolve(&chain, &rel);
+		if (is_rift_s_touch(m_xdev)) {
+			transform_rift_s_touch_relation(&rel, &m_grip_to_model, offset);
+		} else {
+			struct xrt_relation_chain chain = {};
+			m_relation_chain_push_pose_if_not_identity(&chain, &m_grip_to_model);
+			m_relation_chain_push_relation(&chain, &rel);
+			m_relation_chain_push_pose_if_not_identity(&chain, offset);
+			m_relation_chain_resolve(&chain, &rel);
+		}
 
-		apply_pose(&rel, &m_pose);
+		xrt_pose bench_pose;
+		float bench_trigger;
+		if (is_rift_s_touch(m_xdev) && m_bench.sample(bench_pose, bench_trigger))
+			bench_relation(rel, bench_pose);
+
+		if (is_rift_s_touch(m_xdev))
+			apply_rift_s_touch_pose(&rel, &m_pose);
+		else
+			apply_pose(&rel, &m_pose, XRT_SPACE_RELATION_POSITION_VALID_BIT,
+			           m_xdev->name == XRT_DEVICE_TOUCH_CONTROLLER);
+		if ((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) {
+			m_had_position = true;
+		} else if (is_rift_s_touch(m_xdev) && !m_had_position && m_xhmd != NULL) {
+			// Never fixed: SteamVR may still draw the invalid pose, at the tracking origin under
+			// the floor. Keep it at a resting hand position below the head instead.
+			struct xrt_space_relation head;
+			xrt_device_get_tracked_pose(m_xhmd, XRT_INPUT_GENERIC_HEAD_POSE, now_ns, &head);
+			struct xrt_relation_chain head_chain = {};
+			m_relation_chain_push_relation(&head_chain, &head);
+			m_relation_chain_push_pose_if_not_identity(&head_chain, offset);
+			m_relation_chain_resolve(&head_chain, &head);
+			if ((head.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) {
+				struct xrt_vec3 hand = nominal_hand_position(head.pose, m_hand);
+				copy_vec3(&hand, m_pose.vecPosition);
+			}
+		}
 
 #ifdef DUMP_POSE_CONTROLLERS
 		ovrd_log("get controller %d pose %f %f %f %f, %f %f %f\n", m_unObjectId, m_pose.qRotation.x,
@@ -1028,33 +1126,23 @@ public:
 	RunFrame()
 	{
 		m_xdev->update_inputs(m_xdev);
-
+		xrt_pose bench_pose;
+		float bench_trigger = 0;
+		bool synthetic = is_rift_s_touch(m_xdev) && m_bench.sample(bench_pose, bench_trigger);
 
 		for (const auto &in : m_input_controls) {
 
 			// ovrd_log("Update %d: %s\n", i,
 			// m_controls[i].steamvr_control_path);
 
-			enum xrt_input_name binding_name = in.monado_input_name;
-
-			struct xrt_input *input = NULL;
-			for (uint32_t ii = 0; ii < m_xdev->input_count; ii++) {
-				if (m_xdev->inputs[ii].name == binding_name) {
-					input = &m_xdev->inputs[ii];
-					break;
-				}
-			}
-
-			if (input == NULL) {
-				ovrd_log("Input for %s not found!\n", in.steamvr_control_path);
-				continue;
-			}
+			struct xrt_input *input = in.monado_input;
 
 			vr::VRInputComponentHandle_t handle = in.control_handle;
 
 			if (in.monado_input_type == XRT_INPUT_TYPE_BOOLEAN) {
-				bool state = input->value.boolean;
+				bool state = synthetic ? false : input->value.boolean;
 				vr::VRDriverInput()->UpdateBooleanComponent(handle, state, 0);
+				MonadoCamera::NotifyButton(input->name, state);
 				// ovrd_log("Update %s: %d\n",
 				// m_controls[i].steamvr_control_path, state);
 				// U_LOG_D("Update %s: %d",
@@ -1074,6 +1162,8 @@ public:
 					value = input->value.vec1.x;
 				}
 
+				if (synthetic)
+					value = in.steamvr_control_path == "/input/trigger/value" ? bench_trigger : 0;
 				vr::VRDriverInput()->UpdateScalarComponent(handle, value, 0);
 				// ovrd_log("Update %s: %f\n",
 				// m_controls[i].steamvr_control_path,
@@ -1166,6 +1256,7 @@ public:
 
 
 	struct xrt_device *m_xdev;
+	BenchInput m_bench;
 	vr::DriverPose_t m_pose;
 	vr::TrackedDeviceIndex_t m_unObjectId;
 	vr::PropertyContainerHandle_t m_ulPropertyContainer;
@@ -1184,6 +1275,11 @@ private:
 	const char *m_controller_type = NULL;
 
 	const char *m_render_model = NULL;
+	//! Render-model origin in the grip frame; identity where the model origin is the grip.
+	struct xrt_pose m_grip_to_model = XRT_POSE_IDENTITY;
+	//! Head, for the resting position of a controller that has never had a position fix.
+	struct xrt_device *m_xhmd = NULL;
+	bool m_had_position = false;
 	enum xrt_hand m_hand;
 	bool m_handed_controller;
 
@@ -1247,6 +1343,8 @@ public:
 	virtual void *GetComponent(const char *pchComponentNameAndVersion);
 	virtual void DebugRequest(const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize);
 	virtual vr::DriverPose_t GetPose();
+	void UpdateRoomSetupGuard();
+	void UpdateDisplayFrequency();
 
 	// IVRDisplayComponent
 	virtual void GetWindowBounds(int32_t *pnX, int32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight);
@@ -1261,6 +1359,12 @@ public:
 
 private:
 	struct xrt_device *m_xdev = NULL;
+	BenchInput m_bench;
+	std::unique_ptr<MonadoCamera> m_camera;
+	vr::VRInputComponentHandle_t m_benchProximity = 0;
+	RoomSetupGuardProcess m_roomSetupGuard;
+	bool m_nativeSetupRequested = false;
+	bool m_nativeSetupEnabled = false;
 
 	// clang-format off
 
@@ -1269,6 +1373,7 @@ private:
 
 	float m_flSecondsFromVsyncToPhotons = -1;
 	float m_flDisplayFrequency = -1;
+	uint64_t m_nextFrequencyCheckNs = 0;
 	float m_flIPD = -1;
 
 	struct xrt_fov m_fovs[2];
@@ -1301,6 +1406,39 @@ create_translation_rotation_matrix(struct xrt_pose *pose, struct vr::HmdMatrix34
 }
 
 void
+CDeviceDriver_Monado::UpdateDisplayFrequency()
+{
+	// SteamVR's Vulkan renderer falls back to 90 Hz even after selecting the Rift S 80 Hz mode.
+	// The Rift S has one display mode; do not override dynamically selected modes on other HMDs.
+	if (strcmp(m_xdev->str, "Oculus Rift S") != 0) return;
+	uint64_t now = os_monotonic_get_ns();
+	if (now < m_nextFrequencyCheckNs) return;
+	m_nextFrequencyCheckNs = now + 1000000000ULL;
+	vr::ETrackedPropertyError error;
+	auto properties = vr::VRProperties();
+	float reported = properties->GetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, &error);
+	if (error == vr::TrackedProp_Success && (!std::isfinite(reported) || std::abs(reported - m_flDisplayFrequency) > 0.01f)) {
+		properties->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
+		ovrd_log("Restored Rift S display frequency %.3f Hz after compositor reported %.3f Hz\n",
+		         m_flDisplayFrequency, reported);
+	}
+}
+
+void
+CDeviceDriver_Monado::UpdateRoomSetupGuard()
+{
+	bool enabled = m_nativeSetupRequested && m_roomSetupGuard.ready();
+	if (enabled == m_nativeSetupEnabled) return;
+	m_nativeSetupEnabled = enabled;
+	auto properties = vr::VRProperties();
+	properties->SetBoolProperty(m_ulPropertyContainer, static_cast<vr::ETrackedDeviceProperty>(11003), enabled);
+	properties->SetBoolProperty(m_ulPropertyContainer, static_cast<vr::ETrackedDeviceProperty>(11004),
+	                            enabled && debug_get_bool_option_native_room_setup_vrlink());
+	vr::VRSettings()->SetBool("steamvr", "inHMDRoomSetupDebug", enabled);
+	ovrd_log("Native room setup guard ready=%d\n", enabled);
+}
+
+void
 CDeviceDriver_Monado::PoseUpdateThreadFunction()
 {
 	ovrd_log("Starting HMD pose update thread\n");
@@ -1308,6 +1446,8 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 	while (m_poseUpdating) {
 		//! @todo figure out the best pose update rate
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		if (m_benchProximity)
+			vr::VRDriverInput()->UpdateBooleanComponent(m_benchProximity, true, 0);
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, GetPose(),
 		                                                   sizeof(vr::DriverPose_t));
 	}
@@ -1335,11 +1475,84 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
 	vr::VRProperties()->SetFloatProperty( m_ulPropertyContainer, vr::Prop_SecondsFromVsyncToPhotons_Float, m_flSecondsFromVsyncToPhotons);
 
-	// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
+	if (debug_get_bool_option_steamvr_bench()) {
+		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_ContainsProximitySensor_Bool, true);
+		auto proximity_error = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, "/input/proximity", &m_benchProximity);
+		ovrd_log("Bench proximity component: error=%d\n", proximity_error);
+		ovrd_log("MONADO_STEAMVR_BENCH enabled: synthetic fallback and awake HMD\n");
+	}
+		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
 	vr::VRProperties()->SetUint64Property( m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, 2);
 
+    if (m_xdev->camera) {
+        vr::EVRInitError queue_error = vr::VRInitError_None;
+        auto queue = static_cast<vr::IVRBlockQueue *>(vr::VRDriverContext()->GetGenericInterface(vr::IVRBlockQueue_Version, &queue_error));
+        auto paths = static_cast<vr::IVRPaths *>(vr::VRDriverContext()->GetGenericInterface(vr::IVRPaths_Version, &queue_error));
+        m_camera = std::make_unique<MonadoCamera>(m_xdev, queue, paths);
+        ovrd_log("Rift S native camera queue: %s\n", m_camera->native_ready() ? "ready" : "unavailable");
+        auto properties = vr::VRProperties();
+        properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_HasCamera_Bool, true);
+        properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_AllowCameraToggle_Bool, true);
+        if (m_camera->native_ready()) {
+            // SteamVR's legacy Room View gate treats these as compatibility
+            // revisions. They do not describe the Rift S firmware.
+            properties->SetUint64Property(m_ulPropertyContainer, vr::Prop_FPGAVersion_Uint64, 260);
+            properties->SetUint64Property(m_ulPropertyContainer, vr::Prop_FirmwareVersion_Uint64, 1447390112);
+            properties->SetUint64Property(m_ulPropertyContainer, vr::Prop_CameraFirmwareVersion_Uint64, 8590196809ULL);
+        }
+        // SteamVR 2.17's local setup entry gate requires its experimental flag.
+        // Keep the VRLink request property off unless explicitly testing that path.
+        vr::EVRSettingsError settings_error = vr::VRSettingsError_None;
+        bool enable_setup = vr::VRSettings()->GetBool("driver_monado", "enableNativeRoomSetup", &settings_error);
+        if (settings_error != vr::VRSettingsError_None) enable_setup = true;
+        const bool native_setup = m_camera->native_ready() && enable_setup && debug_get_bool_option_native_room_setup();
+        const bool vrlink = native_setup && debug_get_bool_option_native_room_setup_vrlink();
+        constexpr auto supports_setup = static_cast<vr::ETrackedDeviceProperty>(11003);
+        constexpr auto supports_vrlink_requests = static_cast<vr::ETrackedDeviceProperty>(11004);
+        m_nativeSetupRequested = native_setup;
+        if (native_setup && !m_roomSetupGuard.start()) ovrd_log("Native room setup guard could not start\n");
+        properties->SetBoolProperty(m_ulPropertyContainer, supports_setup, false);
+        properties->SetBoolProperty(m_ulPropertyContainer, supports_vrlink_requests, false);
+        vr::EVRSettingsError flag_error = vr::VRSettingsError_None;
+        vr::VRSettings()->SetBool("steamvr", "inHMDRoomSetupDebug", false, &flag_error);
+        ovrd_log("Native room setup requested=%d: VRLink requests=%d, settings error=%d\n", native_setup, vrlink, flag_error);
+        if (native_setup) {
+            // The setup scene override still requires Room View to be enabled.
+            // Use 2D reprojection: this camera supplies rectified stereo, not depth.
+            auto settings = vr::VRSettings();
+            settings->SetBool("camera", "enableCamera", true);
+            settings->SetBool("camera", "enableConstructRoomView", true);
+            settings->SetInt32("camera", "roomView", 1);
+            settings->SetInt32("camera", "roomViewStyle", 4); // Opaque video.
+            ovrd_log("Native room setup camera: enabled 2D opaque Room View\n");
+        }
+        properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_HasCameraComponent_Bool, true);
+        properties->SetInt32Property(m_ulPropertyContainer, vr::Prop_NumCameras_Int32, 2);
+        properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_SupportsRoomViewDepthProjection_Bool, false);
+        properties->SetInt32Property(m_ulPropertyContainer, vr::Prop_CameraFrameLayout_Int32,
+                                    vr::EVRTrackedCameraFrameLayout_Stereo | vr::EVRTrackedCameraFrameLayout_HorizontalLayout);
+        properties->SetInt32Property(m_ulPropertyContainer, vr::Prop_CameraStreamFormat_Int32, vr::CVS_FORMAT_RGBX32);
+        // The exported images are already rectified pinhole views. Public raw
+        // camera clients need these properties as well as component intrinsics.
+        int32_t distortion[2] = {vr::VRDistortionFunctionType_None, vr::VRDistortionFunctionType_None};
+        double coefficients[2][vr::k_unMaxDistortionFunctionParameters]{};
+        vr::HmdVector4_t white_balance[2] = {{{1, 1, 1, 1}}, {{1, 1, 1, 1}}};
+        properties->SetProperty(m_ulPropertyContainer, vr::Prop_CameraDistortionFunction_Int32_Array,
+                                distortion, sizeof(distortion), vr::k_unInt32PropertyTag);
+        properties->SetProperty(m_ulPropertyContainer, vr::Prop_CameraDistortionCoefficients_Float_Array,
+                                coefficients, sizeof(coefficients), vr::k_unFloatPropertyTag);
+        properties->SetProperty(m_ulPropertyContainer, vr::Prop_CameraWhiteBalance_Vector4_Array,
+                                white_balance, sizeof(white_balance), vr::k_unHmdVector4PropertyTag);
+        vr::HmdMatrix34_t transforms[2];
+        for (int i = 0; i < 2; ++i) create_translation_rotation_matrix(&m_xdev->camera->head_from_camera[i], &transforms[i]);
+        properties->SetProperty(m_ulPropertyContainer, vr::Prop_CameraToHeadTransform_Matrix34,
+                                &transforms[0], sizeof(transforms[0]), vr::k_unHmdMatrix34PropertyTag);
+        properties->SetProperty(m_ulPropertyContainer, vr::Prop_CameraToHeadTransforms_Matrix34_Array,
+                                transforms, sizeof(transforms), vr::k_unHmdMatrix34PropertyTag);
+    }
+
 	// avoid "not fullscreen" warnings from vrmonitor
-	//vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_IsOnDesktop_Bool, false);
+	vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_IsOnDesktop_Bool, IsDisplayOnDesktop());
 
 	// clang-format on
 
@@ -1365,6 +1578,8 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 void
 CDeviceDriver_Monado::Deactivate()
 {
+	if (m_camera)
+		m_camera->StopVideoStream();
 	m_poseUpdating = false;
 	m_poseUpdateThread->join();
 	ovrd_log("Deactivate\n");
@@ -1379,6 +1594,8 @@ CDeviceDriver_Monado::EnterStandby()
 void *
 CDeviceDriver_Monado::GetComponent(const char *pchComponentNameAndVersion)
 {
+	if (m_camera && strcmp(pchComponentNameAndVersion, vr::IVRCameraComponent_Version) == 0)
+		return m_camera.get();
 	// clang-format off
 	if (strcmp(pchComponentNameAndVersion, vr::IVRDisplayComponent_Version) == 0) {
 		return (vr::IVRDisplayComponent *)this;
@@ -1391,7 +1608,7 @@ CDeviceDriver_Monado::GetComponent(const char *pchComponentNameAndVersion)
 void
 CDeviceDriver_Monado::DebugRequest(const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize)
 {
-	//! @todo
+	m_bench.request(pchRequest, pchResponseBuffer, unResponseBufferSize);
 }
 
 static constexpr inline vr::HmdQuaternion_t
@@ -1420,6 +1637,16 @@ CDeviceDriver_Monado::GetPose()
 	m_relation_chain_push_pose_if_not_identity(&chain, offset);
 	m_relation_chain_resolve(&chain, &rel);
 
+	if (debug_get_bool_option_steamvr_bench()) {
+		xrt_pose bench_pose = XRT_POSE_IDENTITY;
+		bench_pose.position.y = 1.6f;
+		float trigger;
+		const auto tracked = XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
+		                     XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT;
+		if (m_bench.sample(bench_pose, trigger) || (rel.relation_flags & tracked) != tracked)
+			bench_relation(rel, bench_pose);
+	}
+
 	vr::DriverPose_t t = {
 	    // monado predicts pose "now", see xrt_device_get_tracked_pose
 	    .poseTimeOffset = 0,
@@ -1445,7 +1672,12 @@ CDeviceDriver_Monado::GetPose()
 	    .shouldApplyHeadModel = !m_xdev->supported.position_tracking,
 	    .deviceIsConnected = true,
 	};
-	apply_pose(&rel, &t);
+	// A loss of positional tracking still has a finite held position. Dropping it sent Y=0 to games.
+	apply_pose(&rel, &t, XRT_SPACE_RELATION_POSITION_VALID_BIT);
+	if (!(rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT)) {
+		t.result = vr::TrackingResult_Running_OutOfRange;
+		t.poseIsValid = false;
+	}
 
 #ifdef DUMP_POSE
 	ovrd_log("get hmd pose %f %f %f %f, %f %f %f\n", t.qRotation.x, t.qRotation.y, t.qRotation.z, t.qRotation.w,
@@ -1496,10 +1728,7 @@ CDeviceDriver_Monado::GetRecommendedRenderTargetSize(uint32_t *pnWidth, uint32_t
 	int scale = debug_get_num_option_scale_percentage();
 	float fscale = (float)scale / 100.f;
 
-
-
-	*pnWidth = m_xdev->hmd->screens[0].w_pixels * fscale;
-	*pnHeight = m_xdev->hmd->screens[0].h_pixels * fscale;
+	ovrd_get_recommended_render_target_size(m_xdev, fscale, pnWidth, pnHeight);
 
 	ovrd_log("Render Target Size: %dx%d (%fx)\n", *pnWidth, *pnHeight, fscale);
 }
@@ -1520,10 +1749,7 @@ CDeviceDriver_Monado::GetEyeOutputViewport(
 void
 CDeviceDriver_Monado::GetProjectionRaw(vr::EVREye eEye, float *pfLeft, float *pfRight, float *pfTop, float *pfBottom)
 {
-	*pfLeft = tanf(m_xdev->hmd->distortion.fov[eEye].angle_left);
-	*pfRight = tanf(m_xdev->hmd->distortion.fov[eEye].angle_right);
-	*pfTop = tanf(-m_xdev->hmd->distortion.fov[eEye].angle_up);
-	*pfBottom = tanf(-m_xdev->hmd->distortion.fov[eEye].angle_down);
+	ovrd_get_projection_raw(m_xdev->hmd->distortion.fov[eEye], pfLeft, pfRight, pfTop, pfBottom);
 	ovrd_log("Projection Raw: L%f R%f T%f B%f\n", *pfLeft, *pfRight, *pfTop, *pfBottom);
 }
 
@@ -1592,7 +1818,7 @@ public:
 	virtual void Cleanup();
 	virtual const char *const * GetInterfaceVersions() { return vr::k_InterfaceVersions; }
 	virtual void RunFrame();
-	virtual bool ShouldBlockStandbyMode() { return false; }
+	virtual bool ShouldBlockStandbyMode() { return debug_get_bool_option_steamvr_bench(); }
 	virtual void EnterStandby() {}
 	virtual void LeaveStandby() {}
 	virtual void HandleHapticEvent(vr::VREvent_t *event);
@@ -1605,6 +1831,8 @@ private:
 	struct xrt_space_overseer *m_xso = NULL;
 	struct xrt_device *m_xhmd = NULL;
 
+	bool m_restoreBenchPause = false;
+	bool m_savedBenchPause = true;
 	CDeviceDriver_Monado *m_MonadoDeviceDriver = NULL;
 	CDeviceDriver_Monado_Controller *m_left = NULL;
 	CDeviceDriver_Monado_Controller *m_right = NULL;
@@ -1622,6 +1850,12 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	ovrd_log_init(vr::VRDriverLog());
 
 	ovrd_log("Initializing Monado driver\n");
+	if (debug_get_bool_option_steamvr_bench()) {
+		vr::EVRSettingsError error = vr::VRSettingsError_None;
+		m_savedBenchPause = vr::VRSettings()->GetBool("power", "pauseCompositorOnStandby", &error);
+		m_restoreBenchPause = error == vr::VRSettingsError_None;
+		vr::VRSettings()->SetBool("power", "pauseCompositorOnStandby", false);
+	}
 
 	//! @todo instance initialization is difficult to replicate
 
@@ -1671,11 +1905,11 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	u_builder_setup_tracking_origins(m_xhmd, nullptr, left_xdev, right_xdev, nullptr, &offset);
 
 	if (left_xdev) {
-		m_left = new CDeviceDriver_Monado_Controller(m_xinst, left_xdev, XRT_HAND_LEFT);
+		m_left = new CDeviceDriver_Monado_Controller(m_xinst, left_xdev, XRT_HAND_LEFT, m_xhmd);
 		ovrd_log("Added left Controller: %s\n", left_xdev->str);
 	}
 	if (right_xdev) {
-		m_right = new CDeviceDriver_Monado_Controller(m_xinst, right_xdev, XRT_HAND_RIGHT);
+		m_right = new CDeviceDriver_Monado_Controller(m_xinst, right_xdev, XRT_HAND_RIGHT, m_xhmd);
 		ovrd_log("Added right Controller: %s\n", right_xdev->str);
 	}
 
@@ -1685,6 +1919,10 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 void
 CServerDriver_Monado::Cleanup()
 {
+	if (m_restoreBenchPause) {
+		vr::VRSettings()->SetBool("power", "pauseCompositorOnStandby", m_savedBenchPause);
+		m_restoreBenchPause = false;
+	}
 	if (m_MonadoDeviceDriver != NULL) {
 		delete m_MonadoDeviceDriver;
 		m_MonadoDeviceDriver = NULL;
@@ -1742,13 +1980,17 @@ CServerDriver_Monado::HandleHapticEvent(vr::VREvent_t *event)
 	SteamVRDriverControlOutput *control = &controller->m_output_controls.at(0);
 
 	enum xrt_output_name name = control->monado_output_name;
-	ovrd_log("Haptic vibration %s, %d\n", control->steamvr_control_path, name);
+	ovrd_log("Haptic vibration %s, %d\n", control->steamvr_control_path.c_str(), name);
 	controller->m_xdev->set_output(controller->m_xdev, name, &out);
 }
 
 void
 CServerDriver_Monado::RunFrame()
 {
+	if (m_MonadoDeviceDriver) {
+		m_MonadoDeviceDriver->UpdateRoomSetupGuard();
+		m_MonadoDeviceDriver->UpdateDisplayFrequency();
+	}
 	if (m_left) {
 		m_left->RunFrame();
 	}
@@ -1762,7 +2004,8 @@ CServerDriver_Monado::RunFrame()
 		switch (event.eventType) {
 		case vr::VREvent_Input_HapticVibration: HandleHapticEvent(&event); break;
 		case vr::VREvent_PropertyChanged:
-			// ovrd_log("Property changed\n");
+			if (m_MonadoDeviceDriver && event.data.property.prop == vr::Prop_DisplayFrequency_Float)
+				m_MonadoDeviceDriver->UpdateDisplayFrequency();
 			break;
 		case vr::VREvent_TrackedDeviceActivated:
 			ovrd_log("Device activated %d\n", event.trackedDeviceIndex);

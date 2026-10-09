@@ -62,6 +62,11 @@ struct rift_s_hmd_config
 
 	struct rift_s_imu_config_info_t imu_config_info;
 	struct rift_s_imu_calibration imu_calibration;
+
+	/* Lens optical centres from firmware block 0x12, in native panel pixels
+	 * (2560x1440, left eye first). Only valid if lens_centers_valid. */
+	bool lens_centers_valid;
+	struct xrt_vec2 lens_center_px[2];
 };
 
 /* Structure to track online devices and type */
@@ -80,6 +85,9 @@ struct rift_s_system
 	struct os_thread_helper oth;
 	struct os_hid_device *handles[3];
 	uint64_t last_keep_alive;
+	// Raw proximity diagnostics must stay independent of the bench override.
+	uint64_t last_proximity_log_ns;
+	bool physical_proximity;
 
 	/* state tracking for tracked devices on our radio link */
 	int num_active_tracked_devices;

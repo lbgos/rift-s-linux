@@ -89,6 +89,12 @@ struct pose_metrics_blob_match_info
 	struct pose_rect bounds;
 };
 
+// Angular disagreement of gravity in model space. Camera-space yaw is unconstrained.
+float
+pose_metrics_gravity_error(const struct xrt_pose *pose,
+                           const struct xrt_pose *prior,
+                           const struct xrt_vec3 *camera_gravity);
+
 void
 pose_metrics_get_device_bounds(struct xrt_pose *P_cam_obj,
                                struct t_constellation_led_model *led_model,
@@ -126,6 +132,11 @@ pose_metrics_evaluate_pose_with_prior(struct pose_metrics *score,
                                       struct t_constellation_led_model *leds_model,
                                       struct camera_model *calib,
                                       struct pose_rect *out_bounds);
+
+// Additional acquisition path for models with fewer visible LEDs. Caller must validate gravity.
+bool
+pose_metrics_can_acquire_with_gravity(const struct pose_metrics *score,
+                                      const struct t_constellation_led_model *led_model);
 
 bool
 pose_metrics_score_is_better_pose(struct pose_metrics *old_score, struct pose_metrics *new_score);

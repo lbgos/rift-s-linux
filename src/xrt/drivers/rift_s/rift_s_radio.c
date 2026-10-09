@@ -33,7 +33,7 @@ struct rift_s_radio_command
 	rift_s_radio_command *prev;
 	rift_s_radio_command *next;
 
-	/* Request packet data */
+	/* Request packet data; read_command.cmd is the HID report id */
 	rift_s_hmd_radio_command_t read_command;
 
 	/* Completion callback */
@@ -64,7 +64,6 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 			rift_s_radio_command *cmd = state->pending_commands;
 			rift_s_hmd_radio_command_t *pkt = &cmd->read_command;
 
-			pkt->cmd = 0x12;
 			os_hid_set_feature(hid, (uint8_t *)pkt, sizeof(*pkt));
 			// rift_s_hexdump_buffer ("ControllerFWSend", (unsigned char *)(pkt), sizeof(*pkt));
 			state->command_result_pending = true;
@@ -151,10 +150,23 @@ rift_s_radio_queue_command(rift_s_radio_state *state,
                            rift_s_radio_completion_fn cb,
                            void *cb_data)
 {
+	rift_s_radio_queue_report(state, RIFT_S_RADIO_REPORT_READ, device_id, cmd_bytes, cmd_bytes_len, cb, cb_data);
+}
+
+void
+rift_s_radio_queue_report(rift_s_radio_state *state,
+                          uint8_t report_id,
+                          const uint64_t device_id,
+                          const uint8_t *cmd_bytes,
+                          const int cmd_bytes_len,
+                          rift_s_radio_completion_fn cb,
+                          void *cb_data)
+{
 	rift_s_radio_command *cmd = U_TYPED_CALLOC(rift_s_radio_command);
 
 	assert(cmd_bytes_len <= (int)sizeof(cmd->read_command.cmd_bytes));
 
+	cmd->read_command.cmd = report_id;
 	cmd->read_command.device_id = device_id;
 	memcpy(cmd->read_command.cmd_bytes, cmd_bytes, cmd_bytes_len);
 	cmd->cb = cb;

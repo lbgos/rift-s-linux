@@ -272,16 +272,14 @@ process_scanline(uint8_t *line,
                  struct xrt_frame *frame,
                  blobservation *ob)
 {
-	struct extent *le_end = prev_el->extents;
-	struct extent *le = prev_el->extents;
+	struct extent *le = prev_el ? prev_el->extents : NULL;
+	struct extent *le_end = prev_el ? le + prev_el->num : NULL;
 	struct extent *extent = el->extents;
 	int num_extents = MAX_EXTENTS_PER_LINE;
 	float center;
 	uint32_t x;
 	int e = 0;
 
-	if (prev_el)
-		le_end += prev_el->num;
 
 	for (x = 0; x < frame->width; x++) {
 		int start, end;
@@ -292,6 +290,7 @@ process_scanline(uint8_t *line,
 		if (line[x] <= bw->pixel_threshold)
 			continue;
 
+		max_pixel = line[x];
 		start = x++;
 
 		/* Loop until pixel value falls below threshold */
@@ -316,7 +315,7 @@ process_scanline(uint8_t *line,
 			 * bottom of finished blobs. Store them into an array.
 			 */
 			while (le < le_end && le->end < center) {
-				extent_to_blobs(bw, ob, le, y, frame);
+				extent_to_blobs(bw, ob, le, y - 1, frame);
 				le++;
 			}
 
@@ -357,7 +356,7 @@ process_scanline(uint8_t *line,
 		 * extents in the previous line are finished blobs. Store them.
 		 */
 		while (le < le_end) {
-			extent_to_blobs(bw, ob, le, y, frame);
+			extent_to_blobs(bw, ob, le, y - 1, frame);
 			le++;
 		}
 	}
@@ -389,8 +388,8 @@ process_frame(blobwatch *bw, blobservation *ob, struct xrt_frame *frame)
 	process_scanline(line, bw, 0, &el1, NULL, frame, ob);
 
 	for (uint32_t y = 1; y < frame->height; y++) {
-		process_scanline(line, bw, y, y & 1 ? &el2 : &el1, y & 1 ? &el1 : &el2, frame, ob);
 		line += frame->stride;
+		process_scanline(line, bw, y, y & 1 ? &el2 : &el1, y & 1 ? &el1 : &el2, frame, ob);
 	}
 }
 

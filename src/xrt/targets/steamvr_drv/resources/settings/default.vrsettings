@@ -1,5 +1,6 @@
 {
    "driver_monado" : {
-      "enable" : true
+      "enable" : true,
+      "enableNativeRoomSetup" : true
    }
 }

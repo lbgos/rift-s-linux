@@ -1,0 +1,193 @@
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -55,6 +55,7 @@
+ #include <sophus/se3.hpp>
+
+ #include <cstdio>
++#include <cstdlib>
+ #include <memory>
+ #include <string>
+ #include <thread>
+@@ -119,7 +120,7 @@
+   bool print_queue = false;
+   bool use_double = false;
+   bool deterministic = false;
+-  int num_threads = 1;
++  int num_threads = 4;
+
+   // VIO members
+   struct {
+@@ -170,7 +171,14 @@
+     calib_data_ready.cam.resize(cam_count, false);
+
+     if (config->file == nullptr) {
+-      // Driver-provided calibration still uses the default one-thread CPU budget.
++      // Bound the pool even without a unified config. A single thread can leave
++      // both five-camera pipeline stages behind; benchmarks may select 1..4 for comparison.
++      if (const char *value = std::getenv("BASALT_MAX_THREADS")) {
++        char *end = nullptr;
++        const long requested = std::strtol(value, &end, 10);
++        if (end != value && *end == '\0' && requested >= 1 && requested <= 4) num_threads = int(requested);
++      }
++      cout << "Basalt max parallelism=" << num_threads << "\n";
+       tbb_global_control =
+           std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, num_threads);
+       // For the pipeline to work now, the user will need to use add_cam/imu_calibration
+@@ -421,16 +429,37 @@
+
+   void stop() {
+     running = false;
++    // Discard queued images. The in-flight image finishes before the sentinel.
++    OpticalFlowInput::Ptr image;
++    while (image_data_queue->try_pop(image)) {}
+     image_data_queue->push(nullptr);
++    ImuData<double>::Ptr imu;
++    while (imu_data_queue->try_pop(imu)) {}
++    while (opt_flow_ptr->input_imu_queue.try_pop(imu)) {}
+     imu_data_queue->push(nullptr);
+     opt_flow_ptr->input_imu_queue.push(nullptr);
++
++    // VIO can exit on its IMU sentinel before flow finishes. Once it has exited,
++    // drain its bounded vision queue so the remaining producer cannot block.
++    std::atomic<bool> flow_joined{false};
++    thread drain_vision([&] {
++      while (!flow_joined.load()) {
++        if (vio->finished.load()) {
++          OpticalFlowResult::Ptr result;
++          while (vio->vision_data_queue.try_pop(result)) {}
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++      }
++    });
++    // Join while dynamic types and all connected queues still exist.
++    opt_flow_ptr->maybe_join();
++    flow_joined = true;
++    drain_vision.join();
++    vio->maybe_join();
+
+     if (print_queue) queues_printer_thread.join();
+     if (!deterministic) state_consumer_thread.join();
+     if (show_gui) ui.stop();
+-
+-    // TODO: There is a segfault when closing monado without starting the stream
+-    // happens in a lambda from keypoint_vio.cpp and ends at line c1alib_bias.hpp:112
+   }
+
+   void finalize() const {
+@@ -439,6 +468,16 @@
+   }
+
+   void reset() { vio->scheduleResetState(); }
++
++  // VIT submissions must not block restart when another input stream stalls.
++  // Keep bounded queues current by discarding their oldest pending sample.
++  template <typename T>
++  static void push_latest(tbb::concurrent_bounded_queue<T> &queue, const T &sample) {
++    while (!queue.try_push(sample)) {
++      T discarded;
++      queue.try_pop(discarded);
++    }
++  }
+
+   void push_imu_sample(const vit::ImuSample *s) {
+     // concurrent_bounded_queue expects Erasable and Allocator named
+@@ -448,8 +487,8 @@
+     data->t_ns = s->timestamp;
+     data->accel = {s->ax, s->ay, s->az};
+     data->gyro = {s->wx, s->wy, s->wz};
+-    imu_data_queue->push(data);
+-    opt_flow_ptr->input_imu_queue.push(data);
++    push_latest(*imu_data_queue, data);
++    push_latest(opt_flow_ptr->input_imu_queue, data);
+   }
+
+   void push_frame(const vit::ImgSample *s) {
+@@ -498,7 +537,7 @@
+     if (i == cam_count - 1) {
+       partial_frame->addTime("frames_read");
+       partial_frame->addTime("frames_pushed");
+-      image_data_queue->push(partial_frame);
++      push_latest(*image_data_queue, partial_frame);
+       if (show_gui) ui.update_last_image(partial_frame);
+       if (deterministic) pop_state();
+     }
+@@ -609,7 +648,6 @@
+ }
+
+ vit::Result Tracker::stop() {
+-  impl_->finalize();
+   impl_->stop();
+   return vit::Result::VIT_SUCCESS;
+ }
+@@ -718,3 +756,8 @@
+
+   return VIT_SUCCESS;
+ }
++
++// Optional Monado capability. This build joins flow/VIO before destroying their
++// connected queues and accepts shutdown sentinels while waiting for IMU.
++extern "C" __attribute__((visibility("default"))) bool
++vit_tracker_supports_safe_recreation() { return true; }
+--- a/include/basalt/optical_flow/optical_flow.h
++++ b/include/basalt/optical_flow/optical_flow.h
+@@ -128,7 +128,11 @@
+     // patch_coord = PatchT::pattern2.template cast<float>();
+     depth_guess = config.optical_flow_matching_default_depth;
+   }
+-  virtual ~OpticalFlowBase() { processing_thread->join(); }
++  virtual ~OpticalFlowBase() { maybe_join(); }
++
++  void maybe_join() {
++    if (processing_thread && processing_thread->joinable()) processing_thread->join();
++  }
+
+   virtual void processingLoop() = 0;
+
+--- a/src/vi_estimator/sqrt_keypoint_vio.cpp
++++ b/src/vi_estimator/sqrt_keypoint_vio.cpp
+@@ -60,6 +60,7 @@
+                                                             const VioConfig& config_)
+     : take_kf(true),
+       frames_after_kf(0),
++      take_ltkf(false),
+       g(g_.cast<Scalar>()),
+       initialized(false),
+       schedule_reset(false),
+@@ -145,6 +146,7 @@
+   lmdb.clear();
+
+   take_kf = true;
++  take_ltkf = false;
+   frames_after_kf = 0;
+   kf_ids.clear();
+   ltkfs.clear();
+@@ -271,6 +273,9 @@
+           // std::cout << "Skipping IMU data.." << std::endl;
+         }
+
++        // A shutdown sentinel abandons this frame instead of dereferencing it.
++        if (!data) break;
++
+         Vec3 vel_w_i_init;
+         vel_w_i_init.setZero();
+
+@@ -318,6 +323,9 @@
+           data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+         }
++
++        // A shutdown sentinel abandons this frame instead of dereferencing it.
++        if (!data) break;
+
+         while (data->t_ns <= curr_frame->t_ns) {
+           meas->integrate(*data, accel_cov, gyro_cov);
+@@ -326,6 +334,9 @@
+           data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+           data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+         }
++
++        // A shutdown sentinel abandons this frame instead of dereferencing it.
++        if (!data) break;
+
+         if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
+           if (!data.get()) break;

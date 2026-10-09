@@ -16,7 +16,7 @@
 #pragma once
 
 #include "math/m_imu_3dof.h"
-#include "util/u_distortion_mesh.h"
+#include "rift_s_optics.h"
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_device.h"
 
@@ -45,8 +45,14 @@ struct rift_s_hmd
 	float temperature;
 	bool display_on;
 
-	/* Temporary distortion values for mesh calc */
-	struct u_panotools_values distortion_vals[2];
+	/* Per-eye projection and lens model. */
+	struct rift_s_optics optics[2];
+
+	/* Eye separation in metres. Rift S lenses are fixed, IPD is a rendering setting.
+	 * Set by RIFT_S_IPD_MM, live-updated from ~/rift-s-ipd.conf (millimetres). */
+	float ipd_m;
+	char ipd_path[4096];
+	int64_t ipd_next_poll_ns;
 };
 
 struct rift_s_hmd *

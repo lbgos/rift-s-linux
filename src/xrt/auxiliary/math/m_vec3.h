@@ -119,7 +119,9 @@ m_vec3_angle(struct xrt_vec3 l, struct xrt_vec3 r)
 	}
 	lengths = sqrtf(lengths);
 
-	return acosf(dot / lengths);
+	// Nearly parallel vectors can round outside acos's domain.
+	float cosine = dot / lengths;
+	return acosf(cosine > 1 ? 1 : cosine < -1 ? -1 : cosine);
 }
 
 static inline struct xrt_vec3

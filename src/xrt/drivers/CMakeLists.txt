@@ -348,14 +348,27 @@ if(XRT_BUILD_DRIVER_RIFT_S)
 		rift_s/rift_s_camera.h
 		rift_s/rift_s_controller.c
 		rift_s/rift_s_controller.h
+		rift_s/rift_s_position_filter.c
+		rift_s/rift_s_position_filter.h
+		rift_s/rift_s_slam_guard.c
+		rift_s/rift_s_slam_guard.h
 		rift_s/rift_s_firmware.c
 		rift_s/rift_s_firmware.h
 		rift_s/rift_s_hmd.c
 		rift_s/rift_s_hmd.h
+		rift_s/rift_s_model_check.cpp
+		rift_s/rift_s_model_check.h
+		rift_s/rift_s_passthrough.c
+		rift_s/rift_s_passthrough.h
+		rift_s/rift_s_optics.c
+		rift_s/rift_s_optics.h
 		rift_s/rift_s_protocol.c
 		rift_s/rift_s_protocol.h
 		rift_s/rift_s_radio.c
 		rift_s/rift_s_radio.h
+		rift_s/rift_s_world_anchor.cpp
+		rift_s/rift_s_world_anchor.h
+		rift_s/rift_s_world_control.h
 		rift_s/rift_s_tracker.c
 		rift_s/rift_s_tracker.h
 		rift_s/rift_s_util.cpp
@@ -374,6 +387,8 @@ if(XRT_BUILD_DRIVER_RIFT_S)
 			xrt-external-tinyceres
 			constellation_tracker
 		)
+	target_include_directories(drv_rift_s PRIVATE ${OpenCV_INCLUDE_DIRS})
+	target_link_libraries(drv_rift_s PRIVATE ${OpenCV_LIBRARIES})
 	if(XRT_BUILD_DRIVER_HANDTRACKING)
 		target_link_libraries(drv_rift_s PRIVATE drv_ht)
 	endif()

@@ -28,6 +28,7 @@
 #endif
 
 #include <iostream>
+#include <cmath>
 
 using namespace std;
 
@@ -49,15 +50,17 @@ quat_to_3x3(cv::Mat &mat, struct xrt_quat *me)
 	mat.at<double>(2, 2) = 1 - 2 * me->x * me->x - 2 * me->y * me->y;
 }
 
-static void
+static bool
 undistort_blob_points(std::vector<cv::Point2f> in_points,
                       std::vector<cv::Point2f> &out_points,
                       struct camera_model *calib)
 {
 	for (size_t i = 0; i < in_points.size(); i++) {
-		t_camera_models_undistort(&calib->calib, in_points[i].x, in_points[i].y, &out_points[i].x,
-		                          &out_points[i].y);
+		if (!camera_model_undistort(calib, in_points[i].x, in_points[i].y, &out_points[i].x,
+		                            &out_points[i].y))
+			return false;
 	}
+	return true;
 }
 
 bool
@@ -69,6 +72,9 @@ ransac_pnp_pose(struct xrt_pose *pose,
                 int *num_leds_out,
                 int *num_inliers)
 {
+	if (num_inliers) {
+		*num_inliers = 0;
+	}
 	int i, j;
 	int num_leds = 0;
 	uint64_t taken = 0;
@@ -142,25 +148,47 @@ ransac_pnp_pose(struct xrt_pose *pose,
 
 	// we undistort the image points manually before passing them to the PnpRansac solver
 	// and we give the solver identity camera + null distortion matrices
-	undistort_blob_points(list_points2d, list_points2d_undistorted, calib);
+	if (!undistort_blob_points(list_points2d, list_points2d_undistorted, calib))
+		return false;
 
 	/* 3 pixel reprojection threshold */
 	float reprojectionError = 3.0 / calib->calib.fx;
 
-	cv::solvePnPRansac(list_points3d, list_points2d_undistorted, dummyK, dummyD, rvec, tvec, false, iterationsCount,
-	                   reprojectionError, confidence, inliers, flags);
+	bool solved = false;
+	try {
+		solved = cv::solvePnPRansac(list_points3d, list_points2d_undistorted, dummyK, dummyD, rvec, tvec, false,
+		                            iterationsCount, reprojectionError, confidence, inliers, flags);
+	} catch (const cv::Exception &error) {
+		U_LOG_D("PnP rejected correspondences: %s", error.what());
+		return false;
+	}
+	if (!solved || inliers.rows < 4 || !cv::checkRange(rvec) || !cv::checkRange(tvec)) {
+		return false;
+	}
+
+	cv::Rodrigues(rvec, R);
+	for (int row = 0; row < inliers.rows; row++) {
+		const cv::Point3f &point = list_points3d[inliers.at<int>(row)];
+		double depth = R.at<double>(2, 0) * point.x + R.at<double>(2, 1) * point.y +
+		               R.at<double>(2, 2) * point.z + tvec.at<double>(2);
+		if (!(depth > 0.0)) {
+			return false;
+		}
+	}
 
 	if (num_inliers)
 		*num_inliers = inliers.rows;
 
 	struct xrt_vec3 v;
 	double angle = sqrt(rvec.dot(rvec));
-	double inorm = 1.0f / angle;
-
-	v.x = rvec.at<double>(0) * inorm;
-	v.y = rvec.at<double>(1) * inorm;
-	v.z = rvec.at<double>(2) * inorm;
-	math_quat_from_angle_vector(angle, &v, &pose->orientation);
+	if (angle < 1e-8) {
+		pose->orientation = {0, 0, 0, 1};
+	} else {
+		v.x = rvec.at<double>(0) / angle;
+		v.y = rvec.at<double>(1) / angle;
+		v.z = rvec.at<double>(2) / angle;
+		math_quat_from_angle_vector(angle, &v, &pose->orientation);
+	}
 	pose->position.x = tvec.at<double>(0);
 	pose->position.y = tvec.at<double>(1);
 	pose->position.z = tvec.at<double>(2);

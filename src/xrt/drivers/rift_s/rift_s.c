@@ -34,6 +34,7 @@
 
 #include "os/os_time.h"
 
+#include "util/u_debug.h"
 #include "util/u_device.h"
 #include "util/u_distortion_mesh.h"
 #include "util/u_trace_marker.h"
@@ -49,6 +50,8 @@
 #include "rift_s_hmd.h"
 #include "rift_s_controller.h"
 #include "rift_s_camera.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
 static void *
 rift_s_run_thread(void *ptr);
@@ -145,6 +148,17 @@ read_hmd_config(struct os_hid_device *hid_hmd, struct rift_s_hmd_config *config)
 		return ret;
 	}
 
+	/* Optional and informational: the optics use the Oculus runtime lens centres, not these */
+	char *lens_json = NULL;
+	int lens_json_len = 0;
+	if (rift_s_read_firmware_block(hid_hmd, RIFT_S_FIRMWARE_BLOCK_LENS_CALIB, &lens_json, &lens_json_len) >= 0) {
+		config->lens_centers_valid = rift_s_parse_lens_centers(lens_json, config->lens_center_px) == 0;
+		free(lens_json);
+	}
+	if (!config->lens_centers_valid) {
+		RIFT_S_DEBUG("No lens calibration block");
+	}
+
 	return 0;
 }
 
@@ -217,6 +231,11 @@ rift_s_system_create(struct xrt_prober *xp,
 	if (rift_s_hmd_enable(sys->handles[HMD_HID], true) < 0) {
 		RIFT_S_ERROR("Failed to enable Rift S");
 		goto cleanup;
+	}
+
+	// Bench sessions must power the panel even if no new proximity packet arrives.
+	if (debug_get_bool_option_steamvr_bench()) {
+		rift_s_hmd_set_proximity(sys->hmd, true);
 	}
 
 	// Allow time for enumeration of available displays by host system, so the compositor can select among them.
@@ -542,6 +561,12 @@ handle_packets(struct rift_s_system *sys)
 				/* System state packet. Enable the screen if the prox sensor is
 				 * triggered. */
 				bool prox_sensor = (buf[1] == 0) ? false : true;
+				if (prox_sensor != sys->physical_proximity || now - sys->last_proximity_log_ns >= 5000000000ULL) {
+					RIFT_S_INFO("HMD physical proximity=%d bench=%d", prox_sensor,
+					            debug_get_bool_option_steamvr_bench());
+					sys->physical_proximity = prox_sensor;
+					sys->last_proximity_log_ns = now;
+				}
 				os_mutex_lock(&sys->dev_mutex);
 				if (sys->hmd != NULL) {
 					rift_s_hmd_set_proximity(sys->hmd, prox_sensor);

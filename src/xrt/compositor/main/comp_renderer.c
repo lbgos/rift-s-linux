@@ -1017,6 +1017,42 @@ dispatch_compute(struct comp_renderer *r,
  *
  */
 
+/* Mesh topology and FOV are fixed. Refresh CPU UVs and the existing VBO in place. */
+static bool
+renderer_update_distortion(struct comp_renderer *r)
+{
+	struct comp_compositor *c = r->c;
+	if (c->xdev->update_distortion == NULL || !c->xdev->update_distortion(c->xdev)) {
+		return true;
+	}
+	uint64_t start = os_monotonic_get_ns();
+	renderer_wait_for_last_fence(r);
+	struct xrt_hmd_parts *hmd = c->xdev->hmd;
+	float *vertices = hmd->distortion.mesh.vertices;
+	uint32_t stride = hmd->distortion.mesh.stride / sizeof(float);
+	uint32_t per_view = hmd->distortion.mesh.vertex_count / hmd->view_count;
+	uint64_t hash = 14695981039346656037ull;
+	for (uint32_t i = 0; i < hmd->distortion.mesh.vertex_count; i++) {
+		float *v = &vertices[i * stride];
+		if (xrt_device_compute_distortion(c->xdev, i / per_view, (v[0] + 1) * 0.5f, (v[1] + 1) * 0.5f,
+		                                  (struct xrt_uv_triplet *)&v[2]) != XRT_SUCCESS) {
+			return false;
+		}
+	}
+	const unsigned char *bytes = (const unsigned char *)vertices;
+	size_t size = hmd->distortion.mesh.vertex_count * hmd->distortion.mesh.stride;
+	for (size_t i = 0; i < size; i++) {
+		hash = (hash ^ bytes[i]) * 1099511628211ull;
+	}
+	if (render_buffer_write(&c->base.vk, &c->nr.mesh.vbo, vertices, size) != VK_SUCCESS ||
+	    !render_distortion_images_update(&c->nr, c->xdev)) {
+		return false;
+	}
+	COMP_INFO(c, "Live distortion mesh hash=%016" PRIx64 " update_ms=%.3f", hash,
+	          (os_monotonic_get_ns() - start) / 1000000.0);
+	return true;
+}
+
 XRT_CHECK_RESULT xrt_result_t
 comp_renderer_draw(struct comp_renderer *r)
 {
@@ -1057,6 +1093,10 @@ comp_renderer_draw(struct comp_renderer *r)
 	}
 
 	comp_target_update_timings(ct);
+
+	if (!renderer_update_distortion(r)) {
+		return XRT_ERROR_VULKAN;
+	}
 
 	// Hardcoded for now.
 	const uint32_t view_count = c->nr.view_count;

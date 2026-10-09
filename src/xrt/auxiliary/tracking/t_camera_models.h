@@ -134,7 +134,8 @@ static inline float
 kb4_solve_theta(const struct t_camera_model_params *dist, const float *r_theta, float *d_func_d_theta)
 {
 	float theta = *r_theta;
-	for (int i = 4; i > 0; i--) {
+	// Wide-angle pixels need more than four Newton steps to recover their bearing.
+	for (int i = 12; i > 0; i--) {
 		float theta2 = theta * theta;
 
 		float func = dist->fisheye.k4 * theta2;
@@ -157,7 +158,10 @@ kb4_solve_theta(const struct t_camera_model_params *dist, const float *r_theta, 
 		*d_func_d_theta += 1.0f;
 
 		// Iteration of Newton method
-		theta += ((*r_theta) - func) / (*d_func_d_theta);
+		float step = ((*r_theta) - func) / (*d_func_d_theta);
+		theta += step;
+		if (fabsf(step) < 1e-7f)
+			break;
 	}
 
 	return theta;

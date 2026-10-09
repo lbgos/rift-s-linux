@@ -16,6 +16,7 @@
 #pragma once
 
 #include "math/m_imu_3dof.h"
+#include "math/m_relation_history.h"
 #include "os/os_threading.h"
 #include "util/u_var.h"
 #include "xrt/xrt_defines.h"
@@ -25,6 +26,8 @@
 #include "tracking/t_constellation_tracking.h"
 
 #include "rift_s_firmware.h"
+#include "rift_s_slam_guard.h"
+#include "rift_s_world_anchor.h"
 
 /* Oculus Rift S HMD Tracking */
 #ifndef RIFT_S_TRACKER_H
@@ -46,6 +49,42 @@ struct rift_s_tracker
 	//! Protects shared access to 3dof and pose storage
 	struct os_mutex mutex;
 
+	//! Serializes camera submission and SLAM session replacement.
+	struct os_mutex slam_mutex;
+	//! Latest-frame queue; feature matching never blocks USB, SLAM or controller ingestion.
+	struct os_thread_helper world_thread;
+	bool world_thread_initialized;
+	struct rift_s_world_anchor *world_anchor;
+	struct xrt_frame *world_frames[RIFT_S_CAMERA_COUNT];
+	timepoint_ns world_last_queued_ns;
+	bool world_setup;
+	bool world_map_available;
+	bool world_storage_failed;
+	uint64_t world_command_id;
+	uint32_t world_confirmations;
+	struct xrt_pose world_candidate;
+	uint64_t world_candidate_generation;
+	timepoint_ns world_candidate_ns;
+
+	//! Camera arrival watchdog uses the host clock, not predicted pose time.
+	timepoint_ns last_camera_arrival_ns;
+	//! Proximity sensor reports the headset off-head.
+	bool standby;
+	//! SLAM input stopped (standby or camera timeout).
+	bool slam_paused;
+	//! Re-initialise SLAM before submitting the next fresh camera frame.
+	bool slam_restart_pending;
+	uint64_t slam_generation;
+	timepoint_ns slam_min_sample_ns;
+
+	//! Whether the SLAM cameras see enough features. Under @ref mutex.
+	struct rift_s_slam_feature_gate feature_gate;
+
+	//! Last published IMU pose, frozen while the head pose is held.
+	bool have_published_imu_pose;
+	timepoint_ns last_published_pose_log_ns;
+	struct xrt_pose published_imu_pose;
+
 	//! Don't process IMU / video until started
 	bool ready_for_data;
 
@@ -53,6 +92,7 @@ struct rift_s_tracker
 	{
 		//! Main fusion calculator.
 		struct m_imu_3dof i3dof;
+		struct m_relation_history *history;
 
 		//! The last angular velocity from the IMU, for prediction.
 		struct xrt_vec3 last_angular_velocity;
@@ -101,6 +141,9 @@ struct rift_s_tracker
 	//! Last tracked pose
 	struct xrt_pose pose;
 
+	//! Rejects diverged SLAM poses and holds the position while falling back to 3DoF. Under @ref mutex.
+	struct rift_s_slam_guard slam_guard;
+
 	/* Stereo calibration for the front 2 cameras */
 	struct t_stereo_camera_calibration *stereo_calib;
 	struct t_slam_calibration slam_calib;
@@ -128,12 +171,18 @@ struct rift_s_tracker
 	} gui;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct rift_s_tracker *
 rift_s_tracker_create(struct xrt_tracking_origin *origin,
                       struct xrt_frame_context *xfctx,
                       struct rift_s_hmd_config *hmd_config);
 void
 rift_s_tracker_start(struct rift_s_tracker *t);
+void
+rift_s_tracker_set_standby(struct rift_s_tracker *t, bool standby);
 void
 rift_s_tracker_destroy(struct rift_s_tracker *t);
 void
@@ -174,5 +223,9 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
                                 enum rift_s_tracker_pose pose,
                                 uint64_t at_timestamp_ns,
                                 struct xrt_space_relation *out_relation);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

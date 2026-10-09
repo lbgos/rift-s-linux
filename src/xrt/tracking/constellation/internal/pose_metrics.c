@@ -144,7 +144,11 @@ project_led_points(struct t_constellation_led_model *led_model,
 	for (int i = 0; i < led_model->num_leds; i++) {
 		struct xrt_vec3 *tmp = out_positions + i;
 		math_pose_transform_point(pose, &led_model->leds[i].pos, tmp);
-		if (!t_camera_models_project(&calib->calib, tmp->x, tmp->y, tmp->z, &out_points[i].x, &out_points[i].y))
+		if (tmp->z <= 0) {
+			out_points[i] = (struct xrt_vec2){NAN, NAN};
+			continue; // Visibility below skips LEDs behind the camera.
+		}
+		if (!camera_model_project(calib, tmp->x, tmp->y, tmp->z, &out_points[i].x, &out_points[i].y))
 			return false;
 	}
 	return true;
@@ -165,6 +169,7 @@ get_visible_leds_and_bounds(struct xrt_pose *pose,
 	struct t_constellation_led *leds = led_model->leds;
 	const int num_leds = led_model->num_leds;
 
+	*bounds = (struct pose_rect){0, 0, 0, 0};
 	/* Project LEDs into the distorted image space */
 	if (!project_led_points(led_model, calib, pose, led_out_positions, led_out_points)) {
 		*num_visible_leds = 0;
@@ -268,7 +273,11 @@ project_bounding_points(struct t_constellation_led_model *led_model,
 	for (int i = 0; i < led_model->num_bounding_points; i++) {
 		struct xrt_vec3 *tmp = out_positions + i;
 		math_pose_transform_point(P_cam_obj, &led_model->bounding_points[i].pos, tmp);
-		if (!t_camera_models_project(&calib->calib, tmp->x, tmp->y, tmp->z, &out_points[i].x,
+		if (tmp->z <= 0) {
+			out_points[i] = (struct xrt_vec2){NAN, NAN};
+			continue;
+		}
+		if (!camera_model_project(calib, tmp->x, tmp->y, tmp->z, &out_points[i].x,
 		                             &out_points[i].y)) {
 			return false;
 		}
@@ -372,10 +381,16 @@ pose_metrics_match_pose_to_blobs(struct xrt_pose *pose,
 			continue;
 		}
 
+		struct pose_metrics_visible_led_info *led_info = match_info->visible_leds + match_led_index;
+		/* A split blob or reflection cannot count as another LED correspondence. */
+		if (led_info->matched_blob != NULL) {
+			match_info->unmatched_blobs++;
+			continue;
+		}
+
 		match_info->reprojection_error += sqerror;
 		match_info->matched_blobs++;
 
-		struct pose_metrics_visible_led_info *led_info = match_info->visible_leds + match_led_index;
 		led_info->matched_blob = b;
 
 		if (b->led_id != LED_INVALID_ID) {
@@ -537,4 +552,32 @@ pose_metrics_score_is_better_pose(struct pose_metrics *old_score, struct pose_me
 	}
 
 	return false;
+}
+
+float
+pose_metrics_gravity_error(const struct xrt_pose *pose,
+                           const struct xrt_pose *prior,
+                           const struct xrt_vec3 *camera_gravity)
+{
+	struct xrt_quat inverse, prior_inverse;
+	struct xrt_vec3 gravity, prior_gravity;
+	math_quat_invert(&pose->orientation, &inverse);
+	math_quat_invert(&prior->orientation, &prior_inverse);
+	math_quat_rotate_vec3(&inverse, camera_gravity, &gravity);
+	math_quat_rotate_vec3(&prior_inverse, camera_gravity, &prior_gravity);
+
+	// Compare directions in model space, preserving tilt axis and ignoring camera-space yaw.
+	float dot = m_vec3_dot(gravity, prior_gravity);
+	return isfinite(dot) ? acosf(fmaxf(-1.0f, fminf(1.0f, dot))) : INFINITY;
+}
+
+/* The caller must independently validate the IMU gravity prior. */
+bool
+pose_metrics_can_acquire_with_gravity(const struct pose_metrics *score,
+                                      const struct t_constellation_led_model *led_model)
+{
+	const int min_leds = led_model->min_acquisition_leds;
+	return min_leds >= 5 && min_leds < 7 && score->matched_blobs >= min_leds &&
+	       POSE_HAS_FLAGS(score, POSE_MATCH_LED_IDS) && score->reprojection_error / score->matched_blobs < 1.5 &&
+	       score->unmatched_blobs <= 1 && 5 * score->matched_blobs >= 4 * score->visible_leds;
 }

@@ -16,12 +16,13 @@
  * @ingroup drv_rift_s
  */
 #include <string.h>
+#include <stdio.h>
 
 #include "rift_s.h"
 #include "rift_s_camera.h"
+#include "rift_s_camera_metadata.h"
 
 #include "os/os_threading.h"
-#include "xrt/xrt_byte_order.h"
 
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_frame.h"
@@ -46,6 +47,9 @@
 //! Specifies whether the user wants to enable autoexposure from the start.
 DEBUG_GET_ONCE_BOOL_OPTION(rift_s_autoexposure, "RIFT_S_AUTOEXPOSURE", true)
 
+// Save up to ten raw LED frames, one per second, to an existing directory.
+DEBUG_GET_ONCE_OPTION(rift_s_controller_dump_dir, "RIFT_S_CONTROLLER_DUMP_DIR", NULL)
+
 struct rift_s_camera
 {
 	struct os_mutex lock;
@@ -55,6 +59,18 @@ struct rift_s_camera
 	struct rift_s_camera_calibration_block *camera_calibration;
 
 	uint64_t last_frame_ts_ns;
+	uint64_t last_diag_ns[2];
+	uint64_t last_arrival_ns[2];
+	uint64_t max_arrival_gap_ns[2];
+	bool have_frame_counter;
+	uint16_t last_frame_counter;
+	struct
+	{
+		uint64_t accepted[2]; // controller, SLAM
+		uint64_t bad_layout, bad_magic, bad_crc, bad_timestamp;
+		uint64_t missing_frames, counter_discontinuities, bad_crop, bad_guard;
+	} metadata_stats;
+	uint32_t controller_dump_frames;
 
 	struct xrt_frame_sink in_sink; // Receive raw frames and split them
 
@@ -76,27 +92,6 @@ struct rift_s_camera_finder
 
 	struct xrt_fs *xfs;
 	struct xrt_frame_context *xfctx;
-};
-
-union rift_s_frame_data {
-	struct
-	{
-		uint8_t frame_type;      // 0x06 or 0x86 (controller or SLAM exposure)
-		__le16 magic_abcd;       // 0xabcd
-		__le16 frame_ctr;        // Increments every exposure
-		__le32 const1;           // QHWH
-		uint8_t pad1[7];         // all zeroes padding to 16 bytes
-		__le64 frame_ts;         // microseconds
-		__le32 frame_ctr2;       // Another frame counter, but only increments on alternate frames @ 30Hz
-		__le16 slam_exposure[5]; // One 16-bit per camera. Exposure duration?
-		uint8_t pad2[2];         // zero padding
-		uint8_t slam_gain[5];    // One byte per camera. 0x40 or 0xf0 depending on frame type
-		uint8_t pad3;            // zero padding
-		__le16 unknown1;         // changes every frame. No clear pattern
-		__le16 magic_face;       // 0xface
-
-	} __attribute__((packed)) data;
-	uint8_t raw[50];
 };
 
 static void
@@ -269,56 +264,55 @@ void
 rift_s_camera_destroy(struct rift_s_camera *cam)
 {
 	u_var_remove_root(cam);
+	u_autoexpgain_destroy(&cam->aeg);
 	os_mutex_destroy(&cam->lock);
 	free(cam);
 }
 
 static bool
-parse_frame_data(const struct xrt_frame *xf, union rift_s_frame_data *row_data)
+crop_in_bounds(const struct xrt_frame *xf, struct xrt_rect roi)
 {
-	/* Parse out the bits encoded as 8x8 blocks in the top rows */
-	unsigned int x, out_x;
-
-	if (xf->width != 50 * 8 * 8 || xf->height < 8)
+	if (roi.offset.w < 0 || roi.offset.h < 0 || roi.extent.w <= 0 || roi.extent.h <= 0) {
 		return false;
+	}
+	uint32_t x = roi.offset.w, y = roi.offset.h, w = roi.extent.w, h = roi.extent.h;
+	if (x > xf->width || y > xf->height || w > xf->width - x || h > xf->height - y || xf->stride < xf->width ||
+	    xf->size < x + w || xf->stride == 0) {
+		return false;
+	}
+	return (size_t)y + h - 1 <= (xf->size - x - w) / xf->stride;
+}
 
-	uint8_t *pix = &xf->data[xf->width * 4];
-
-	int bit = 7;
-	for (x = 4, out_x = 0; x < xf->width; x += 8) {
-		uint8_t val = 0;
-		if (pix[x] > 128)
-			val = 1 << bit;
-
-		if (bit == 7) {
-			row_data->raw[out_x] = val;
-		} else {
-			row_data->raw[out_x] |= val;
+// Neighboring black rows are transport guards, not LED segmentation thresholds.
+static bool
+crop_guards_valid(const struct xrt_frame *xf, struct xrt_rect roi)
+{
+	uint32_t rows[2] = {roi.offset.h - 1, roi.offset.h + roi.extent.h};
+	for (int i = 0; i < 2; i++) {
+		if (rows[i] >= xf->height) {
+			continue;
 		}
-		if (bit > 0)
-			bit--;
-		else {
-			bit = 7;
-			out_x++;
+		struct xrt_rect guard = {.offset = {roi.offset.w, rows[i]}, .extent = {roi.extent.w, 1}};
+		if (!crop_in_bounds(xf, guard)) {
+			return false;
+		}
+		const uint8_t *row = xf->data + rows[i] * xf->stride + roi.offset.w;
+		for (int x = 0; x < roi.extent.w; x++) {
+			if (row[x] > 20) {
+				return false;
+			}
 		}
 	}
-
-	/* Check magic numbers */
-	if (__le16_to_cpu(row_data->data.magic_abcd) != 0xabcd)
-		return false;
-	if (__le16_to_cpu(row_data->data.magic_face) != 0xface)
-		return false;
-
 	return true;
 }
 
 static int
-get_y_offset(struct rift_s_camera *cam, enum rift_s_camera_id cam_id, union rift_s_frame_data *row_data)
+get_y_offset(struct rift_s_camera *cam, enum rift_s_camera_id cam_id, struct rift_s_frame_metadata *row_data)
 {
 	/* There's a magic formula for computing the vertical offset of each camera view
 	 * based on exposure, due to some internals of the headset. This formula extracted
 	 * through trial and error */
-	int exposure = __le16_to_cpu(row_data->data.slam_exposure[cam_id]);
+	int exposure = row_data->exposure[cam_id];
 	int y_offset = (exposure + 275) / 38;
 
 	if (y_offset > 375) {
@@ -334,7 +328,7 @@ static struct xrt_frame *
 rift_s_camera_extract_frame(struct rift_s_camera *cam,
                             enum rift_s_camera_id cam_id,
                             struct xrt_frame *full_frame,
-                            union rift_s_frame_data *row_data)
+                            struct rift_s_frame_metadata *row_data)
 {
 	struct rift_s_camera_calibration *calib = &cam->camera_calibration->cameras[cam_id];
 	struct xrt_rect roi = calib->roi;
@@ -342,10 +336,51 @@ rift_s_camera_extract_frame(struct rift_s_camera *cam,
 	roi.offset.h = get_y_offset(cam, cam_id, row_data);
 
 	struct xrt_frame *xf_crop = NULL;
-
+	if (!crop_in_bounds(full_frame, roi)) {
+		cam->metadata_stats.bad_crop++;
+		RIFT_S_DEBUG("DIAG camcrop camera=%u rejected=bounds", cam_id);
+		return NULL;
+	}
+	if (!crop_guards_valid(full_frame, roi)) {
+		cam->metadata_stats.bad_guard++;
+		// The empirical SLAM crop formula has no raw-frame fixture yet. Count the guard
+		// failure without suppressing SLAM until its neighboring rows are verified.
+		RIFT_S_DEBUG("DIAG camcrop camera=%u guard=nonblack y=%d count=%" PRIu64, cam_id, roi.offset.h,
+		             cam->metadata_stats.bad_guard);
+	}
 	u_frame_create_roi(full_frame, roi, &xf_crop);
 
 	return xf_crop;
+}
+
+static void
+dump_controller_frame(struct rift_s_camera *cam, struct xrt_frame *xf, uint64_t hw_ns)
+{
+	const char *dir = debug_get_option_rift_s_controller_dump_dir();
+	if (dir == NULL || cam->controller_dump_frames >= 300) {
+		return;
+	}
+	if (cam->controller_dump_frames++ % 30 != 0) {
+		return;
+	}
+
+	char path[1024];
+	int len = snprintf(path, sizeof(path), "%s/led-%" PRIu64 ".pgm", dir, hw_ns);
+	if (len < 0 || (size_t)len >= sizeof(path)) {
+		return;
+	}
+	FILE *file = fopen(path, "wb");
+	if (file == NULL) {
+		RIFT_S_WARN("Unable to write controller frame to %s", path);
+		return;
+	}
+	bool ok = fprintf(file, "P5\n%u %u\n255\n", xf->width, xf->height) > 0;
+	for (uint32_t y = 0; ok && y < xf->height; y++) {
+		ok = fwrite(xf->data + y * xf->stride, 1, xf->width, file) == xf->width;
+	}
+	if (fclose(file) != 0 || !ok) {
+		RIFT_S_WARN("Incomplete controller frame at %s", path);
+	}
 }
 
 static void
@@ -371,43 +406,101 @@ receive_cam_frame(struct xrt_frame_sink *sink, struct xrt_frame *xf)
 		release_xf = true;
 	}
 
-	// Dump mid-row of the 8 pix data line
-	union rift_s_frame_data row_data;
-
-	if (!parse_frame_data(xf, &row_data)) {
-		RIFT_S_TRACE("Invalid frame top-row data. Skipping");
-		return;
+	struct rift_s_frame_metadata row_data;
+	enum rift_s_metadata_status status =
+	    rift_s_metadata_extract(xf->data, xf->width, xf->height, xf->stride, xf->size, &row_data);
+	if (status != RIFT_S_METADATA_OK) {
+		if (status == RIFT_S_METADATA_BAD_LAYOUT)
+			cam->metadata_stats.bad_layout++;
+		if (status == RIFT_S_METADATA_BAD_MAGIC)
+			cam->metadata_stats.bad_magic++;
+		if (status == RIFT_S_METADATA_BAD_CRC)
+			cam->metadata_stats.bad_crc++;
+		RIFT_S_DEBUG("DIAG cammeta rejected=%s layout=%" PRIu64 " magic=%" PRIu64 " crc=%" PRIu64,
+		             status == RIFT_S_METADATA_BAD_LAYOUT  ? "layout"
+		             : status == RIFT_S_METADATA_BAD_MAGIC ? "magic"
+		                                                   : "crc",
+		             cam->metadata_stats.bad_layout, cam->metadata_stats.bad_magic,
+		             cam->metadata_stats.bad_crc);
+		goto out;
+	}
+	if (row_data.frame_ts_us > UINT64_MAX / OS_NS_PER_USEC) {
+		cam->metadata_stats.bad_timestamp++;
+		RIFT_S_DEBUG("DIAG cammeta rejected=timestamp_overflow ctr=%u", row_data.frame_ctr);
+		goto out;
+	}
+	uint64_t frame_ts_ns = row_data.frame_ts_us * OS_NS_PER_USEC;
+	if (frame_ts_ns == 0 || frame_ts_ns <= cam->last_frame_ts_ns) {
+		cam->metadata_stats.bad_timestamp++;
+		RIFT_S_DEBUG("DIAG cammeta rejected=timestamp ctr=%u hw_us=%" PRIu64, row_data.frame_ctr,
+		             row_data.frame_ts_us);
+		goto out;
+	}
+	cam->last_frame_ts_ns = frame_ts_ns;
+	if (cam->have_frame_counter) {
+		uint16_t missing;
+		if (rift_s_metadata_counter_delta(cam->last_frame_counter, row_data.frame_ctr, &missing)) {
+			cam->metadata_stats.missing_frames += missing;
+		} else {
+			cam->metadata_stats.counter_discontinuities++;
+		}
+	}
+	cam->last_frame_counter = row_data.frame_ctr;
+	cam->have_frame_counter = true;
+	unsigned int kind = (row_data.frame_type & 0x80) != 0;
+	cam->metadata_stats.accepted[kind]++;
+	uint64_t now_ns = os_monotonic_get_ns();
+	if (cam->last_arrival_ns[kind] != 0) {
+		cam->max_arrival_gap_ns[kind] = MAX(cam->max_arrival_gap_ns[kind], now_ns - cam->last_arrival_ns[kind]);
+	}
+	cam->last_arrival_ns[kind] = now_ns;
+	if (now_ns - cam->last_diag_ns[kind] >= 5 * (uint64_t)U_TIME_1S_IN_NS) {
+		cam->last_diag_ns[kind] = now_ns;
+		RIFT_S_INFO("Camera timing kind=%s arrival_ns=%" PRIu64 " hw_us=%" PRIu64
+		             " max_arrival_gap_ms=%.3f missing=%" PRIu64 " discontinuities=%" PRIu64
+		             " exposure=%u,%u,%u,%u,%u gain16=%u,%u,%u,%u,%u",
+		             kind ? "slam" : "controller", now_ns, row_data.frame_ts_us,
+		             (double)cam->max_arrival_gap_ns[kind] / U_TIME_1MS_IN_NS,
+		             cam->metadata_stats.missing_frames, cam->metadata_stats.counter_discontinuities,
+		             row_data.exposure[0], row_data.exposure[1], row_data.exposure[2], row_data.exposure[3], row_data.exposure[4],
+		             row_data.gain[0], row_data.gain[1], row_data.gain[2], row_data.gain[3], row_data.gain[4]);
+		cam->max_arrival_gap_ns[kind] = 0;
 	}
 
-	RIFT_S_DEBUG("frame ctr %u ts %" PRIu64
-	             " µS pair ctr %u "
-	             "exposure[0] %u gain[0] %u unk %u",
-	             (uint16_t)__le16_to_cpu(row_data.data.frame_ctr), (uint64_t)__le64_to_cpu(row_data.data.frame_ts),
-	             (uint32_t)__le32_to_cpu(row_data.data.frame_ctr2),
-	             (uint16_t)__le16_to_cpu(row_data.data.slam_exposure[0]), row_data.data.slam_gain[0],
-	             (uint16_t)__le16_to_cpu(row_data.data.unknown1));
-
-	// rift_s_hexdump_buffer("Row data", row_data.raw, sizeof(row_data.row));
-	uint64_t frame_ts_ns = (uint64_t)__le64_to_cpu(row_data.data.frame_ts) * OS_NS_PER_USEC;
-	if (frame_ts_ns == cam->last_frame_ts_ns) {
-		RIFT_S_WARN("Camera frame TS didn't advance. Probably the headset crashed");
-		return;
+	RIFT_S_DEBUG("DIAG cammeta kind=%s ctr=%u pair=%u hw_us=%" PRIu64 " controller=%" PRIu64 " slam=%" PRIu64
+	             " missing=%" PRIu64 " discontinuities=%" PRIu64,
+	             kind ? "slam" : "controller", row_data.frame_ctr, row_data.frame_ctr2, row_data.frame_ts_us,
+	             cam->metadata_stats.accepted[0], cam->metadata_stats.accepted[1],
+	             cam->metadata_stats.missing_frames, cam->metadata_stats.counter_discontinuities);
+	for (int i = 0; i < RIFT_S_CAMERA_COUNT; i++) {
+		RIFT_S_TRACE("DIAG cammeta camera=%d kind=%s ctr=%u exposure=%u gain=%f", i,
+		             kind ? "slam" : "controller", row_data.frame_ctr, row_data.exposure[i],
+		             row_data.gain[i] / 16.0f);
 	}
 
-	// If the top left pixel is > 128, send as SLAM frame else controller
-	if (row_data.data.frame_type & 0x80) {
+	// Route by metadata kind, independent of arrival order or pixel brightness.
+	if (kind) {
 		int y_offset = get_y_offset(cam, 0, &row_data);
 		struct xrt_rect roi = {.offset = {0, y_offset}, .extent = {.w = xf->width, .h = 480}};
 
 		struct xrt_frame *xf_crop = NULL;
-		u_frame_create_roi(xf, roi, &xf_crop);
-		u_sink_debug_push_frame(&cam->debug_sinks[0], xf_crop);
+		if (crop_in_bounds(xf, roi)) {
+			u_frame_create_roi(xf, roi, &xf_crop);
+			u_sink_debug_push_frame(&cam->debug_sinks[0], xf_crop);
+		}
 		xrt_frame_reference(&xf_crop, NULL);
 
 		/* Extract camera frames and push to the tracker */
 		struct xrt_frame *frames[RIFT_S_CAMERA_COUNT] = {0};
+		bool valid = true;
 		for (int i = 0; i < RIFT_S_CAMERA_COUNT; i++) {
 			frames[i] = rift_s_camera_extract_frame(cam, CAM_IDX_TO_ID[i], xf, &row_data);
+			valid &= frames[i] != NULL;
+		}
+		if (!valid) {
+			for (int i = 0; i < RIFT_S_CAMERA_COUNT; i++)
+				xrt_frame_reference(&frames[i], NULL);
+			goto out;
 		}
 
 		/* Update the exposure for all cameras based on the auto exposure for the left camera view */
@@ -420,15 +513,29 @@ receive_cam_frame(struct xrt_frame_sink *sink, struct xrt_frame *xf)
 			xrt_frame_reference(&frames[i], NULL);
 		}
 	} else {
+		dump_controller_frame(cam, xf, frame_ts_ns);
 		struct xrt_rect roi = {.offset = {0, 40}, .extent = {.w = xf->width, .h = 480}};
 		struct xrt_frame *xf_crop = NULL;
 
+		if (!crop_in_bounds(xf, roi)) {
+			cam->metadata_stats.bad_crop++;
+			RIFT_S_DEBUG("DIAG camcrop kind=controller rejected=bounds count=%" PRIu64,
+			             cam->metadata_stats.bad_crop);
+			goto out;
+		}
+		if (!crop_guards_valid(xf, roi)) {
+			cam->metadata_stats.bad_guard++;
+			RIFT_S_DEBUG("DIAG camcrop kind=controller rejected=guard count=%" PRIu64,
+			             cam->metadata_stats.bad_guard);
+			goto out;
+		}
 		u_frame_create_roi(xf, roi, &xf_crop);
 		u_sink_debug_push_frame(&cam->debug_sinks[1], xf_crop);
 
 		rift_s_tracker_push_controller_frameset(cam->tracker, frame_ts_ns, xf_crop);
 		xrt_frame_reference(&xf_crop, NULL);
 	}
+out:
 	if (release_xf)
 		xrt_frame_reference(&xf, NULL);
 }

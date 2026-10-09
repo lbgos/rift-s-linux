@@ -1431,6 +1431,10 @@ render_compute_clear(struct render_compute *render,
  */
 
 
+/* Refresh existing UV textures after the caller waits for GPU readers. */
+bool
+render_distortion_images_update(struct render_resources *r, struct xrt_device *xdev);
+
 #ifdef __cplusplus
 }
 #endif

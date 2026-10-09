@@ -610,6 +610,15 @@ struct xrt_device
 	                               struct xrt_fov *out_fovs,
 	                               struct xrt_pose *out_poses);
 
+	/* Optional: called only by the compositor render thread, before recording a frame.
+	 * Return true when UVs changed. Projection FOV/topology must remain unchanged.
+	 * Other consumers may load configuration at device creation instead. */
+	bool (*update_distortion)(struct xrt_device *xdev);
+
+	//! Optional tracking-camera video, owned by this device.
+	struct xrt_camera *camera;
+
+
 	/**
 	 * Compute the distortion at a single point.
 	 *
@@ -624,6 +633,7 @@ struct xrt_device
 	 * @param v               vertical texture coordinate
 	 * @param[out] out_result corresponding u,v pairs for all three color channels.
 	 */
+
 	xrt_result_t (*compute_distortion)(
 	    struct xrt_device *xdev, uint32_t view, float u, float v, struct xrt_uv_triplet *out_result);
 

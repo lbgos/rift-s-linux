@@ -214,7 +214,7 @@ struct DistortParamKB4CostFunctor
 struct t_camera_calibration
 rift_s_get_cam_calib(struct rift_s_camera_calibration_block *camera_calibration, enum rift_s_camera_id cam_id)
 {
-	struct t_camera_calibration tcc;
+	struct t_camera_calibration tcc{};
 
 	struct rift_s_camera_calibration *rift_s_cam = &camera_calibration->cameras[cam_id];
 	tcc.image_size_pixels.h = rift_s_cam->roi.extent.h;
@@ -340,4 +340,32 @@ rift_s_create_stereo_camera_calib_rotated(struct rift_s_camera_calibration_block
 	calib->camera_rotation[2][2] = right_from_left_rot.v[8];
 
 	return calib;
+}
+
+float
+rift_s_apply_optical_yaw(struct xrt_quat *imu_orientation, const struct xrt_quat *optical_orientation)
+{
+	struct xrt_quat inverse, delta;
+	math_quat_invert(imu_orientation, &inverse);
+	math_quat_rotate(optical_orientation, &inverse, &delta);
+
+	// Project the world-space difference onto Y. q and -q must take the same shortest path.
+	if (delta.w < 0) {
+		delta.y = -delta.y;
+		delta.w = -delta.w;
+	}
+	if (fabsf(delta.y) + fabsf(delta.w) < 1e-6f) {
+		return 0;
+	}
+	float yaw = 2 * atan2f(delta.y, delta.w);
+	if (fabsf(yaw) <= DEG_TO_RAD(0.25f)) {
+		return 0;
+	}
+	if (fabsf(yaw) > DEG_TO_RAD(5.0f)) {
+		yaw *= 0.10f;
+	}
+	struct xrt_quat correction = {0, sinf(yaw / 2), 0, cosf(yaw / 2)};
+	math_quat_rotate(&correction, imu_orientation, imu_orientation);
+	math_quat_normalize(imu_orientation);
+	return yaw;
 }

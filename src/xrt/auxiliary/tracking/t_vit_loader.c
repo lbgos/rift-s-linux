@@ -92,6 +92,12 @@ t_vit_bundle_load(struct t_vit_bundle *vit, const char *path)
 	GET_PROC(pose_get_features);
 #undef GET_PROC
 
+	// Older backends remain opt-in. Missing optional symbols are not load errors.
+	dlerror();
+	*(void **)&vit->tracker_supports_safe_recreation = dlsym(vit->handle, "vit_tracker_supports_safe_recreation");
+	if (dlerror() != NULL)
+		vit->tracker_supports_safe_recreation = NULL;
+
 	return true;
 }
 

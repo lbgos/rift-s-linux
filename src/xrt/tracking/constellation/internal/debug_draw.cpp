@@ -427,9 +427,9 @@ debug_draw_blobs_leds(struct xrt_frame *rgb_out,
 
 			// Draw cross at pose center
 			struct xrt_vec2 pose_center;
-			t_camera_models_project(&calib->calib, P_cam_obj_prior.position.x, P_cam_obj_prior.position.y,
-			                        P_cam_obj_prior.position.z, &pose_center.x, &pose_center.y);
-			draw_rgb_marker(dest, width, out_stride, height, pose_center.x, pose_center.y, 5, 5, c);
+			if (camera_model_project(calib, P_cam_obj_prior.position.x, P_cam_obj_prior.position.y,
+			                         P_cam_obj_prior.position.z, &pose_center.x, &pose_center.y))
+				draw_rgb_marker(dest, width, out_stride, height, pose_center.x, pose_center.y, 5, 5, c);
 
 			pose_metrics_match_pose_to_blobs(&P_cam_obj_prior, NULL, 0, dev_state->led_model, calib,
 			                                 &blob_match_info);
@@ -448,9 +448,9 @@ debug_draw_blobs_leds(struct xrt_frame *rgb_out,
 
 			// Draw cross at pose center
 			struct xrt_vec2 pose_center;
-			t_camera_models_project(&calib->calib, P_cam_obj.position.x, P_cam_obj.position.y,
-			                        P_cam_obj.position.z, &pose_center.x, &pose_center.y);
-			draw_rgb_marker(dest, width, out_stride, height, pose_center.x, pose_center.y, 5, 5, c);
+			if (camera_model_project(calib, P_cam_obj.position.x, P_cam_obj.position.y, P_cam_obj.position.z,
+			                         &pose_center.x, &pose_center.y))
+				draw_rgb_marker(dest, width, out_stride, height, pose_center.x, pose_center.y, 5, 5, c);
 
 			struct pose_metrics_blob_match_info blob_match_info;
 

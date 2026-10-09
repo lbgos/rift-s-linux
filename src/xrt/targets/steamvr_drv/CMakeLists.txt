@@ -10,7 +10,8 @@ add_custom_command(
 	COMMAND
 		${PYTHON_EXECUTABLE} ${INPUT_PROFILES_INPUT_DIR}/steamvr_profiles.py
 		${INPUT_PROFILES_INPUT_DIR}/bindings.json "${INPUT_PROFILES_OUTPUT_DIR}" "-s"
-	DEPENDS ${INPUT_PROFILES_INPUT_DIR}/bindings.py ${INPUT_PROFILES_INPUT_DIR}/bindings.json
+	DEPENDS ${INPUT_PROFILES_INPUT_DIR}/steamvr_profiles.py
+		${INPUT_PROFILES_INPUT_DIR}/bindings.py ${INPUT_PROFILES_INPUT_DIR}/bindings.json
 	COMMENT "Generating SteamVR input profiles to ${INPUT_PROFILES_OUTPUT_DIR}"
 	)
 add_custom_target(
@@ -36,6 +37,17 @@ target_link_libraries(
 # meta data that the steamvr plugin needs in the base directory of the steamvr plugin
 file(COPY driver.vrdrivermanifest DESTINATION ${PROJECT_BINARY_DIR}/steamvr-monado)
 file(COPY resources DESTINATION ${PROJECT_BINARY_DIR}/steamvr-monado)
+configure_file(
+	resources/input/monado_touch_compositor.json
+	${INPUT_PROFILES_OUTPUT_DIR}/monado_touch_compositor.json
+	COPYONLY
+	)
+
+configure_file(
+	resources/settings/default.vrsettings
+	${PROJECT_BINARY_DIR}/steamvr-monado/resources/settings/default.vrsettings
+	COPYONLY
+	)
 
 # determine the output directory for the steamvr plugin
 if(WIN32)
@@ -69,3 +81,8 @@ install(
 	DIRECTORY "${PROJECT_BINARY_DIR}/steamvr-monado"
 	DESTINATION "${CMAKE_INSTALL_PREFIX}/share"
 	)
+
+# The directory install treats files as data; install the guard as an executable last.
+if(TARGET monado-roomsetup-guard)
+    install(TARGETS monado-roomsetup-guard RUNTIME DESTINATION ${CMAKE_INSTALL_DATADIR}/steamvr-monado/bin/linux64)
+endif()

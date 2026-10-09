@@ -1,0 +1,27 @@
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -127,6 +127,7 @@
+     vector<bool> cam;
+   } calib_data_ready;
+   uint32_t cam_count;
++  double imu_calibration_frequency = -1;
+
+   Calibration<double> calib;
+   VioConfig vio_config;
+@@ -311,13 +312,13 @@
+     int i = imu_calib.imu_index;
+     ASSERT(i == 0, "More than one IMU unsupported (%d)", i);
+
+-    static double frequency = -1;
++    double &frequency = imu_calibration_frequency;
+     if (frequency == -1) {
+       frequency = imu_calib.frequency;
+       calib.imu_update_rate = frequency;
+     } else {
+-      ASSERT(frequency == calib.imu_update_rate, "Unsupported mix of IMU frequencies %lf != %lf", frequency,
+-             calib.imu_update_rate);
++      ASSERT(frequency == imu_calib.frequency, "Unsupported mix of IMU frequencies %lf != %lf", frequency,
++             imu_calib.frequency);
+     }
+
+     // Accelerometer calibration

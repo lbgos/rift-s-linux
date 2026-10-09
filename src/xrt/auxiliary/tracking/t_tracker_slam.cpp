@@ -40,12 +40,15 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/version.hpp>
 
+#include <algorithm>
+#include <atomic>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -83,9 +86,13 @@ DEBUG_GET_ONCE_LOG_OPTION(slam_log, "SLAM_LOG", U_LOGGING_INFO)
 DEBUG_GET_ONCE_OPTION(vit_system_library_path, "VIT_SYSTEM_LIBRARY_PATH", PREFERRED_VIT_SYSTEM_LIBRARY)
 DEBUG_GET_ONCE_OPTION(slam_config, "SLAM_CONFIG", nullptr)
 DEBUG_GET_ONCE_BOOL_OPTION(slam_ui, "SLAM_UI", false)
+// Unknown backends remain opt-in; safety-patched backends advertise recreation support.
+DEBUG_GET_ONCE_OPTION(slam_backend_recreate_override, "SLAM_BACKEND_RECREATE", nullptr)
+DEBUG_GET_ONCE_BOOL_OPTION(slam_backend_recreate, "SLAM_BACKEND_RECREATE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(slam_submit_from_start, "SLAM_SUBMIT_FROM_START", false)
 DEBUG_GET_ONCE_NUM_OPTION(slam_openvr_groundtruth_device, "SLAM_OPENVR_GROUNDTRUTH_DEVICE", 0)
 DEBUG_GET_ONCE_NUM_OPTION(slam_prediction_type, "SLAM_PREDICTION_TYPE", long(SLAM_PRED_DEAD_RECKONING))
+DEBUG_GET_ONCE_OPTION(slam_record_path, "SLAM_RECORD_PATH", nullptr)
 DEBUG_GET_ONCE_BOOL_OPTION(slam_write_csvs, "SLAM_WRITE_CSVS", false)
 DEBUG_GET_ONCE_OPTION(slam_csv_path, "SLAM_CSV_PATH", "evaluation/")
 DEBUG_GET_ONCE_BOOL_OPTION(slam_timing_stat, "SLAM_TIMING_STAT", true)
@@ -233,6 +240,11 @@ struct TimingWriter : public CSVWriter<timing_sample>
 	TimingWriter(const string &dir, const string &fn, bool e, const vector<string> &cn)
 	    : CSVWriter<timing_sample>(dir, fn, e, cn)
 	{}
+	void
+	set_columns(const vector<string> &columns)
+	{
+		column_names = columns;
+	}
 };
 
 //! Writes feature information specific to a particular estimated pose
@@ -260,6 +272,16 @@ struct FeaturesWriter : public CSVWriter<feature_count_sample>
  */
 struct TrackerSlam
 {
+	// Backend replacement excludes users; camera and IMU submission may run concurrently.
+	std::shared_mutex backend_mutex;
+	// Protect pose history and prediction/filter state without holding it during queue pushes.
+	std::mutex state_mutex;
+	vit_config system_config{};
+	t_slam_calibration calibration{};
+	bool use_driver_calibration = false;
+	bool started = false;
+	bool backend_recreate = false;
+
 	struct xrt_tracked_slam base = {};
 	struct xrt_frame_node node = {};       //!< Will be called on destruction
 	struct t_vit_bundle vit;               //!< VIT system function pointers
@@ -390,6 +412,9 @@ struct TrackerSlam
 		u_var_curves fcs_ui;        //!< Display of `fcs` in UI
 
 		bool enabled = false;           //!< Whether the features extension is enabled
+		//! Features tracked over all cameras in the latest pose, -1 when unknown.
+		int last_total = -1; // Protected with last_total_ts by state_mutex.
+		timepoint_ns last_total_ts = 0;
 		struct u_var_button enable_btn; //!< Toggle extension
 	} features;
 
@@ -423,15 +448,19 @@ timing_ui_setup(TrackerSlam &t)
 	static const char *msg[2] = {"[OFF] Enable timing", "[ON] Disable timing"};
 	u_var_button_cb cb = [](void *t_ptr) {
 		TrackerSlam *t = (TrackerSlam *)t_ptr;
+		std::unique_lock backend_lock(t->backend_mutex);
+		std::lock_guard lock(t->state_mutex);
+		if (t->tracker == nullptr)
+			return;
 		u_var_button &btn = t->timing.enable_btn;
 		bool e = !t->timing.enabled;
-		snprintf(btn.label, sizeof(btn.label), "%s", msg[e]);
 		vit_result_t vres = t->vit.tracker_enable_extension(t->tracker, VIT_TRACKER_EXTENSION_POSE_TIMING, e);
 		if (vres != VIT_SUCCESS) {
 			U_LOG_IFL_E(t->log_level, "Failed to set tracker timing extension");
 			return;
 		}
 		t->timing.enabled = e;
+		snprintf(btn.label, sizeof(btn.label), "%s", msg[e]);
 	};
 	t.timing.enable_btn.cb = cb;
 	t.timing.enable_btn.disabled = !t.exts.has_pose_timing;
@@ -543,15 +572,19 @@ features_ui_setup(TrackerSlam &t)
 	static const char *msg[2] = {"[OFF] Enable features info", "[ON] Disable features info"};
 	u_var_button_cb cb = [](void *t_ptr) {
 		TrackerSlam *t = (TrackerSlam *)t_ptr;
+		std::unique_lock backend_lock(t->backend_mutex);
+		std::lock_guard lock(t->state_mutex);
+		if (t->tracker == nullptr)
+			return;
 		u_var_button &btn = t->features.enable_btn;
 		bool e = !t->features.enabled;
-		snprintf(btn.label, sizeof(btn.label), "%s", msg[e]);
 		vit_result_t vres = t->vit.tracker_enable_extension(t->tracker, VIT_TRACKER_EXTENSION_POSE_FEATURES, e);
 		if (vres != VIT_SUCCESS) {
 			U_LOG_IFL_E(t->log_level, "Failed to set tracker features extension");
 			return;
 		}
 		t->features.enabled = e;
+		snprintf(btn.label, sizeof(btn.label), "%s", msg[e]);
 	};
 	t.features.enable_btn.cb = cb;
 	t.features.enable_btn.disabled = !t.exts.has_pose_features;
@@ -773,8 +806,8 @@ flush_poses(TrackerSlam &t)
 
 		// Last relation
 		xrt_space_relation lr = XRT_SPACE_RELATION_ZERO;
-		int64_t lts;
-		t.slam_rels.get_latest(&lts, &lr);
+		int64_t lts = nts;
+		bool have_previous = t.slam_rels.get_latest(&lts, &lr);
 		xrt_quat lrot = lr.pose.orientation;
 
 		double dt = time_ns_to_s(nts - lts);
@@ -787,7 +820,9 @@ flush_poses(TrackerSlam &t)
 		rel.relation_flags = XRT_SPACE_RELATION_BITMASK_ALL;
 		rel.pose = {nrot, npos};
 		rel.linear_velocity = nvel;
-		math_quat_finite_difference(&lrot, &nrot, dt, &rel.angular_velocity);
+		if (have_previous && dt > 0) {
+			math_quat_finite_difference(&lrot, &nrot, dt, &rel.angular_velocity);
+		}
 
 		// Push to relationship history unless we are debugging prediction
 		if (t.dbg_pred_counter % t.dbg_pred_every == 0) {
@@ -806,6 +841,14 @@ flush_poses(TrackerSlam &t)
 		if (t.features.enabled) {
 			vector feat_count = features_ui_push(t, pose, nts);
 			t.slam_features_writer->push({nts, feat_count});
+			if (!feat_count.empty()) {
+				int total = 0;
+				for (int c : feat_count) {
+					total += c;
+				}
+				t.features.last_total = total;
+				t.features.last_total_ts = nts;
+			}
 		}
 
 		t.vit.pose_destroy(pose);
@@ -972,8 +1015,9 @@ setup_ui(TrackerSlam &t)
 	u_var_button_cb reset_state_cb = [](void *t_ptr) {
 		TrackerSlam &t = *(TrackerSlam *)t_ptr;
 
-		vit_result_t vres = t.vit.tracker_reset(t.tracker);
-		if (vres != VIT_SUCCESS) {
+		std::unique_lock backend_lock(t.backend_mutex);
+		std::lock_guard lock(t.state_mutex);
+		if (t.started && t.vit.tracker_reset(t.tracker) != VIT_SUCCESS) {
 			SLAM_WARN("Failed to reset VIT tracker");
 		}
 	};
@@ -1084,6 +1128,10 @@ add_camera_calibration(const TrackerSlam &t, const t_slam_camera_calibration *ca
 	for (size_t i = 0; i < ARRAY_SIZE(params.transform); ++i)
 		params.transform[i] = T.v[i];
 
+	SLAM_DEBUG("DIAG VIT cam%u %ux%u fx=%f fy=%f cx=%f cy=%f hz=%f", cam_index, params.width,
+	           params.height, params.fx, params.fy, params.cx, params.cy, params.frequency);
+	for (size_t i = 0; i < 16; i++) SLAM_DEBUG("DIAG VIT cam%u T[%zu]=%.9g", cam_index, i, params.transform[i]);
+	for (size_t i = 0; i < params.distortion_count; i++) SLAM_DEBUG("DIAG VIT cam%u d[%zu]=%.9g", cam_index, i, params.distortion[i]);
 	vit_result_t vres = t.vit.tracker_add_camera_calibration(t.tracker, &params);
 	if (vres != VIT_SUCCESS) {
 		SLAM_ERROR("Failed to add camera calibration for camera %u", cam_index);
@@ -1149,6 +1197,146 @@ using namespace xrt::auxiliary::tracking::slam;
  *
  */
 
+extern "C" int
+t_slam_restart(struct xrt_tracked_slam *xts)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	if (!t.backend_recreate) {
+		SLAM_WARN("SLAM_BACKEND_RECREATE is disabled; enable only with a restart-compatible backend");
+		return -1;
+	}
+	std::unique_lock backend_lock(t.backend_mutex);
+	std::lock_guard lock(t.state_mutex);
+	if (t.started && t.vit.tracker_stop(t.tracker) != VIT_SUCCESS) {
+		SLAM_ERROR("Failed to stop VIT session for restart");
+		return -1;
+	}
+	t.started = false;
+	if (t.tracker != nullptr) {
+		t.vit.tracker_destroy(t.tracker);
+		t.tracker = nullptr;
+	}
+
+	/* VIT reset is asynchronous in Basalt and leaves its input queues and
+	 * optical flow alive. Recreate the backend so no pre-gap state can escape. */
+	t.slam_rels.clear();
+	t.last_rel = XRT_SPACE_RELATION_ZERO;
+	t.last_ts = 0;
+	t.last_imu_ts = INT64_MIN;
+	std::fill(t.last_cam_ts.begin(), t.last_cam_ts.end(), INT64_MIN);
+	t.dbg_pred_counter = 0;
+	t.features.last_total = -1;
+	{
+		unique_lock lock(t.last_hand_masks_mutex);
+		t.last_hand_masks = {};
+	}
+	{
+		unique_lock lock(t.last_controller_masks_mutex);
+		t.last_controller_masks = {};
+	}
+	os_mutex_lock(&t.lock_ff);
+	m_ff_vec3_f32_free(&t.gyro_ff);
+	m_ff_vec3_f32_free(&t.accel_ff);
+	m_ff_vec3_f32_alloc(&t.gyro_ff, 1000);
+	m_ff_vec3_f32_alloc(&t.accel_ff, 1000);
+	os_mutex_unlock(&t.lock_ff);
+	m_ff_vec3_f32_free(&t.filter.pos_ff);
+	m_ff_vec3_f32_free(&t.filter.rot_ff);
+	m_ff_vec3_f32_alloc(&t.filter.pos_ff, 1000);
+	m_ff_vec3_f32_alloc(&t.filter.rot_ff, 1000);
+	t.filter.last = XRT_SPACE_RELATION_ZERO;
+	t.filter.target = XRT_SPACE_RELATION_ZERO;
+	m_filter_euro_vec3_init(&t.filter.pos_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
+	m_filter_euro_quat_init(&t.filter.rot_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
+
+	if (t.vit.tracker_create(&t.system_config, &t.tracker) != VIT_SUCCESS) {
+		SLAM_ERROR("Failed to recreate VIT tracker");
+		return -1;
+	}
+	if (t.use_driver_calibration) {
+		send_calibration(t, t.calibration);
+	}
+	if (t.timing.enabled) {
+		t.vit.tracker_enable_extension(t.tracker, VIT_TRACKER_EXTENSION_POSE_TIMING, true);
+	}
+	if (t.features.enabled) {
+		t.vit.tracker_enable_extension(t.tracker, VIT_TRACKER_EXTENSION_POSE_FEATURES, true);
+	}
+	if (t.vit.tracker_start(t.tracker) != VIT_SUCCESS) {
+		SLAM_ERROR("Failed to start replacement VIT tracker");
+		return -1;
+	}
+	t.started = true;
+	SLAM_INFO("VIT session restarted; cleared input queues and prediction history");
+	return 0;
+}
+
+extern "C" int
+t_slam_reset(struct xrt_tracked_slam *xts)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	std::unique_lock backend_lock(t.backend_mutex);
+	std::lock_guard lock(t.state_mutex);
+	if (!t.started || t.vit.tracker_reset(t.tracker) != VIT_SUCCESS) {
+		SLAM_WARN("Failed to reset VIT tracker");
+		return -1;
+	}
+
+	// Forget the poses of the previous map so prediction and filters start from the new one.
+	t.slam_rels.clear();
+	t.last_rel = XRT_SPACE_RELATION_ZERO;
+	t.last_ts = 0;
+	t.filter.last = XRT_SPACE_RELATION_ZERO;
+	t.filter.target = XRT_SPACE_RELATION_ZERO;
+	m_filter_euro_vec3_init(&t.filter.pos_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
+	m_filter_euro_quat_init(&t.filter.rot_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
+	t.features.last_total = -1;
+
+	SLAM_INFO("VIT tracker reset; cleared prediction history");
+	return 0;
+}
+
+extern "C" bool
+t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint_ns *out_ts)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	std::unique_lock lock(t.state_mutex, std::try_to_lock);
+	if (!lock.owns_lock())
+		return false;
+	int count = t.features.last_total;
+	if (count < 0) {
+		return false;
+	}
+	*out_count = count;
+	*out_ts = t.features.last_total_ts;
+	return true;
+}
+
+extern "C" bool
+t_slam_get_latest_sample(struct xrt_tracked_slam *xts,
+                         timepoint_ns when_ns,
+                         timepoint_ns *out_ts,
+                         struct xrt_space_relation *out_relation,
+                         struct xrt_space_relation *out_query_relation)
+{
+	auto &t = *container_of(xts, TrackerSlam, base);
+	*out_relation = XRT_SPACE_RELATION_ZERO;
+	*out_query_relation = XRT_SPACE_RELATION_ZERO;
+	std::shared_lock backend_lock(t.backend_mutex, std::try_to_lock);
+	if (!backend_lock.owns_lock()) {
+		return false;
+	}
+	std::lock_guard lock(t.state_mutex);
+	if (!t.started) {
+		return false;
+	}
+	flush_poses(t);
+	// Keep the configured IMU prediction for display poses. The guard consumes only
+	// the source sample below, so historical camera queries cannot change its cadence.
+	predict_pose(t, when_ns, out_query_relation);
+	return t.slam_rels.get_latest(out_ts, out_relation);
+}
+
 //! Get a filtered prediction from the SLAM tracked poses.
 extern "C" void
 t_slam_get_tracked_pose(struct xrt_tracked_slam *xts, timepoint_ns when_ns, struct xrt_space_relation *out_relation)
@@ -1156,6 +1344,17 @@ t_slam_get_tracked_pose(struct xrt_tracked_slam *xts, timepoint_ns when_ns, stru
 	XRT_TRACE_MARKER();
 
 	auto &t = *container_of(xts, TrackerSlam, base);
+
+	*out_relation = XRT_SPACE_RELATION_ZERO;
+	// Report no pose rather than stall the caller while the backend is being replaced.
+	std::shared_lock backend_lock(t.backend_mutex, std::try_to_lock);
+	if (!backend_lock.owns_lock()) {
+		return;
+	}
+	std::lock_guard lock(t.state_mutex);
+	if (!t.started) {
+		return;
+	}
 
 	//! @todo This should not be cached, the same timestamp can be requested at a
 	//! later time on the frame for a better prediction.
@@ -1227,19 +1426,33 @@ t_slam_receive_imu(struct xrt_imu_sink *sink, struct xrt_imu_sample *s)
 
 	auto &t = *container_of(sink, TrackerSlam, imu_sink);
 
+	std::shared_lock backend_lock(t.backend_mutex, std::try_to_lock);
+	if (!backend_lock.owns_lock() || !t.started) {
+		return;
+	}
+
 	timepoint_ns ts = s->timestamp_ns;
 	xrt_vec3_f64 a = s->accel_m_s2;
 	xrt_vec3_f64 w = s->gyro_rad_secs;
 
 	timepoint_ns now = (timepoint_ns)os_monotonic_get_ns();
 	SLAM_TRACE("[%ld] imu t=%ld  a=[%f,%f,%f] w=[%f,%f,%f]", now, ts, a.x, a.y, a.z, w.x, w.y, w.z);
-	// Check monotonically increasing timestamps
-	if (ts <= t.last_imu_ts) {
-		SLAM_WARN("Sample (%" PRId64 ") is older than last (%" PRId64 ") by %" PRId64 " ns", ts, t.last_imu_ts,
-		          t.last_imu_ts - ts);
-		return;
+	{
+		std::lock_guard lock(t.state_mutex);
+		// Check monotonically increasing timestamps.
+		if (ts <= t.last_imu_ts) {
+			SLAM_WARN("Sample (%" PRId64 ") is older than last (%" PRId64 ") by %" PRId64 " ns", ts,
+			          t.last_imu_ts, t.last_imu_ts - ts);
+			return;
+		}
+		t.last_imu_ts = ts;
+		struct xrt_vec3 gyro = {(float)w.x, (float)w.y, (float)w.z};
+		struct xrt_vec3 accel = {(float)a.x, (float)a.y, (float)a.z};
+		os_mutex_lock(&t.lock_ff);
+		m_ff_vec3_f32_push(t.gyro_ff, &gyro, ts);
+		m_ff_vec3_f32_push(t.accel_ff, &accel, ts);
+		os_mutex_unlock(&t.lock_ff);
 	}
-	t.last_imu_ts = ts;
 
 	//! @todo There are many conversions like these between xrt and
 	//! slam_tracker.hpp types. Implement a casting mechanism to avoid copies.
@@ -1257,13 +1470,6 @@ t_slam_receive_imu(struct xrt_imu_sink *sink, struct xrt_imu_sample *s)
 	}
 
 	xrt_sink_push_imu(t.euroc_recorder->imu, s);
-
-	struct xrt_vec3 gyro = {(float)w.x, (float)w.y, (float)w.z};
-	struct xrt_vec3 accel = {(float)a.x, (float)a.y, (float)a.z};
-	os_mutex_lock(&t.lock_ff);
-	m_ff_vec3_f32_push(t.gyro_ff, &gyro, ts);
-	m_ff_vec3_f32_push(t.accel_ff, &accel, ts);
-	os_mutex_unlock(&t.lock_ff);
 }
 
 //! Push the frame to the external SLAM system
@@ -1272,6 +1478,11 @@ receive_frame(TrackerSlam &t, struct xrt_frame *frame, uint32_t cam_index)
 {
 	XRT_TRACE_MARKER();
 
+	std::shared_lock backend_lock(t.backend_mutex);
+	if (!t.started) {
+		return;
+	}
+
 	SLAM_DASSERT_(frame->timestamp < INT64_MAX);
 
 	// Return early if we don't submit
@@ -1279,21 +1490,21 @@ receive_frame(TrackerSlam &t, struct xrt_frame *frame, uint32_t cam_index)
 		return;
 	}
 
-	if (cam_index == t.cam_count - 1) {
-		flush_poses(t); // Useful to flush SLAM poses when no openxr app is open
-	}
-
-	SLAM_DASSERT(t.last_cam_ts[0] != INT64_MIN || cam_index == 0, "First frame was not a cam0 frame");
-
-	// Check monotonically increasing timestamps
-	timepoint_ns &last_ts = t.last_cam_ts[cam_index];
 	timepoint_ns ts = (int64_t)frame->timestamp;
-	SLAM_TRACE("[%" PRId64 "] cam%d frame t=%" PRId64, os_monotonic_get_ns(), cam_index, ts);
-	if (last_ts >= ts) {
-		SLAM_WARN("Frame (%" PRId64 ") is older than last (%" PRId64 ") by %" PRId64 " ns", ts, last_ts,
-		          last_ts - ts);
+	{
+		std::lock_guard lock(t.state_mutex);
+		if (cam_index == t.cam_count - 1) {
+			flush_poses(t); // Flush even when no app requests poses.
+		}
+		SLAM_DASSERT(t.last_cam_ts[0] != INT64_MIN || cam_index == 0, "First frame was not a cam0 frame");
+		timepoint_ns &last_ts = t.last_cam_ts[cam_index];
+		SLAM_TRACE("[%" PRId64 "] cam%d frame t=%" PRId64, os_monotonic_get_ns(), cam_index, ts);
+		if (last_ts >= ts) {
+			SLAM_WARN("Frame (%" PRId64 ") is older than last (%" PRId64 ") by %" PRId64 " ns", ts, last_ts,
+			          last_ts - ts);
+		}
+		last_ts = ts;
 	}
-	last_ts = ts;
 
 	// Construct and send the image sample
 	vit_img_sample sample = {};
@@ -1382,12 +1593,18 @@ t_slam_node_break_apart(struct xrt_frame_node *node)
 		t_openvr_tracker_stop(t.ovr_tracker);
 	}
 
+	std::unique_lock backend_lock(t.backend_mutex);
+	std::lock_guard lock(t.state_mutex);
+	if (!t.started) {
+		return;
+	}
 	vit_result_t vres = t.vit.tracker_stop(t.tracker);
 	if (vres != VIT_SUCCESS) {
 		SLAM_ERROR("Failed to stop VIT tracker");
 		return;
 	}
 
+	t.started = false;
 	SLAM_DEBUG("SLAM tracker dismantled");
 }
 
@@ -1397,6 +1614,7 @@ t_slam_node_destroy(struct xrt_frame_node *node)
 	auto t_ptr = container_of(node, TrackerSlam, node);
 	auto &t = *t_ptr; // Needed by SLAM_DEBUG
 	SLAM_DEBUG("Destroying SLAM tracker");
+	u_var_remove_root(t_ptr);
 	if (t.ovr_tracker != NULL) {
 		t_openvr_tracker_destroy(t.ovr_tracker);
 	}
@@ -1406,7 +1624,6 @@ t_slam_node_destroy(struct xrt_frame_node *node)
 	delete t.slam_traj_writer;
 	delete t.pred_traj_writer;
 	delete t.filt_traj_writer;
-	u_var_remove_root(t_ptr);
 	for (size_t i = 0; i < t.ui_sink.size(); i++) {
 		u_sink_debug_destroy(&t.ui_sink[i]);
 	}
@@ -1416,8 +1633,15 @@ t_slam_node_destroy(struct xrt_frame_node *node)
 	m_ff_vec3_f32_free(&t.filter.pos_ff);
 	m_ff_vec3_f32_free(&t.filter.rot_ff);
 
-	t_ptr->vit.tracker_destroy(t_ptr->tracker);
-	t_vit_bundle_unload(&t_ptr->vit);
+	{
+		std::unique_lock backend_lock(t.backend_mutex);
+		std::lock_guard lock(t.state_mutex);
+		if (t.tracker != nullptr) {
+			t.vit.tracker_destroy(t.tracker);
+			t.tracker = nullptr;
+		}
+		t_vit_bundle_unload(&t.vit);
+	}
 
 	delete t_ptr;
 }
@@ -1426,12 +1650,14 @@ extern "C" int
 t_slam_start(struct xrt_tracked_slam *xts)
 {
 	auto &t = *container_of(xts, TrackerSlam, base);
+	std::unique_lock backend_lock(t.backend_mutex);
 	vit_result_t vres = t.vit.tracker_start(t.tracker);
 	if (vres != VIT_SUCCESS) {
 		SLAM_ERROR("Failed to start VIT tracker");
 		return -1;
 	}
 
+	t.started = true;
 	SLAM_DEBUG("SLAM tracker started");
 	return 0;
 }
@@ -1480,6 +1706,12 @@ t_slam_create(struct xrt_frame_context *xfctx,
 		return -1;
 	}
 
+	t.backend_recreate = debug_get_option_slam_backend_recreate_override() != nullptr
+	                         ? debug_get_bool_option_slam_backend_recreate()
+	                         : t.vit.tracker_supports_safe_recreation && t.vit.tracker_supports_safe_recreation();
+	SLAM_INFO("Backend recreation enabled=%d advertised_safe=%d", t.backend_recreate,
+	          t.vit.tracker_supports_safe_recreation != nullptr);
+
 	// Check the user has provided a SLAM_CONFIG file
 	const char *config_file = config->slam_config;
 	bool some_calib = config->slam_calib != nullptr;
@@ -1506,6 +1738,12 @@ t_slam_create(struct xrt_frame_context *xfctx,
 	}
 
 	t.base.get_tracked_pose = t_slam_get_tracked_pose;
+	t.base.restart = t_slam_restart;
+	t.system_config = system_config;
+	t.use_driver_calibration = !config_file;
+	if (t.use_driver_calibration) {
+		t.calibration = *config->slam_calib;
+	}
 
 	if (!config_file) {
 		SLAM_INFO("Using calibration from driver and default pipeline settings");
@@ -1541,7 +1779,8 @@ t_slam_create(struct xrt_frame_context *xfctx,
 
 	xrt_frame_context_add(xfctx, &t.node);
 
-	t.euroc_recorder = euroc_recorder_create(xfctx, NULL, t.cam_count, false);
+	t.euroc_recorder = euroc_recorder_create(xfctx, debug_get_option_slam_record_path(), t.cam_count,
+	                                         debug_get_option_slam_record_path() != nullptr);
 
 	t.last_imu_ts = INT64_MIN;
 	t.last_cam_ts = vector<timepoint_ns>(t.cam_count, INT64_MIN);
@@ -1565,6 +1804,20 @@ t_slam_create(struct xrt_frame_context *xfctx,
 	t.filt_traj_writer = new TrajectoryWriter(dir, "filtering.csv", write_csvs);
 
 	setup_ui(t);
+	t.slam_times_writer->set_columns(t.timing.columns);
+	if (config->timing_stat && t.exts.has_pose_timing &&
+	    t.vit.tracker_enable_extension(t.tracker, VIT_TRACKER_EXTENSION_POSE_TIMING, true) == VIT_SUCCESS) {
+		t.timing.enabled = true;
+		snprintf(t.timing.enable_btn.label, sizeof(t.timing.enable_btn.label), "%s", "[ON] Disable timing");
+	}
+
+	// Feature counts let drivers notice cameras that see nothing (headset face down or covered).
+	if (config->features_stat && t.exts.has_pose_features &&
+	    t.vit.tracker_enable_extension(t.tracker, VIT_TRACKER_EXTENSION_POSE_FEATURES, true) == VIT_SUCCESS) {
+		t.features.enabled = true;
+		snprintf(t.features.enable_btn.label, sizeof(t.features.enable_btn.label), "%s",
+		         "[ON] Disable features info");
+	}
 
 	// Setup OpenVR groundtruth tracker
 	if (config->openvr_groundtruth_device > 0) {

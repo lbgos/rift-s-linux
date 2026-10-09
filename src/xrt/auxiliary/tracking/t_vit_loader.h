@@ -33,6 +33,8 @@ struct t_vit_bundle
 	} version;
 
 	PFN_vit_api_get_version api_get_version;
+	// Optional private capability: all workers/queue users are joined by stop.
+	bool (*tracker_supports_safe_recreation)(void);
 	PFN_vit_tracker_create tracker_create;
 	PFN_vit_tracker_destroy tracker_destroy;
 	PFN_vit_tracker_has_image_format tracker_has_image_format;

@@ -45,6 +45,55 @@
 #define RIFT_S_FINGER_STICK_WEAK 0x40
 #define RIFT_S_FINGER_TRIGGER_WEAK 0x80
 
+#define RIFT_S_CONTROLLER_IMU_DESCRIPTOR_SIZE 16
+
+typedef struct
+{
+	uint16_t accel_limit;
+	uint16_t gyro_limit;
+	uint16_t accel_hz;
+	uint16_t gyro_hz;
+	float accel_scale;
+	float gyro_scale;
+} rift_s_controller_config;
+
+/* Radio callback bytes: LE32 status, u8 payload length, then register data.
+ * 0x32 is four LE16 limits/rates and two LE float scales; 0x31 is a 16-byte ASCII name. */
+bool
+rift_s_decode_controller_config(const uint8_t *response, size_t size, rift_s_controller_config *out);
+bool
+rift_s_decode_controller_imu_descriptor(const uint8_t *response,
+                                      size_t size,
+                                      char out[RIFT_S_CONTROLLER_IMU_DESCRIPTOR_SIZE + 1]);
+
+/* Controller IR LED timing, register 0x28: LE32 period_us, LE32 ontime_us.
+ * The Windows driver reads it, keeps ontime_us (19 if the read fails), sets
+ * period_us = 1000000 / controller exposure rate (25 or 30 Hz) and writes it back.
+ * Windows logs "updated ontime_us/period_us to 19/40000" for both hands. */
+#define RIFT_S_CONTROLLER_REG_IRLED 0x28
+#define RIFT_S_CONTROLLER_IRLED_DEFAULT_ONTIME_US 19
+#define RIFT_S_RADIO_REPORT_READ 0x12
+#define RIFT_S_RADIO_REPORT_WRITE 0x13
+#define RIFT_S_RADIO_TIMEOUT_MS 1000
+
+typedef struct
+{
+	uint32_t period_us;
+	uint32_t ontime_us;
+} rift_s_controller_irled_config;
+
+/* Request bytes after the device id for report 0x12 (read) or 0x13 (write), as the Windows
+ * driver builds them: register, payload length, LE16 timeout ms, payload. */
+size_t
+rift_s_encode_controller_irled_read(uint8_t out[4]);
+size_t
+rift_s_encode_controller_irled_write(const rift_s_controller_irled_config *cfg, uint8_t out[12]);
+bool
+rift_s_decode_controller_irled_config(const uint8_t *response, size_t size, rift_s_controller_irled_config *out);
+//! A write reply only carries the LE32 status, 0 on success.
+bool
+rift_s_controller_write_succeeded(const uint8_t *response, size_t size, uint32_t *status_out);
+
 typedef enum
 {
 	RIFT_S_CTRL_MASK08 = 0x08,   /* Unknown. Vals seen 0x28, 0x0a, 0x32, 0x46, 0x00... */

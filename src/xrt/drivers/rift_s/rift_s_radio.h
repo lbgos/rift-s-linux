@@ -60,6 +60,15 @@ rift_s_radio_queue_command(rift_s_radio_state *state,
                            const int cmd_bytes_len,
                            rift_s_radio_completion_fn cb,
                            void *cb_data);
+//! Like rift_s_radio_queue_command, but sent with an explicit report id (0x13 writes a register).
+void
+rift_s_radio_queue_report(rift_s_radio_state *state,
+                          uint8_t report_id,
+                          const uint64_t device_id,
+                          const uint8_t *cmd_bytes,
+                          const int cmd_bytes_len,
+                          rift_s_radio_completion_fn cb,
+                          void *cb_data);
 void
 rift_s_radio_get_json_block(rift_s_radio_state *state,
                             const uint64_t device_id,

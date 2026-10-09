@@ -699,6 +699,28 @@ t_slam_create(struct xrt_frame_context *xfctx,
 int
 t_slam_start(struct xrt_tracked_slam *xts);
 
+/*!
+ * Re-initialise the SLAM system and drop the poses of the previous map.
+ *
+ * @public @memberof xrt_tracked_slam
+ */
+int
+t_slam_reset(struct xrt_tracked_slam *xts);
+
+/*!
+ * Features tracked over all cameras in the latest SLAM pose. Returns false while unknown (the
+ * backend has no feature extension, or no pose since the last reset).
+ *
+ * @public @memberof xrt_tracked_slam
+ */
+bool
+t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint_ns *out_ts);
+
+//! Read source and prediction under one backend/history lock. Guard only the source timestamp.
+bool
+t_slam_get_latest_sample(struct xrt_tracked_slam *xts, timepoint_ns when_ns, timepoint_ns *out_ts,
+                         struct xrt_space_relation *out_relation, struct xrt_space_relation *out_query_relation);
+
 /*
  *
  * Camera calibration

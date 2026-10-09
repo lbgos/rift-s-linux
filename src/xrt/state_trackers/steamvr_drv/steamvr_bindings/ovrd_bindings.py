@@ -28,7 +28,7 @@ def ovrd_generate_bindings_c(file, b):
         hw_name = str(profile.name.split("/")[-1])
         vendor_name = str(profile.name.split("/")[-2])
         fname = vendor_name + "_" + hw_name + "_profile.json"
-        controller_type = "monado_" + vendor_name + "_" + hw_name
+        controller_type = profile.steamvr_controller_type or "monado_" + vendor_name + "_" + hw_name
 
         binding_count = len(profile.components)
         wl(f,
@@ -47,7 +47,7 @@ def ovrd_generate_bindings_c(file, b):
 
             # @todo Doesn't handle pose yet.
             steamvr_path = component.steamvr_path
-            if component.component_name in ["click", "touch", "force", "value", "proximity"]:
+            if component.component_name in ["click", "touch", "force", "value", "proximity", "proximity_fb"]:
                 steamvr_path += "/" + component.component_name
 
             wl(f,

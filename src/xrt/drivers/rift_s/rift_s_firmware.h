@@ -109,8 +109,20 @@ struct rift_s_lensing_model
 	float points[4];
 };
 
+/* Factory TrackedObject AccCalibration/GyroCalibration: a row-major 3x3 matrix (0..8)
+ * and sensor-space bias (9..11), applied as matrix * (sample - bias).
+ * Acceleration is in m/s^2 and angular velocity in rad/s before this transform. */
+struct rift_s_tracked_imu_calibration
+{
+	struct xrt_matrix_3x3 matrix;
+	struct xrt_vec3 offset;
+	//! Numbers in the firmware array; the parser requires exactly 12.
+	unsigned num_values;
+};
+
 struct rift_s_controller_imu_calibration
 {
+	//! Legacy top-level calibration retained for comparison with TrackedObject.
 	struct
 	{
 		struct xrt_matrix_3x3 rectification;
@@ -128,12 +140,7 @@ struct rift_s_controller_imu_calibration
 	uint8_t num_leds;
 	struct rift_s_led *leds;
 
-	/* For some reason we have a separate calibration
-	 * 4x4 matrix on top of the separate rectification
-	 * and offset for gyro and accel
-	 */
-	struct xrt_matrix_4x4 gyro_calibration;
-	struct xrt_matrix_4x4 accel_calibration;
+	struct rift_s_tracked_imu_calibration gyro_calibration, accel_calibration;
 
 	/* Lensing models */
 	int num_lensing_models;
@@ -143,11 +150,18 @@ struct rift_s_controller_imu_calibration
 int
 rift_s_parse_proximity_threshold(char *json, int *proximity_threshold);
 int
+rift_s_parse_lens_centers(char *json, struct xrt_vec2 centers[2]);
+int
 rift_s_parse_imu_calibration(char *json, struct rift_s_imu_calibration *c);
 int
 rift_s_parse_camera_calibration_block(char *json, struct rift_s_camera_calibration_block *c);
 int
 rift_s_controller_parse_imu_calibration(char *json, struct rift_s_controller_imu_calibration *c);
+/* Derive an effective gyro calibration from the unchanged factory values.
+ * The Windows tracker scales both matrix and bias for exactly "LSM6DSL". */
+struct rift_s_tracked_imu_calibration
+rift_s_controller_gyro_calibration_for_imu(const struct rift_s_tracked_imu_calibration *factory,
+                                         const char *descriptor);
 void
 rift_s_controller_free_imu_calibration(struct rift_s_controller_imu_calibration *c);
 

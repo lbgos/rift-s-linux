@@ -17,6 +17,10 @@
 #include "camera_model.h"
 #include "pose_metrics.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define MAX_BLOB_SEARCH_DEPTH 5
 
 enum correspondence_search_flags
@@ -29,7 +33,8 @@ enum correspondence_search_flags
 	CS_FLAG_MATCH_ALL_BLOBS =
 	    0x8, /* Allow matching against all blobs, not just unlabelled ones or for the current device */
 	CS_FLAG_HAVE_POSE_PRIOR = 0x10, /* If the input obj_cam_pose contains a valid prior */
-	CS_FLAG_MATCH_GRAVITY = 0x20,   /* Use the provided gravity vector to check pose verticality */
+	CS_FLAG_MATCH_GRAVITY = 0x20,   /* Use pose orientation and gravity even without a position prior. */
+	CS_FLAG_JOINT_P3P = 0x40, /* Callback verifies three-point roots across the complete camera rig. */
 };
 
 struct cs_image_point
@@ -76,7 +81,6 @@ struct cs_model_info
 
 	/* Used when CS_FLAG_MATCH_GRAVITY is set */
 	struct xrt_vec3 gravity_vector;
-	struct xrt_quat gravity_swing;
 	float gravity_tolerance_rad;
 };
 
@@ -85,9 +89,22 @@ struct correspondence_search
 	int num_points;
 	struct cs_image_point *points;
 	struct blob *blobs; /* Original blobs structs [num_points] */
+	//! Optional same-exposure ownership mask, indexed like blobs. Null searches all observations.
+	const bool *excluded_blobs;
+
+	//! Optional elapsed-time budget per search, zero preserves the caller default.
+	uint64_t max_search_ns;
+	uint64_t search_deadline_ns;
+	bool budget_exhausted;
+
+	//! Called for each geometry-verified candidate, before selecting a per-view winner.
+	void (*pose_candidate_cb)(void *userdata, const struct xrt_pose *pose, const struct pose_metrics *score);
+	void *pose_candidate_userdata;
 
 	unsigned int num_trials;
 	unsigned int num_pose_checks;
+	unsigned int num_gravity_rejects;
+	unsigned int num_metric_checks;
 
 	struct camera_model *calib;
 
@@ -118,3 +135,7 @@ correspondence_search_have_pose(struct correspondence_search *cs,
                                 int model_id,
                                 struct xrt_pose *pose,
                                 struct pose_metrics *score);
+
+#ifdef __cplusplus
+}
+#endif

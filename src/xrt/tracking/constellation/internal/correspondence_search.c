@@ -106,12 +106,14 @@ correspondence_search_new(struct camera_model *camera_calib)
 static int
 compare_blobs_distance(const void *elem1, const void *elem2, void *arg);
 
-static void
+static bool
 undistort_blob_points(struct blob *blobs, int num_blobs, struct xrt_vec2 *out_points, struct camera_model *calib)
 {
 	for (int i = 0; i < num_blobs; i++) {
-		t_camera_models_undistort(&calib->calib, blobs[i].x, blobs[i].y, &out_points[i].x, &out_points[i].y);
+		if (!camera_model_undistort(calib, blobs[i].x, blobs[i].y, &out_points[i].x, &out_points[i].y))
+			return false;
 	}
+	return true;
 }
 
 #if CHECK_ALL_PROJECTIONS
@@ -123,7 +125,7 @@ project_led_point(struct xrt_vec3 *led_pos,
 {
 	struct xrt_vec3 tmp;
 	math_pose_transform_point(pose, led_pos, &tmp);
-	t_camera_models_project(&calib->calib, tmp.x, tmp.y, tmp.z, &out_point->x, &out_point->y);
+	camera_model_project(calib, tmp.x, tmp.y, tmp.z, &out_point->x, &out_point->y);
 }
 #endif
 
@@ -144,7 +146,10 @@ correspondence_search_set_blobs(struct correspondence_search *cs, struct blob *b
 	cs->blobs = blobs;
 
 	/* Undistort points so we can project / match properly */
-	undistort_blob_points(blobs, num_blobs, undistorted_points, cs->calib);
+	if (!undistort_blob_points(blobs, num_blobs, undistorted_points, cs->calib)) {
+		cs->num_points = 0;
+		return;
+	}
 
 #if DUMP_BLOBS
 	printf("Building blobs search array\n");
@@ -276,27 +281,16 @@ correspondence_search_project_pose(struct correspondence_search *cs,
 
 	/* See if we need to make a gravity vector alignment check */
 	if (mi->search_flags & CS_FLAG_MATCH_GRAVITY) {
-		struct xrt_quat pose_gravity_swing, pose_gravity_twist;
-
-		math_quat_decompose_swing_twist(&pose->orientation, &mi->gravity_vector, &pose_gravity_swing,
-		                                &pose_gravity_twist);
-
-		// Calculate the difference between the amount of gravity swing, ignoring axis
-		float pose_angle = fabs(acosf(pose_gravity_swing.w)) - fabs(acosf(mi->gravity_swing.w));
-		if (pose_angle > mi->gravity_tolerance_rad) {
-			DEBUG(
-			    "model %d failed pose match - orientation was not within tolerance (error %f deg > %f "
-			    "deg)\n"
-			    "gravity vec %f %f %f pose %f %f %f %f swing %f %f %f %f prior swing %f %f %f %f\n",
-			    mi->id, RAD_TO_DEG(pose_angle), RAD_TO_DEG(mi->gravity_tolerance_rad), mi->gravity_vector.x,
-			    mi->gravity_vector.y, mi->gravity_vector.z, pose->orientation.x, pose->orientation.y,
-			    pose->orientation.z, pose->orientation.w, pose_gravity_swing.x, pose_gravity_swing.y,
-			    pose_gravity_swing.z, pose_gravity_swing.w, mi->gravity_swing.x, mi->gravity_swing.y,
-			    mi->gravity_swing.z, mi->gravity_swing.w);
+		float pose_angle = pose_metrics_gravity_error(pose, &mi->pose_prior, &mi->gravity_vector);
+		if (!isfinite(pose_angle) || pose_angle > mi->gravity_tolerance_rad) {
+			cs->num_gravity_rejects++;
+			DEBUG("model %d failed gravity match (error %f deg > %f deg)\n", mi->id, RAD_TO_DEG(pose_angle),
+			      RAD_TO_DEG(mi->gravity_tolerance_rad));
 			return false;
 		}
 	}
 
+	cs->num_metric_checks++;
 	struct pose_metrics score;
 
 	/* Check how many LEDs have matching blobs in this pose,
@@ -311,8 +305,24 @@ correspondence_search_project_pose(struct correspondence_search *cs,
 		pose_metrics_evaluate_pose(&score, pose, cs->blobs, cs->num_points, leds, cs->calib, NULL);
 	}
 
+	/* A gravity prior constrains tilt even before the first positional lock. Some
+	 * controller rings expose fewer than seven LEDs, so use their requested
+	 * acquisition minimum only with a tight, mostly complete geometric match.
+	 * This remains a weak match: keep searching for a stronger candidate. */
+	if ((mi->search_flags & CS_FLAG_MATCH_GRAVITY) && pose_metrics_can_acquire_with_gravity(&score, leds)) {
+		score.match_flags |= POSE_MATCH_GOOD;
+	}
+	if ((mi->search_flags & CS_FLAG_JOINT_P3P) && cs->pose_candidate_cb != NULL) {
+		// The rig verifier requires a fourth observation and checks ambiguity itself.
+		// A single view's acquisition count must not hide a valid split-camera root.
+		cs->pose_candidate_cb(cs->pose_candidate_userdata, pose, &score);
+	}
+
 	/* If this pose is any good, test it further */
 	if (POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD)) {
+		if (cs->pose_candidate_cb != NULL && !(mi->search_flags & CS_FLAG_JOINT_P3P)) {
+			cs->pose_candidate_cb(cs->pose_candidate_userdata, pose, &score);
+		}
 		if (pose_metrics_score_is_better_pose(&mi->best_score, &score)) {
 			mi->best_score = score;
 			mi->best_pose = *pose;
@@ -413,6 +423,15 @@ quat_from_rotation_matrix(struct xrt_quat *me, double R[9])
 	}
 }
 
+static bool
+search_budget_expired(struct correspondence_search *cs)
+{
+	if (cs->search_deadline_ns != 0 && (uint64_t)os_monotonic_get_ns() >= cs->search_deadline_ns) {
+		cs->budget_exhausted = true;
+	}
+	return cs->budget_exhausted;
+}
+
 static void
 check_led_against_model_subset(struct correspondence_search *cs,
                                struct cs_model_info *mi,
@@ -420,6 +439,10 @@ check_led_against_model_subset(struct correspondence_search *cs,
                                struct t_constellation_led *model_leds[4],
                                int depth)
 {
+	if (search_budget_expired(cs)) {
+		return;
+	}
+
 	struct t_constellation_search_model *model = mi->model;
 	double x[3][3];
 	struct xrt_vec3 *xcheck;
@@ -438,7 +461,6 @@ check_led_against_model_subset(struct correspondence_search *cs,
 		x[i][1] = model_leds[i]->pos.y;
 		x[i][2] = model_leds[i]->pos.z;
 	}
-	xcheck = &model_leds[3]->pos;
 
 	/* FIXME: It would be better if this spat out quaternions,
 	 * then we wouldn't need to convert below */
@@ -536,8 +558,13 @@ check_led_against_model_subset(struct correspondence_search *cs,
 		if (checks_failed) {
 			continue;
 		}
+		if (mi->search_flags & CS_FLAG_JOINT_P3P) {
+			correspondence_search_project_pose(cs, model, &pose, mi, depth);
+			continue;
+		}
 
 		/* check against the 4th point to check the proposed P3P solution */
+		xcheck = &model_leds[3]->pos;
 		math_quat_rotate_vec3(&pose.orientation, xcheck, &checkpos);
 		math_vec3_accum(&pose.position, &checkpos);
 		math_vec3_scalar_mul(1.0 / checkpos.z, &checkpos);
@@ -600,6 +627,10 @@ select_k_blobs_from_n(struct correspondence_search *cs,
                       int n,
                       int depth)
 {
+	if (search_budget_expired(cs)) {
+		return;
+	}
+
 	if (k == 1) {
 		output_list[0] = candidate_list[0];
 		check_led_against_model_subset(cs, mi, result_list, model_leds, depth);
@@ -645,14 +676,15 @@ check_leds_against_anchor(struct correspondence_search *cs,
                           struct t_constellation_led **model_leds,
                           struct cs_image_point *anchor)
 {
-	struct cs_image_point *work_list[MAX_BLOB_SEARCH_DEPTH + 1];
+	struct cs_image_point *work_list[MAX_BLOB_SEARCH_DEPTH + 1] = {0};
 	int max_blob_search_depth = MIN(anchor->num_neighbours, mi->max_blob_depth);
+	int neighbours = (mi->search_flags & CS_FLAG_JOINT_P3P) ? 2 : 3;
 
-	if (max_blob_search_depth < 3)
+	if (max_blob_search_depth < neighbours)
 		return; // Not enough blobs to compare against
 
 	work_list[0] = anchor;
-	select_k_blobs_from_n(cs, mi, model_leds, work_list, work_list + 1, anchor->neighbours, 3,
+	select_k_blobs_from_n(cs, mi, model_leds, work_list, work_list + 1, anchor->neighbours, neighbours,
 	                      max_blob_search_depth, 1);
 }
 
@@ -663,6 +695,10 @@ check_led_match(struct correspondence_search *cs,
                 struct t_constellation_led **model_leds,
                 int depth)
 {
+	if (search_budget_expired(cs)) {
+		return;
+	}
+
 	int b;
 
 	mi->led_depth = depth;
@@ -686,6 +722,10 @@ select_k_leds_from_n(struct correspondence_search *cs,
                      int n,
                      int depth)
 {
+	if (search_budget_expired(cs)) {
+		return;
+	}
+
 	if (k == 1) {
 		struct t_constellation_led *swap_list[4];
 
@@ -744,14 +784,15 @@ generate_led_match_candidates(struct correspondence_search *cs,
                               struct cs_model_info *mi,
                               struct t_constellation_search_led_candidate *c)
 {
-	struct t_constellation_led *work_list[MAX_LED_SEARCH_DEPTH + 1];
+	struct t_constellation_led *work_list[MAX_LED_SEARCH_DEPTH + 1] = {0};
 
 	int max_search_depth = MIN(mi->max_led_depth, c->num_neighbours) - mi->min_led_depth + 1;
-	if (max_search_depth < 3)
+	int neighbours = (mi->search_flags & CS_FLAG_JOINT_P3P) ? 2 : 3;
+	if (max_search_depth < neighbours)
 		return; // Not enough LEDs to compare against
 
 	work_list[0] = c->led;
-	select_k_leds_from_n(cs, mi, work_list, work_list + 1, c->neighbours + mi->min_led_depth - 1, 3,
+	select_k_leds_from_n(cs, mi, work_list, work_list + 1, c->neighbours + mi->min_led_depth - 1, neighbours,
 	                     max_search_depth, mi->min_led_depth);
 }
 
@@ -766,7 +807,9 @@ search_pose_for_model(struct correspondence_search *cs, struct cs_model_info *mi
 	mi->match_flags = 0;
 
 	/* Clear stats */
-	cs->num_trials = cs->num_pose_checks = 0;
+	cs->budget_exhausted = false;
+	cs->search_deadline_ns = cs->max_search_ns ? os_monotonic_get_ns() + cs->max_search_ns : 0;
+	cs->num_trials = cs->num_pose_checks = cs->num_gravity_rejects = cs->num_metric_checks = 0;
 
 	/* Configure search params from the flags */
 	if (mi->search_flags & CS_FLAG_SHALLOW_SEARCH) {
@@ -796,13 +839,15 @@ search_pose_for_model(struct correspondence_search *cs, struct cs_model_info *mi
 		int out_index = 0, in_index;
 		uint16_t led_id = anchor->blob->led_id;
 
-		if ((mi->search_flags & CS_FLAG_MATCH_ALL_BLOBS) || led_id == LED_INVALID_ID ||
-		    LED_OBJECT_ID(led_id) == mi->id) {
+		if ((!cs->excluded_blobs || !cs->excluded_blobs[b]) &&
+		    ((mi->search_flags & CS_FLAG_MATCH_ALL_BLOBS) || led_id == LED_INVALID_ID ||
+		     LED_OBJECT_ID(led_id) == mi->id)) {
 			for (in_index = 0; in_index < cs->num_points && out_index < MAX_BLOB_SEARCH_DEPTH; in_index++) {
 				struct cs_image_point *p = all_neighbours[in_index];
 
 				/* Don't include the blob in its own neighbours */
-				if (anchor->blob == p->blob)
+				if (anchor->blob == p->blob ||
+				    (cs->excluded_blobs && cs->excluded_blobs[p->blob - cs->blobs]))
 					continue;
 
 				led_id = p->blob->led_id;
@@ -828,7 +873,7 @@ search_pose_for_model(struct correspondence_search *cs, struct cs_model_info *mi
 
 	/* Start correspondence search for this model */
 	/* At this stage, each image point has a list of the nearest neighbours filtered for this model */
-	for (l = 0; l < model->num_points; l++) {
+	for (l = 0; l < model->num_points && !search_budget_expired(cs); l++) {
 		struct t_constellation_search_led_candidate *c = model->points[l];
 		mi->led_index = l;
 
@@ -862,7 +907,7 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
 	if ((search_flags & (CS_FLAG_SHALLOW_SEARCH | CS_FLAG_DEEP_SEARCH)) == 0)
 		search_flags |= CS_FLAG_SHALLOW_SEARCH | CS_FLAG_DEEP_SEARCH;
 
-	struct cs_model_info mi;
+	struct cs_model_info mi = {0};
 
 	mi.id = model->id;
 	mi.model = model;
@@ -879,17 +924,13 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
 	}
 
 	if (search_flags & CS_FLAG_MATCH_GRAVITY) {
-		struct xrt_quat pose_gravity_twist;
-
-		/* We need a pose prior to extract the gravity swing to match */
-		assert((search_flags & CS_FLAG_HAVE_POSE_PRIOR) != 0);
+		/* Cold acquisition knows tilt before position. Keep the supplied orientation
+		 * without enabling the positional/heading scoring of HAVE_POSE_PRIOR. */
 		assert(gravity_vector != NULL);
-
+		mi.pose_prior.orientation = pose->orientation;
 		mi.gravity_vector = *gravity_vector;
 		mi.gravity_tolerance_rad = gravity_tolerance_rad;
 
-		math_quat_decompose_swing_twist(&pose->orientation, gravity_vector, &mi.gravity_swing,
-		                                &pose_gravity_twist);
 	}
 
 	if (search_pose_for_model(cs, &mi) && (mi.match_flags & POSE_MATCH_GOOD)) {
@@ -909,7 +950,6 @@ correspondence_search_find_one_pose(struct correspondence_search *cs,
 		return true;
 	}
 
-	*pose = mi.best_pose;
 	*score = mi.best_score;
 	return false;
 }

@@ -1,0 +1,13 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_MONADO_roomsetup",
+        "type": "GLOBAL",
+        "library_path": "@ROOMSETUP_LAYER_LIBRARY@",
+        "library_arch": "64",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "Monado SteamVR room setup SDF storage compatibility",
+        "disable_environment": {"MONADO_DISABLE_ROOMSETUP_COMPAT": "1"}
+    }
+}

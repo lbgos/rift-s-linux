@@ -20,6 +20,11 @@
 extern "C" {
 #endif
 
+// Apply optical yaw around world Y, preserving the IMU's gravity alignment.
+// Returns the applied angle in radians. Large discrepancies are corrected by 10%.
+float
+rift_s_apply_optical_yaw(struct xrt_quat *imu_orientation, const struct xrt_quat *optical_orientation);
+
 struct t_camera_calibration
 rift_s_get_cam_calib(struct rift_s_camera_calibration_block *camera_calibration, enum rift_s_camera_id cam_id);
 

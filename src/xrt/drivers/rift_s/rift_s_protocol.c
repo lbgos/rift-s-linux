@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "os/os_hid.h"
 #include "os/os_time.h"
@@ -33,6 +34,116 @@
 
 #include "rift_s.h"
 #include "rift_s_protocol.h"
+
+static bool
+controller_register_response_valid(const uint8_t *response, size_t size)
+{
+	return response != NULL && size >= 21 && response[0] == 0 && response[1] == 0 && response[2] == 0 &&
+	       response[3] == 0 && response[4] >= 16 && response[4] <= 32 && size >= 5u + response[4];
+}
+
+bool
+rift_s_decode_controller_config(const uint8_t *response, size_t size, rift_s_controller_config *out)
+{
+	if (!controller_register_response_valid(response, size))
+		return false;
+	const uint8_t *data = response + 5;
+	rift_s_controller_config config = {0};
+	config.accel_limit = (uint16_t)data[0] | (uint16_t)data[1] << 8;
+	config.gyro_limit = (uint16_t)data[2] | (uint16_t)data[3] << 8;
+	config.accel_hz = (uint16_t)data[4] | (uint16_t)data[5] << 8;
+	config.gyro_hz = (uint16_t)data[6] | (uint16_t)data[7] << 8;
+	uint32_t accel_bits = (uint32_t)data[8] | (uint32_t)data[9] << 8 | (uint32_t)data[10] << 16 |
+	                      (uint32_t)data[11] << 24;
+	uint32_t gyro_bits = (uint32_t)data[12] | (uint32_t)data[13] << 8 | (uint32_t)data[14] << 16 |
+	                     (uint32_t)data[15] << 24;
+	memcpy(&config.accel_scale, &accel_bits, sizeof(accel_bits));
+	memcpy(&config.gyro_scale, &gyro_bits, sizeof(gyro_bits));
+	if (!isfinite(config.accel_scale) || config.accel_scale <= 0 || !isfinite(config.gyro_scale) ||
+	    config.gyro_scale <= 0)
+		return false;
+	*out = config;
+	return true;
+}
+
+bool
+rift_s_decode_controller_imu_descriptor(const uint8_t *response,
+                                      size_t size,
+                                      char out[RIFT_S_CONTROLLER_IMU_DESCRIPTOR_SIZE + 1])
+{
+	if (!controller_register_response_valid(response, size) || response[4] != 16)
+		return false;
+	const uint8_t *data = response + 5;
+	size_t len = 0;
+	while (len < RIFT_S_CONTROLLER_IMU_DESCRIPTOR_SIZE && data[len] != 0) {
+		if (data[len] < 0x20 || data[len] > 0x7e)
+			return false;
+		len++;
+	}
+	if (len == 0)
+		return false;
+	memcpy(out, data, len);
+	out[len] = '\0';
+	return true;
+}
+
+static uint32_t
+read_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void
+write_le32(uint8_t *p, uint32_t v)
+{
+	p[0] = v & 0xff;
+	p[1] = (v >> 8) & 0xff;
+	p[2] = (v >> 16) & 0xff;
+	p[3] = (v >> 24) & 0xff;
+}
+
+size_t
+rift_s_encode_controller_irled_read(uint8_t out[4])
+{
+	// The register read passes a zero payload length, as the Windows driver does.
+	out[0] = RIFT_S_CONTROLLER_REG_IRLED;
+	out[1] = 0;
+	out[2] = RIFT_S_RADIO_TIMEOUT_MS & 0xff;
+	out[3] = RIFT_S_RADIO_TIMEOUT_MS >> 8;
+	return 4;
+}
+
+size_t
+rift_s_encode_controller_irled_write(const rift_s_controller_irled_config *cfg, uint8_t out[12])
+{
+	out[0] = RIFT_S_CONTROLLER_REG_IRLED;
+	out[1] = 8;
+	out[2] = RIFT_S_RADIO_TIMEOUT_MS & 0xff;
+	out[3] = RIFT_S_RADIO_TIMEOUT_MS >> 8;
+	write_le32(out + 4, cfg->period_us);
+	write_le32(out + 8, cfg->ontime_us);
+	return 12;
+}
+
+bool
+rift_s_decode_controller_irled_config(const uint8_t *response, size_t size, rift_s_controller_irled_config *out)
+{
+	// Status 0, then a length of at least 8 and that many bytes.
+	if (response == NULL || size < 13 || read_le32(response) != 0 || response[4] < 8 || size < 5u + response[4])
+		return false;
+	out->period_us = read_le32(response + 5);
+	out->ontime_us = read_le32(response + 9);
+	return true;
+}
+
+bool
+rift_s_controller_write_succeeded(const uint8_t *response, size_t size, uint32_t *status_out)
+{
+	if (response == NULL || size < 4)
+		return false;
+	*status_out = read_le32(response);
+	return *status_out == 0;
+}
 
 /* FIXME: The code in this file is not portable to big-endian as-is - it needs endian swaps */
 bool
