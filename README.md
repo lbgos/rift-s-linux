@@ -6,7 +6,7 @@ This is a fork of thaytan's Monado Rift S branch, `dev-constellation-controller-
 
 ## Status
 
-Early project. It already works and is usable in SteamVR with the headset and both controllers. Good changes will keep landing here.
+Rift S head and Touch controller tracking run inside the SteamVR driver. Saved-room recovery and controller behavior still need physical validation on each release.
 
 Known rough edges:
 
@@ -35,11 +35,11 @@ ninja -C build
 sudo ninja -C build install
 ```
 
-The install puts the SteamVR driver in `/usr/local/share/steamvr-monado`. Register it with SteamVR and start SteamVR with the headset plugged in.
+The install puts the SteamVR driver in `/usr/local/share/steamvr-monado`. It installs a user session service that registers the driver with SteamVR's `vrpathreg`. Registration also works when SteamVR is installed later and when its library is on another drive. Other registered drivers and Steam settings are preserved. The installer applies `cap_sys_nice` to `monado-service` for standalone Monado use.
 
-```
-~/.local/share/Steam/steamapps/common/SteamVR/bin/vrpathreg.sh adddriver /usr/local/share/steamvr-monado
-```
+Install SteamVR from the Steam library, connect the Rift S, open Steam normally, and launch SteamVR. The SteamVR driver uses Monado in-process; a separate running `monado-service` is unnecessary. Driver and native Room Setup support are enabled by default. The driver's camera integration configures native Room View.
+
+On Arch, the package uses `/usr/share/steamvr-monado` and starts the same registration service for active user sessions. The local packaging recipe is a release draft; it must point to published source before an AUR submission.
 
 Unit tests build with the default `BUILD_TESTING=ON` and run with `ctest --test-dir build`.
 
