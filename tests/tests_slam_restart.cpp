@@ -11,16 +11,13 @@
 #include <initializer_list>
 #include <atomic>
 #include <thread>
+#include <dlfcn.h>
 #ifdef SLAM_TEST_HAVE_TBB
 #include <tbb/global_control.h>
 #endif
 int
 main()
 {
-	if (!std::getenv("VIT_SYSTEM_LIBRARY_PATH")) {
-		puts("Set VIT_SYSTEM_LIBRARY_PATH to run the backend lifecycle check");
-		return 77;
-	}
 	t_slam_calibration calibration{};
 	calibration.cam_count = 2;
 	// Use the default Basalt pipeline IMU rate for this lifecycle-only check.
@@ -48,7 +45,13 @@ main()
 	// Exercise the production default. The backend must advertise safe recreation.
 	t_slam_tracker_config config{};
 	t_slam_fill_default_config(&config);
-	config.vit_system_library_path = std::getenv("VIT_SYSTEM_LIBRARY_PATH");
+	// Resolve the installed backend exactly as the ordinary driver launch does.
+	void *library = dlopen(config.vit_system_library_path, RTLD_LAZY | RTLD_LOCAL);
+	if (!library) {
+		puts("VIT backend unavailable for the lifecycle check");
+		return std::getenv("VIT_SYSTEM_LIBRARY_PATH") ? 1 : 77;
+	}
+	dlclose(library);
 	config.cam_count = 2;
 	config.submit_from_start = true;
 	config.slam_calib = &calibration;

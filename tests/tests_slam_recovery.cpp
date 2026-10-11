@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <dlfcn.h>
 
 struct Motion
 {
@@ -76,9 +77,6 @@ render(xrt_frame *frame, double baseline, double t)
 int
 main()
 {
-	const char *library = std::getenv("VIT_SYSTEM_LIBRARY_PATH");
-	if (!library)
-		return 77;
 	t_slam_calibration calibration{};
 	const char *camera_count = std::getenv("SLAM_TEST_CAM_COUNT");
 	const int cameras = camera_count && std::strcmp(camera_count, "5") == 0 ? 5 : 2;
@@ -105,7 +103,12 @@ main()
 	}
 	t_slam_tracker_config config{};
 	t_slam_fill_default_config(&config);
-	config.vit_system_library_path = library;
+	void *library = dlopen(config.vit_system_library_path, RTLD_LAZY | RTLD_LOCAL);
+	if (!library) {
+		puts("VIT backend unavailable for the recovery check");
+		return std::getenv("VIT_SYSTEM_LIBRARY_PATH") ? 1 : 77;
+	}
+	dlclose(library);
 	config.cam_count = cameras;
 	config.submit_from_start = true;
 	config.slam_calib = &calibration;

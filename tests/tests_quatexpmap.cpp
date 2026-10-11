@@ -50,19 +50,23 @@ TEST_CASE("m_quatexpmap")
 
 				INFO("vel=" << vel.x << ", " << vel.y << ", " << vel.z);
 				INFO("new_vel=" << new_vel.x << ", " << new_vel.y << ", " << new_vel.z);
-				CHECK(m_vec3_len(new_vel - vel) <= 0.001);
+				// At exactly 180 degrees either axis sign describes the same shortest rotation.
+				bool half_turn = std::abs(m_vec3_len(vel) * dt - M_PI) <= 0.000001;
+				CHECK((m_vec3_len(new_vel - vel) <= 0.001 ||
+				       (half_turn && m_vec3_len(new_vel + vel) <= 0.001)));
 			}
 		}
 	}
 
 	SECTION("Test quat_exp and quat_ln are inverses")
 	{
-		// We use rotations with less than PI radians as quat_ln will return the negative rotation otherwise
+		// This API takes half-Rodrigues vectors. Its shortest-rotation log is inverse
+		// inside the PI/2 vector-norm domain, corresponding to rotations below PI.
 		vector<xrt_vec3> aas = {
 		    {0, 0, 0},
 		    axis1 * (float)M_PI * 0.01f,
-		    axis2 * (float)M_PI * 0.5f,
-		    axis3 * (float)M_PI * 0.99f,
+		    axis2 * (float)M_PI * 0.25f,
+		    axis3 * (float)M_PI * 0.49f,
 		};
 
 		for (xrt_vec3 aa : aas) {
