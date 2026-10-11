@@ -86,3 +86,25 @@ install(
 if(TARGET monado-roomsetup-guard)
     install(TARGETS monado-roomsetup-guard RUNTIME DESTINATION ${CMAKE_INSTALL_DATADIR}/steamvr-monado/bin/linux64)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    configure_file(${PROJECT_SOURCE_DIR}/scripts/rifts-setup.in ${PROJECT_BINARY_DIR}/rifts-setup @ONLY)
+    configure_file(${PROJECT_SOURCE_DIR}/scripts/rifts-session-install.in ${PROJECT_BINARY_DIR}/rifts-session-install @ONLY)
+    configure_file(${PROJECT_SOURCE_DIR}/scripts/rifts-steamvr-registration.service.in
+                   ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.service @ONLY)
+    file(CREATE_LINK "../rifts-steamvr-registration.service"
+         ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.enabled SYMBOLIC)
+    install(PROGRAMS ${PROJECT_BINARY_DIR}/rifts-setup DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(PROGRAMS ${PROJECT_BINARY_DIR}/rifts-session-install DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
+    install(FILES ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.service
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
+    install(FILES ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.enabled
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user/default.target.wants
+            RENAME rifts-steamvr-registration.service)
+    # Package staging must never change the build host's running sessions.
+    install(CODE "
+        if(NOT DEFINED ENV{DESTDIR} OR \"\$ENV{DESTDIR}\" STREQUAL \"\")
+            execute_process(COMMAND \"${CMAKE_INSTALL_FULL_LIBEXECDIR}/rifts-session-install\")
+        endif()
+    ")
+endif()

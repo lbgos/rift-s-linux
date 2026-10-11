@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Register the installed Rift S driver using SteamVR's own path registry tool."""
+import argparse
+import ctypes
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import select
+import subprocess
+import sys
+import time
+
+DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
+
+
+def read_registry(path):
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def steam_roots(home):
+    roots = [home / '.local/share/Steam', home / '.steam/steam', home / '.steam/root']
+    result = []
+    for root in roots:
+        root = root.resolve()
+        if root.is_dir() and root not in result:
+            result.append(root)
+    return result
+
+
+def find_runtime(home, registry):
+    roots = steam_roots(home)
+    libraries = list(roots)
+    for root in roots:
+        folders = root / 'steamapps/libraryfolders.vdf'
+        if folders.is_file():
+            # Only library paths are needed; never read account or login files.
+            for path in re.findall(r'"path"\s*"((?:\\.|[^"\\])*)"', folders.read_text()):
+                library = Path(path.replace('\\\\', '\\').replace('\\"', '"'))
+                if library not in libraries:
+                    libraries.append(library)
+    candidates = [Path(path) for path in registry.get('runtime', []) if isinstance(path, str)]
+    candidates += [path / 'steamapps/common/SteamVR' for path in libraries]
+    for runtime in candidates:
+        tool = runtime / 'bin/linux64/vrpathreg'
+        if tool.is_file() and os.access(tool, os.X_OK):
+            return tool, roots, libraries
+    return None, roots, libraries
+
+
+def pathreg(tool, *arguments):
+    # Native vrpathreg can report paths. Do not copy those or subprocess environment to logs.
+    result = subprocess.run([str(tool), *arguments], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=20)
+    if result.returncode:
+        raise RuntimeError('SteamVR driver registration failed; will retry.')
+
+
+def register(home, registry_path, uninstall=False):
+    registry = read_registry(registry_path)
+    tool, roots, libraries = find_runtime(home, registry)
+    if tool is None:
+        return False, roots, libraries
+    drivers = registry.get('external_drivers') or []
+    if uninstall:
+        if str(DRIVER) in drivers:
+            pathreg(tool, 'removedriver', str(DRIVER))
+        return True, roots, libraries
+    if not (DRIVER / 'driver.vrdrivermanifest').is_file():
+        raise RuntimeError('Installed Rift S driver manifest is missing.')
+    if str(DRIVER) in drivers:
+        return True, roots, libraries
+    # Bootstrap only missing native paths. Existing runtime/config/log paths remain intact.
+    if not registry.get('runtime'):
+        pathreg(tool, 'setthis')
+    root = roots[0] if roots else home / '.local/share/Steam'
+    if not registry.get('config'):
+        pathreg(tool, 'setconfig', str(root / 'config'))
+    if not registry.get('log'):
+        pathreg(tool, 'setlog', str(root / 'logs'))
+    pathreg(tool, 'adddriver', str(DRIVER))
+    return True, roots, libraries
+
+
+class DirectoryEvents:
+    def __init__(self):
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.inotify_init1.argtypes = [ctypes.c_int]
+        self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self.fd = self.libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.watches = set()
+
+    def watch(self, directories):
+        if self.fd < 0:
+            return
+        for directory in directories:
+            directory = directory.resolve()
+            while not directory.is_dir() and directory != directory.parent:
+                directory = directory.parent
+            if directory in self.watches:
+                continue
+            # Creation, replacement and completed writes cover library installs and registry updates.
+            mask = 0x100 | 0x80 | 0x8 | 0x400 | 0x800
+            if self.libc.inotify_add_watch(self.fd, os.fsencode(directory), mask) >= 0:
+                self.watches.add(directory)
+
+    def wait(self):
+        if self.fd < 0:
+            time.sleep(2)
+        elif select.select([self.fd], [], [], 2)[0]:
+            try:
+                os.read(self.fd, 65536)
+            except BlockingIOError:
+                pass
+            time.sleep(0.1)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['install', 'uninstall', 'watch'], nargs='?', default='install')
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        parser.error('Run in the Steam user session.')
+    home = Path.home()
+    config = Path(os.environ.get('XDG_CONFIG_HOME', home / '.config'))
+    registry_path = Path(os.environ.get('VR_PATHREG_OVERRIDE', config / 'openvr/openvrpaths.vrpath'))
+    state = Path(os.environ.get('XDG_STATE_HOME', home / '.local/state')) / 'monado-rifts'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    events = DirectoryEvents()
+    last_error = None
+    with (state / 'registration.lock').open('w') as lock:
+        while True:
+            with_lock = False
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                with_lock = True
+                done, roots, libraries = register(home, registry_path, args.action == 'uninstall')
+                last_error = None
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                if args.action != 'watch':
+                    raise SystemExit(str(error))
+                if last_error != str(error):
+                    print(str(error), file=sys.stderr, flush=True)
+                    last_error = str(error)
+                roots, libraries = steam_roots(home), []
+                done = False
+            finally:
+                if with_lock:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+            if args.action != 'watch':
+                print('Rift S registered.' if done else 'Rift S registration will complete when SteamVR is installed.')
+                return
+            directories = [config / 'openvr', home / '.local/share/Steam', home / '.steam']
+            for root in roots:
+                directories.extend([root, root / 'steamapps'])
+            for library in libraries:
+                runtime = library / 'steamapps/common/SteamVR'
+                directories.extend([library, library / 'steamapps', library / 'steamapps/common',
+                                    runtime, runtime / 'bin', runtime / 'bin/linux64'])
+            events.watch(directories)
+            events.wait()
+
+
+if __name__ == '__main__':
+    main()

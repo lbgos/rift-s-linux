@@ -1,0 +1,17 @@
+#!/bin/sh
+# Start registration in existing user sessions; new sessions use default.target.wants.
+if [ "$(id -u)" -ne 0 ]; then
+    systemctl --user daemon-reload
+    systemctl --user restart rifts-steamvr-registration.service
+    exit
+fi
+if command -v setcap >/dev/null && [ -x "@CMAKE_INSTALL_FULL_BINDIR@/monado-service" ]; then
+    setcap cap_sys_nice=ep "@CMAKE_INSTALL_FULL_BINDIR@/monado-service" || exit 1
+fi
+command -v loginctl >/dev/null || exit 0
+loginctl list-users --no-legend 2>/dev/null | while read -r uid username rest; do
+    case "$uid" in ''|*[!0-9]*) continue ;; esac
+    [ "$uid" -ge 1000 ] && [ -S "/run/user/$uid/bus" ] || continue
+    runuser -u "$username" -- env "XDG_RUNTIME_DIR=/run/user/$uid" systemctl --user daemon-reload
+    runuser -u "$username" -- env "XDG_RUNTIME_DIR=/run/user/$uid" systemctl --user restart rifts-steamvr-registration.service
+done

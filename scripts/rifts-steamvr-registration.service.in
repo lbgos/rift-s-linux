@@ -1,0 +1,13 @@
+[Unit]
+Description=Register the Rift S driver with installed SteamVR
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/rifts-setup watch
+Restart=on-failure
+RestartSec=5
+Nice=10
+MemoryMax=64M
+
+[Install]
+WantedBy=default.target
