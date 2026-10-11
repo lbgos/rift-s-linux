@@ -1231,6 +1231,22 @@ world_write_status(struct rift_s_tracker *t)
 	static const char *last_state;
 	timepoint_ns now_ns = os_monotonic_get_ns();
 	if (state == last_state && now_ns - last_write_ns < 500 * U_TIME_1MS_IN_NS) return;
+	const struct rift_s_world_anchor_result *result = &diagnostics.result;
+	if (strcmp(state, "relocalizing") == 0 && !standby && !paused && !restarting &&
+	    now_ns - t->world_last_diagnostic_ns >= 10 * U_TIME_1S_IN_NS) {
+		t->world_last_diagnostic_ns = now_ns;
+		RIFT_S_WARN("Room recognition pending attempts=%" PRIu64 " usable=%" PRIu64
+		            " capture_ns=%lld sample_ns=%lld valid=%d flags=%u history=%d generation=%" PRIu64
+		            " confirmations=%u keyframes=%u features=%u/%u/%u/%u/%u"
+		            " matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u matched=%d rejection=%s",
+		            diagnostics.attempts, diagnostics.usable, (long long)diagnostics.capture_ns,
+		            (long long)diagnostics.sample_ns, diagnostics.pose_valid, diagnostics.pose_flags,
+		            diagnostics.history_result, generation, confirmations, result->keyframes,
+		            result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
+		            result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
+		            result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
+		            result->relocalized, result->rejection ? result->rejection : "none");
+	}
 	if (state != last_state && strcmp(state, "relocalizing") == 0) {
 		RIFT_S_WARN("Guardian not found: saved room is not localized; boundary unavailable. "
 		            "Uncover headset cameras and look around. If the room stays unavailable, run Room Setup.");
@@ -1246,7 +1262,6 @@ world_write_status(struct rift_s_tracker *t)
 	if (!file) return;
 	// The first two fields remain the guard's status protocol. Diagnostics are
 	// available without a debug launch or stopping tracking with a debugger.
-	const struct rift_s_world_anchor_result *result = &diagnostics.result;
 	fprintf(file, "%lld %s attempts=%" PRIu64 " usable=%" PRIu64
 	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u history=%d standby=%d paused=%d restart=%d"
 	              " generation=%" PRIu64 " confirmations=%u keyframes=%u"

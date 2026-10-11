@@ -76,6 +76,8 @@ struct rift_s_tracker
 	uint64_t world_candidate_generation;
 	timepoint_ns world_candidate_ns;
 	struct rift_s_world_diagnostics world_diagnostics;
+	//! World worker's rate limit for native diagnostics while a worn room is unrecognized.
+	timepoint_ns world_last_diagnostic_ns;
 
 	//! Camera arrival watchdog uses the host clock, not predicted pose time.
 	timepoint_ns last_camera_arrival_ns;
