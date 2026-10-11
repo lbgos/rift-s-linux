@@ -41,6 +41,7 @@ struct rift_s_world_diagnostics
 	timepoint_ns capture_ns, sample_ns;
 	bool pose_valid;
 	uint32_t pose_flags;
+	enum m_relation_history_result history_result;
 	struct rift_s_world_anchor_result result;
 };
 

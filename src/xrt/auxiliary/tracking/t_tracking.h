@@ -17,6 +17,7 @@
 #include "xrt/xrt_frame.h"
 #include "xrt/xrt_tracking.h"
 #include "util/u_misc.h"
+#include "math/m_relation_history.h"
 
 #include <stdio.h>
 
@@ -715,6 +716,12 @@ t_slam_reset(struct xrt_tracked_slam *xts);
  */
 bool
 t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint_ns *out_ts);
+
+//! Exposure-time history query. Only exact/interpolated results retain pose flags;
+//! display prediction settings cannot supply a pose outside observed history.
+enum m_relation_history_result
+t_slam_get_sample_at(struct xrt_tracked_slam *xts, timepoint_ns when_ns, timepoint_ns *out_latest_ts,
+                     struct xrt_space_relation *out_relation);
 
 //! Read source and prediction under one backend/history lock. Guard only the source timestamp.
 bool

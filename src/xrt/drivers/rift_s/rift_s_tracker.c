@@ -1248,13 +1248,13 @@ world_write_status(struct rift_s_tracker *t)
 	// available without a debug launch or stopping tracking with a debugger.
 	const struct rift_s_world_anchor_result *result = &diagnostics.result;
 	fprintf(file, "%lld %s attempts=%" PRIu64 " usable=%" PRIu64
-	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u standby=%d paused=%d restart=%d"
+	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u history=%d standby=%d paused=%d restart=%d"
 	              " generation=%" PRIu64 " confirmations=%u keyframes=%u"
 	              " features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u"
 	              " matched=%d rejection=%s\n",
 	        (long long)os_monotonic_get_ns(), state, diagnostics.attempts, diagnostics.usable,
 	        (long long)diagnostics.capture_ns, (long long)diagnostics.sample_ns, diagnostics.pose_valid,
-	        diagnostics.pose_flags, standby, paused, restarting, generation, confirmations, result->keyframes,
+	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, generation, confirmations, result->keyframes,
 	        result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
 	        result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
 	        result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
@@ -1343,7 +1343,8 @@ rift_s_world_thread(void *ptr)
 		world_read_command(t);
 		if (frames[0] && frames[1] && t->tracking.slam_enabled) {
 			timepoint_ns capture_ns = frames[0]->timestamp;
-			struct xrt_space_relation source = XRT_SPACE_RELATION_ZERO, capture = XRT_SPACE_RELATION_ZERO;
+			struct xrt_space_relation capture = XRT_SPACE_RELATION_ZERO;
+			enum m_relation_history_result history_result = M_RELATION_HISTORY_RESULT_INVALID;
 			timepoint_ns source_ns = 0;
 			os_mutex_lock(&t->mutex);
 			uint64_t generation = t->slam_generation;
@@ -1352,8 +1353,9 @@ rift_s_world_thread(void *ptr)
 #ifdef XRT_FEATURE_SLAM
 			// Wait briefly for this exposure's SLAM sample, rather than triangulate against a prediction.
 			for (int attempt = 0; attempt < 12; attempt++) {
-				valid = t_slam_get_latest_sample(t->tracking.slam, capture_ns, &source_ns, &source,
-				                                 &capture);
+				history_result = t_slam_get_sample_at(t->tracking.slam, capture_ns, &source_ns, &capture);
+                valid = history_result == M_RELATION_HISTORY_RESULT_EXACT ||
+                        history_result == M_RELATION_HISTORY_RESULT_INTERPOLATED;
 				if (valid && source_ns >= capture_ns)
 					break;
 				os_nanosleep(10 * U_TIME_1MS_IN_NS);
@@ -1394,7 +1396,7 @@ rift_s_world_thread(void *ptr)
 			os_mutex_lock(&t->mutex);
 			t->world_diagnostics = (struct rift_s_world_diagnostics){
 			    .attempts = attempts, .usable = usable, .capture_ns = capture_ns, .sample_ns = source_ns,
-			    .pose_valid = valid, .pose_flags = capture.relation_flags, .result = result};
+			    .pose_valid = valid, .pose_flags = capture.relation_flags, .history_result = history_result, .result = result};
 			os_mutex_unlock(&t->mutex);
 			if (capture_ns - last_attempt_log_ns >= U_TIME_1S_IN_NS) {
 				last_attempt_log_ns = capture_ns;

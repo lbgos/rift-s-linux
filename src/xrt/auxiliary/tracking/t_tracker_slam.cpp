@@ -1312,6 +1312,29 @@ t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint
 	return true;
 }
 
+extern "C" enum m_relation_history_result
+t_slam_get_sample_at(struct xrt_tracked_slam *xts,
+                     timepoint_ns when_ns,
+                     timepoint_ns *out_latest_ts,
+                     struct xrt_space_relation *out_relation)
+{
+    auto &t = *container_of(xts, TrackerSlam, base);
+    *out_latest_ts = 0;
+    *out_relation = XRT_SPACE_RELATION_ZERO;
+    std::shared_lock backend_lock(t.backend_mutex, std::try_to_lock);
+    if (!backend_lock.owns_lock()) return M_RELATION_HISTORY_RESULT_INVALID;
+    std::lock_guard lock(t.state_mutex);
+    if (!t.started) return M_RELATION_HISTORY_RESULT_INVALID;
+    flush_poses(t);
+    xrt_space_relation latest{};
+    if (!t.slam_rels.get_latest(out_latest_ts, &latest)) return M_RELATION_HISTORY_RESULT_INVALID;
+    auto result = t.slam_rels.get(when_ns, out_relation);
+    if (result != M_RELATION_HISTORY_RESULT_EXACT && result != M_RELATION_HISTORY_RESULT_INTERPOLATED) {
+        *out_relation = XRT_SPACE_RELATION_ZERO;
+    }
+    return result;
+}
+
 extern "C" bool
 t_slam_get_latest_sample(struct xrt_tracked_slam *xts,
                          timepoint_ns when_ns,

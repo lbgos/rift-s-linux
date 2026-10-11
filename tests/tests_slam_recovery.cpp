@@ -190,6 +190,23 @@ main()
 	std::sort(lag.begin(), lag.end());
 	std::printf("MOTION samples=%zu lag_median_ms=%.3f lag_p95_ms=%.3f lag_max_ms=%.3f\n", lag.size(),
 	            lag[lag.size() / 2], lag[lag.size() * 95 / 100], lag.back());
+    // Camera exposures outside observed VIO history must not inherit valid pose
+    // flags from reverse/forward prediction, even though display prediction does.
+    int64_t latest = 0;
+    xrt_space_relation at{};
+    auto history = t_slam_get_sample_at(tracker, 1, &latest, &at);
+    if (history != M_RELATION_HISTORY_RESULT_REVERSE_PREDICTED || at.relation_flags != 0 || latest <= 1)
+        return 7;
+    const int64_t observed = latest;
+    history = t_slam_get_sample_at(tracker, observed, &latest, &at);
+    if (history != M_RELATION_HISTORY_RESULT_EXACT || !(at.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT))
+        return 8;
+    history = t_slam_get_sample_at(tracker, observed - 500000, &latest, &at);
+    if (history != M_RELATION_HISTORY_RESULT_INTERPOLATED || !(at.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT))
+        return 9;
+    history = t_slam_get_sample_at(tracker, os_monotonic_get_ns() + 1000000000LL, &latest, &at);
+    if (history != M_RELATION_HISTORY_RESULT_PREDICTED || at.relation_flags != 0)
+        return 10;
 	if (directory)
 		return 0; // Benchmark mode measures the intact pipeline only.
 
@@ -210,6 +227,9 @@ main()
 		std::fputs("Default policy leaves backend stuck\n", stderr);
 		return 5;
 	}
+    history = t_slam_get_sample_at(tracker, observed, &latest, &at);
+    if (history != M_RELATION_HISTORY_RESULT_INVALID || latest != 0 || at.relation_flags != 0)
+        return 11;
 	const double restart_ms = double(os_monotonic_get_ns() - restart_begin) / 1e6;
 	last_sample = 0;
 	lag.clear();
