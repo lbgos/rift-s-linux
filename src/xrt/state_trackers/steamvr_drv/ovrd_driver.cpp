@@ -967,6 +967,7 @@ public:
 			vr::VRProperties()->SetInt32Property(m_ulPropertyContainer, vr::Prop_ControllerRoleHint_Int32, vr::TrackedControllerRole_RightHand);
 		}
 		m_pose.poseIsValid = false;
+		m_had_position = false;
 		m_pose.deviceIsConnected = true;
 		m_pose.result = vr::TrackingResult_Uninitialized;
 		m_pose.willDriftInYaw = !m_xdev->supported.position_tracking;
@@ -1114,11 +1115,11 @@ public:
 			bench_relation(rel, bench_pose);
 
 		if (is_rift_s_touch(m_xdev))
-			apply_rift_s_touch_pose(&rel, &m_pose);
+			apply_rift_s_touch_pose(&rel, &m_pose, m_had_position);
 		else
 			apply_pose(&rel, &m_pose, XRT_SPACE_RELATION_POSITION_VALID_BIT,
 			           m_xdev->name == XRT_DEVICE_TOUCH_CONTROLLER);
-		if ((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) {
+		if (m_pose.poseIsValid && (rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) {
 			m_had_position = true;
 		} else if (is_rift_s_touch(m_xdev) && !m_had_position && m_xhmd != NULL) {
 			// Never fixed: SteamVR may still draw the invalid pose, at the tracking origin under

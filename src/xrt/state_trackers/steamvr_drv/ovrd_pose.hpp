@@ -135,10 +135,10 @@ transform_rift_s_touch_relation(struct xrt_space_relation *rel,
 	    position_flags);
 }
 
-// Oculus' controller adapter admits orientation-valid poses, copies their estimated
-// position even without PositionValid, and reports that case as Running_OutOfRange.
+// After an optical acquisition, Oculus' adapter preserves orientation-valid position
+// estimates as Running_OutOfRange. Before acquisition there is no positioned controller.
 inline void
-apply_rift_s_touch_pose(struct xrt_space_relation *rel, vr::DriverPose_t *m_pose)
+apply_rift_s_touch_pose(struct xrt_space_relation *rel, vr::DriverPose_t *m_pose, bool position_acquired)
 {
 	bool connected = m_pose->deviceIsConnected;
 	*m_pose = {};
@@ -147,6 +147,8 @@ apply_rift_s_touch_pose(struct xrt_space_relation *rel, vr::DriverPose_t *m_pose
 	m_pose->willDriftInYaw = !position_valid;
 	m_pose->result = vr::TrackingResult_Uninitialized;
 	if ((rel->relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0)
+		return;
+	if (!position_valid && !position_acquired)
 		return;
 	if (!finite_pose(rel->pose)) {
 		m_pose->result = vr::TrackingResult_Running_OutOfRange;

@@ -118,6 +118,39 @@ get_test_head_pose(xrt_device *, xrt_input_name, int64_t, xrt_space_relation *ou
 	return XRT_SUCCESS;
 }
 
+#ifdef TEST_RIFT_S_STEAMVR_POSE
+TEST_CASE("Rift S SteamVR controller stays uninitialized until its first optical position")
+{
+	xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
+	rel.pose.orientation = XRT_QUAT_IDENTITY;
+	rel.pose.position = {8, -3, 15};
+	rel.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+	vr::DriverPose_t pose = {};
+	pose.deviceIsConnected = true;
+	pose.poseIsValid = true;
+	pose.vecVelocity[0] = 10;
+	apply_rift_s_touch_pose(&rel, &pose, false);
+	CHECK(pose.deviceIsConnected);
+	CHECK_FALSE(pose.poseIsValid);
+	CHECK(pose.result == vr::TrackingResult_Uninitialized);
+	CHECK(pose.vecVelocity[0] == 0);
+
+	rel.relation_flags = static_cast<xrt_space_relation_flags>(
+	    rel.relation_flags | XRT_SPACE_RELATION_POSITION_VALID_BIT);
+	apply_rift_s_touch_pose(&rel, &pose, false);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.result == vr::TrackingResult_Running_OK);
+	CHECK(pose.vecPosition[0] == 8);
+
+	// A mature controller retains the existing out-of-view adapter behavior.
+	rel.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+	apply_rift_s_touch_pose(&rel, &pose, true);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.result == vr::TrackingResult_Running_OutOfRange);
+	CHECK(pose.vecPosition[0] == 8);
+}
+#endif
+
 TEST_CASE("Rift S controller estimated coordinates survive loss of position confidence")
 {
 	rift_s_hmd hmd = {};
@@ -166,7 +199,7 @@ TEST_CASE("Rift S controller estimated coordinates survive loss of position conf
 				vr::DriverPose_t pose = {};
 				pose.poseIsValid = true;
 				pose.result = vr::TrackingResult_Running_OK;
-				apply_rift_s_touch_pose(&rel, &pose);
+				apply_rift_s_touch_pose(&rel, &pose, true);
 				CHECK(pose.poseIsValid);
 				CHECK(pose.result == (tracked ? vr::TrackingResult_Running_OK
 				                                      : vr::TrackingResult_Running_OutOfRange));
@@ -1726,7 +1759,7 @@ TEST_CASE("Rift S motion estimates pass through production grip/model offsets wi
 		const xrt_pose origin=XRT_POSE_IDENTITY;
 		transform_rift_s_touch_relation(&grip,&grip_model,&origin);
 		vr::DriverPose_t pose{};
-		apply_rift_s_touch_pose(&grip,&pose);
+		apply_rift_s_touch_pose(&grip, &pose, true);
 		CHECK(pose.poseIsValid);
 		CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
 		CHECK(pose.vecPosition[1]>1.0);
@@ -1749,7 +1782,7 @@ TEST_CASE("Rift S Touch model and world transforms preserve estimated coordinate
 		CHECK(((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) == position_valid);
 		CHECK(((rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0) == position_valid);
 		vr::DriverPose_t pose{};
-		apply_rift_s_touch_pose(&rel, &pose);
+		apply_rift_s_touch_pose(&rel, &pose, true);
 		REQUIRE(pose.poseIsValid);
 		CHECK(pose.result == (position_valid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange));
 		CHECK(pose.vecPosition[0] == Catch::Approx(0.7f));
@@ -1779,7 +1812,7 @@ TEST_CASE("Rift S Touch OpenVR status follows orientation and position validity 
 					pose.deviceIsConnected = connected;
 					pose.poseIsValid = true;
 					pose.vecVelocity[0] = 99;
-					apply_rift_s_touch_pose(&rel, &pose);
+					apply_rift_s_touch_pose(&rel, &pose, true);
 					CAPTURE(connected, orientation_valid, position_valid, tracked);
 					CHECK(pose.deviceIsConnected == connected);
 					CHECK(pose.poseIsValid == orientation_valid);
@@ -1795,7 +1828,7 @@ TEST_CASE("Rift S Touch OpenVR status follows orientation and position validity 
 					rel.relation_flags = static_cast<xrt_space_relation_flags>(
 					    rel.relation_flags & ~(XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT |
 					                           XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT));
-					apply_rift_s_touch_pose(&rel, &pose);
+					apply_rift_s_touch_pose(&rel, &pose, true);
 					CHECK(pose.vecVelocity[0] == 0);
 					CHECK(pose.vecAngularVelocity[1] == 0);
 				}
@@ -1813,7 +1846,7 @@ TEST_CASE("Rift S Touch OpenVR adapter rejects a nonfinite estimate")
 	vr::DriverPose_t pose{};
 	pose.deviceIsConnected = true;
 	rel.pose.position.x = std::numeric_limits<float>::quiet_NaN();
-	apply_rift_s_touch_pose(&rel, &pose);
+	apply_rift_s_touch_pose(&rel, &pose, true);
 	CHECK_FALSE(pose.poseIsValid);
 	CHECK(pose.deviceIsConnected);
 	CHECK(pose.result == vr::TrackingResult_Running_OutOfRange);
@@ -2060,7 +2093,7 @@ TEST_CASE("Rift S complete grip to SteamVR model chain preserves metric position
 			check_vec(actual_forward, expected_forward);
 			vr::DriverPose_t driver{};
 			driver.poseIsValid = true;
-			apply_rift_s_touch_pose(&model, &driver);
+			apply_rift_s_touch_pose(&model, &driver, true);
 			REQUIRE(driver.poseIsValid);
 			CHECK(driver.vecPosition[0] == Catch::Approx(expected.x).margin(2e-6));
 			CHECK(driver.vecPosition[1] == Catch::Approx(expected.y).margin(2e-6));
