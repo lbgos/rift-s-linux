@@ -86,7 +86,6 @@ install(
 if(TARGET monado-roomsetup-guard)
     install(TARGETS monado-roomsetup-guard RUNTIME DESTINATION ${CMAKE_INSTALL_DATADIR}/steamvr-monado/bin/linux64)
 endif()
-
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     configure_file(${PROJECT_SOURCE_DIR}/scripts/rifts-setup.in ${PROJECT_BINARY_DIR}/rifts-setup @ONLY)
     configure_file(${PROJECT_SOURCE_DIR}/scripts/rifts-session-install.in ${PROJECT_BINARY_DIR}/rifts-session-install @ONLY)

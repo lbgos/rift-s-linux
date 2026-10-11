@@ -16,6 +16,47 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <atomic>
+
+TEST_CASE("Rift S tracker stop joins the world consumer and drains borrowed camera frames")
+{
+	rift_s_tracker tracker{};
+	os_mutex_init(&tracker.mutex);
+	os_mutex_init(&tracker.slam_mutex);
+	os_thread_helper_init(&tracker.world_thread);
+	tracker.world_thread_initialized = true;
+	tracker.ready_for_data = true;
+	struct Worker {
+		rift_s_tracker *tracker;
+		std::atomic<bool> exited{false};
+	} worker{&tracker};
+	auto consume = [](void *ptr) -> void * {
+		auto &worker = *static_cast<Worker *>(ptr);
+		auto &thread = worker.tracker->world_thread;
+		os_thread_helper_lock(&thread);
+		while (os_thread_helper_is_running_locked(&thread))
+			os_thread_helper_wait_locked(&thread);
+		os_thread_helper_unlock(&thread);
+		worker.exited = true;
+		return nullptr;
+	};
+	REQUIRE(os_thread_helper_start(&tracker.world_thread, consume, &worker) == 0);
+	xrt_frame frame{};
+	frame.reference.count = 1;
+	frame.destroy = [](xrt_frame *) { FAIL("The camera owner must still own its buffer"); };
+	xrt_frame_reference(&tracker.world_frames[0], &frame);
+	REQUIRE(frame.reference.count == 2);
+	rift_s_tracker_stop(&tracker);
+	CHECK(worker.exited);
+	CHECK_FALSE(tracker.ready_for_data);
+	CHECK(tracker.world_frames[0] == nullptr);
+	CHECK(frame.reference.count == 1);
+	// Teardown calls stop again after frame nodes have been destroyed.
+	rift_s_tracker_stop(&tracker);
+	os_thread_helper_destroy(&tracker.world_thread);
+	os_mutex_destroy(&tracker.slam_mutex);
+	os_mutex_destroy(&tracker.mutex);
+}
 
 TEST_CASE("Rift S optical yaw takes ten percent of the shortest world yaw")
 {
@@ -77,7 +118,7 @@ get_test_head_pose(xrt_device *, xrt_input_name, int64_t, xrt_space_relation *ou
 	return XRT_SUCCESS;
 }
 
-TEST_CASE("Rift S controller coordinates hold after loss and stay invalid before acquisition")
+TEST_CASE("Rift S controller estimated coordinates survive loss of position confidence")
 {
 	rift_s_hmd hmd = {};
 	hmd.base.get_tracked_pose = get_test_head_pose;
@@ -114,8 +155,8 @@ TEST_CASE("Rift S controller coordinates hold after loss and stay invalid before
 				CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) != 0);
 				CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
 				CHECK(((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0) ==
-				      (optical_ts != 0));
-				// Optical confidence expires, but the held position remains usable.
+				      (optical_ts == 1999000000));
+				// Expired confidence does not discard the numeric estimate.
 				const bool tracked = optical_ts == 1999000000;
 				const bool held = optical_ts == 1000000000;
 				CHECK(((rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0) == tracked);
@@ -125,12 +166,12 @@ TEST_CASE("Rift S controller coordinates hold after loss and stay invalid before
 				vr::DriverPose_t pose = {};
 				pose.poseIsValid = true;
 				pose.result = vr::TrackingResult_Running_OK;
-				apply_pose(&rel, &pose, XRT_SPACE_RELATION_POSITION_VALID_BIT, true);
-				CHECK(pose.poseIsValid == (tracked || held));
-				CHECK(pose.result == (tracked || held ? vr::TrackingResult_Running_OK
+				apply_rift_s_touch_pose(&rel, &pose);
+				CHECK(pose.poseIsValid);
+				CHECK(pose.result == (tracked ? vr::TrackingResult_Running_OK
 				                                      : vr::TrackingResult_Running_OutOfRange));
-				CHECK(pose.vecPosition[0] == Catch::Approx(tracked || held ? rel.pose.position.x : 0));
-				CHECK(pose.vecPosition[2] == Catch::Approx(tracked || held ? rel.pose.position.z : 0));
+				CHECK(pose.vecPosition[0] == Catch::Approx(rel.pose.position.x));
+				CHECK(pose.vecPosition[2] == Catch::Approx(rel.pose.position.z));
 				CHECK(pose.qRotation.w == Catch::Approx(1));
 				// HMD call sites retain their original tracked-position requirement.
 				vr::DriverPose_t head_pose = {};
@@ -176,7 +217,8 @@ TEST_CASE("Rift S mature track bridges a short optical gap and clears optical co
 	};
 	CHECK(valid_after(30, 400 * U_TIME_1MS_IN_NS));
 	CHECK(valid_after(30, 490 * U_TIME_1MS_IN_NS));
-	CHECK_FALSE(valid_after(30, 510 * U_TIME_1MS_IN_NS));
+	CHECK(valid_after(30, 510 * U_TIME_1MS_IN_NS));
+	CHECK_FALSE(valid_after(30, 3001LL * U_TIME_1MS_IN_NS));
 	CHECK_FALSE(valid_after(1, 300 * U_TIME_1MS_IN_NS));
 	os_mutex_destroy(&ctrl.mutex);
 	os_mutex_destroy(&sys.dev_mutex);
@@ -458,7 +500,7 @@ TEST_CASE("Rift S IMU clock re-anchors after a stale first timestamp instead of 
 	CHECK(ctrl.attitude_history_count == 0);
 	CHECK(ctrl.clock_stable_samples == 0);
 	CHECK_FALSE(ctrl.optical_heading_valid);
-	CHECK(ctrl.position_filter.frozen);
+	CHECK(ctrl.position_filter.suspended);
 	// After the resync, ordinary late resends are still rejected without another resync.
 	imu_report(base_us + 499 * 2000u, arrival + 1000000);
 	CHECK(ctrl.diagnostics.clock_resyncs == 1);
@@ -1166,95 +1208,6 @@ check_vec(xrt_vec3 actual, xrt_vec3 expected)
 }
 } // namespace
 
-TEST_CASE("Rift S loss hold and reacquire keep the published hand valid and continuous")
-{
-	const timepoint_ns ms = U_TIME_1MS_IN_NS;
-	const xrt_vec3 here = {0.3f, 1.4f, -0.4f}, error = {4, -6, 2};
-	for (bool right : {false, true}) {
-		PublishedPoseController fixture(right);
-		auto &ctrl = fixture.ctrl;
-		const timepoint_ns start = os_monotonic_get_ns() - 2000 * ms;
-		fixture.measured(XRT_QUAT_IDENTITY, here, start);
-		ctrl.track_vision_updates = ctrl.track_reliable_updates = ctrl.position_filter.track_updates = 30;
-		// Optical loss while the IMU keeps rotating the wrist. Its acceleration error must
-		// never move the IMU origin farther than the existing 10 cm coast bound.
-		for (timepoint_ns t = start + 2 * ms; t <= start + 2000 * ms; t += 2 * ms) {
-			const xrt_vec3 up = {0, 1, 0};
-			math_quat_from_angle_vector(float(t - start) / U_TIME_1S_IN_NS, &up, &ctrl.pose.orientation);
-			ctrl.fusion.rot = ctrl.pose.orientation;
-			ctrl.last_imu_capture_ns = t;
-			REQUIRE(rift_s_controller_record_attitude(&ctrl, t, t));
-			ctrl.position_filter.coasting = t - start > 120 * ms;
-			rift_s_position_filter_imu(&ctrl.position_filter, t, &error);
-			for (auto input : {XRT_INPUT_TOUCH_AIM_POSE, XRT_INPUT_TOUCH_GRIP_POSE}) {
-				auto rel = fixture.query(input, t);
-				REQUIRE((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0);
-				if (t - start > 500 * ms) {
-					CHECK_FALSE((rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) !=
-					            0);
-					CHECK_FALSE(
-					    (rel.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) != 0);
-				}
-				const auto &offset =
-				    input == XRT_INPUT_TOUCH_AIM_POSE ? ctrl.P_device_aim : ctrl.P_device_grip;
-				xrt_pose imu_device_offset, expected;
-				math_pose_transform(&ctrl.P_imu_device, &offset, &imu_device_offset);
-				const xrt_pose anchor = {ctrl.pose.orientation, here};
-				math_pose_transform(&anchor, &imu_device_offset, &expected);
-				CHECK(m_vec3_len(m_vec3_sub(rel.pose.position, expected.position)) <= 0.10001f);
-				CHECK(rel.pose.orientation.y == Catch::Approx(expected.orientation.y).margin(2e-6));
-#ifdef TEST_RIFT_S_STEAMVR_POSE
-				const auto model_offset =
-				    rift_s_touch_grip_to_model(right ? XRT_HAND_RIGHT : XRT_HAND_LEFT);
-				if (input == XRT_INPUT_TOUCH_GRIP_POSE)
-					math_pose_transform(&rel.pose, &model_offset, &rel.pose);
-				vr::DriverPose_t pose{};
-				pose.poseIsValid = true;
-				pose.result = vr::TrackingResult_Running_OK;
-				apply_pose(&rel, &pose, XRT_SPACE_RELATION_POSITION_VALID_BIT, true);
-				REQUIRE(pose.poseIsValid);
-				CHECK(pose.result == vr::TrackingResult_Running_OK);
-				CHECK(pose.vecPosition[1] > 1.0);
-#endif
-			}
-		}
-		REQUIRE(ctrl.position_filter.frozen);
-		// The first two fits remain candidates. The third resumes the unchanged optical
-		// filter, while only the displayed translation blends out over 100 ms.
-		const auto held = fixture.query(XRT_INPUT_TOUCH_GRIP_POSE, os_monotonic_get_ns());
-		t_constellation_pose_observation obs{};
-		obs.pose = {ctrl.pose.orientation, {-0.2f, 1.5f, -0.5f}};
-		obs.position_covariance[0] = obs.position_covariance[4] = obs.position_covariance[8] = 1e-5f;
-		for (int i = 0; i < 3; ++i) {
-			obs.capture_ns = start + (1894 + 33 * i) * ms;
-			rift_s_controller_push_pose_observation(&ctrl.base, &obs);
-			CHECK(ctrl.position_filter.frozen == (i < 2));
-			const auto rel = fixture.query(XRT_INPUT_TOUCH_GRIP_POSE, os_monotonic_get_ns());
-			CHECK(m_vec3_len(m_vec3_sub(rel.pose.position, held.pose.position)) < 0.01f);
-		}
-		REQUIRE(ctrl.diagnostics.optical_accepted == 1);
-		const timepoint_ns recovered = os_monotonic_get_ns();
-		auto previous = fixture.query(XRT_INPUT_TOUCH_GRIP_POSE, recovered);
-		for (int i = 1; i <= 12; ++i) {
-			auto rel = fixture.query(XRT_INPUT_TOUCH_GRIP_POSE, recovered + i * 10 * ms);
-			CHECK(m_vec3_len(m_vec3_sub(rel.pose.position, previous.pose.position)) < 0.09f);
-			REQUIRE((rel.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0);
-			previous = rel;
-		}
-		// At the end the presentation offset is exactly gone, including future queries.
-		xrt_vec3 p, v;
-		rift_s_position_filter_predict(&ctrl.position_filter, recovered + 120 * ms, 100 * ms, &p, &v);
-		xrt_pose imu_device_offset, expected;
-		math_pose_transform(&ctrl.P_imu_device, &ctrl.P_device_grip, &imu_device_offset);
-		const xrt_pose target = {ctrl.pose.orientation, p};
-		math_pose_transform(&target, &imu_device_offset, &expected);
-		check_vec(previous.pose.position, expected.position);
-		// Presentation queries never replace the capture-time optical association prior.
-		const auto prior = fixture.query(XRT_INPUT_GENERIC_TRACKER_POSE, obs.capture_ns);
-		check_vec(prior.pose.position, obs.pose.position);
-	}
-}
-
 TEST_CASE("Rift S grip stays at its center during rotation for either hand")
 {
 	const xrt_vec3 center = {0.3f, 1.2f, -0.5f};
@@ -1722,6 +1675,66 @@ TEST_CASE("HMD capture-time IMU attitude predicts with a world-space gyro")
 }
 
 #ifdef TEST_RIFT_S_STEAMVR_POSE
+TEST_CASE("Rift S motion estimates pass through production grip/model offsets without changing optical association")
+{
+	for (bool left:{true,false}) {
+		rift_s_hmd hmd{};
+		hmd.base.get_tracked_pose=get_test_head_pose;
+		rift_s_system sys{};
+		sys.hmd=&hmd;
+		sys.motion=rift_s_motion_create();
+		REQUIRE(sys.motion != nullptr);
+		rift_s_controller ctrl{};
+		ctrl.sys=&sys;
+		ctrl.base.device_type=left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
+		ctrl.gravity_initialized=true;
+		ctrl.pose.orientation=XRT_QUAT_IDENTITY;
+		ctrl.P_imu_device={XRT_QUAT_IDENTITY,{0.015f,0.02f,-0.01f}};
+		rift_s_controller_pose_frames(left,&ctrl.P_device_aim,&ctrl.P_device_grip);
+		os_mutex_init(&ctrl.mutex);
+		const timepoint_ns t=1000000000;
+		const xrt_vec3 position={left ? 0.7f : 1.3f,1.1f,2.5f}, variance={1e-5f,1e-5f,1e-5f};
+		rift_s_position_filter_reset(&ctrl.position_filter);
+		rift_s_position_filter_fix(&ctrl.position_filter,t,&position,&variance,0.15f);
+		ctrl.last_fix_ns=ctrl.last_imu_capture_ns=t;
+		ctrl.track_vision_updates=3;
+		ctrl.last_tracked_pose={XRT_QUAT_IDENTITY,position};
+		ctrl.last_tracked_pose_ts=t;
+		ctrl.attitude_history_count=2;
+		ctrl.attitude_history[0]={t-2000000,t-2000000,t-2000000,XRT_QUAT_IDENTITY,{0,0,0},true};
+		ctrl.attitude_history[1]={t,t,t,XRT_QUAT_IDENTITY,{0,0,0},true};
+		rift_s_controller_update_motion(&ctrl,t);
+		xrt_pose imu={XRT_QUAT_IDENTITY,position}, device, expected;
+		math_pose_transform(&imu,&ctrl.P_imu_device,&device);
+		math_pose_transform(&device,&ctrl.P_device_grip,&expected);
+		xrt_space_relation grip{};
+		REQUIRE(rift_s_controller_get_tracked_pose(&ctrl.base,XRT_INPUT_TOUCH_GRIP_POSE,t,&grip)==XRT_SUCCESS);
+		check_vec(grip.pose.position,expected.position);
+		CHECK(grip.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+		const xrt_vec3 zero={0,0,0};
+		rift_s_position_filter_imu(&ctrl.position_filter,t+2000000,&zero);
+		ctrl.last_fix_ns=t-U_TIME_1S_IN_NS;
+		rift_s_controller_update_motion(&ctrl,t+2000000);
+		REQUIRE(rift_s_controller_get_tracked_pose(&ctrl.base,XRT_INPUT_TOUCH_GRIP_POSE,t+2000000,&grip)==XRT_SUCCESS);
+		check_vec(grip.pose.position,expected.position);
+		CHECK_FALSE(grip.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT);
+		xrt_space_relation prior{};
+		REQUIRE(rift_s_controller_get_tracked_pose(&ctrl.base,XRT_INPUT_GENERIC_TRACKER_POSE,t+2000000,&prior)==XRT_SUCCESS);
+		check_vec(prior.pose.position,position);
+		CHECK(prior.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT);
+		const auto grip_model=rift_s_touch_grip_to_model(left ? XRT_HAND_LEFT : XRT_HAND_RIGHT);
+		const xrt_pose origin=XRT_POSE_IDENTITY;
+		transform_rift_s_touch_relation(&grip,&grip_model,&origin);
+		vr::DriverPose_t pose{};
+		apply_rift_s_touch_pose(&grip,&pose);
+		CHECK(pose.poseIsValid);
+		CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+		CHECK(pose.vecPosition[1]>1.0);
+		rift_s_motion_destroy(&sys.motion);
+		os_mutex_destroy(&ctrl.mutex);
+	}
+}
+
 TEST_CASE("Rift S Touch model and world transforms preserve estimated coordinates and confidence")
 {
 	for (bool position_valid : {false, true}) {
@@ -1805,6 +1818,36 @@ TEST_CASE("Rift S Touch OpenVR adapter rejects a nonfinite estimate")
 	CHECK(pose.deviceIsConnected);
 	CHECK(pose.result == vr::TrackingResult_Running_OutOfRange);
 	CHECK(pose.vecPosition[0] == 0);
+}
+
+TEST_CASE("Rift S HMD fallback remains usable during relocalization without claiming tracked position")
+{
+	xrt_space_relation rel=XRT_SPACE_RELATION_ZERO;
+	rel.pose={XRT_QUAT_IDENTITY,{0.2f,1.6f,-0.1f}};
+	rel.relation_flags=static_cast<xrt_space_relation_flags>(XRT_SPACE_RELATION_POSITION_VALID_BIT |
+	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+	vr::DriverPose_t pose{};
+	pose.poseIsValid=true;
+	pose.result=vr::TrackingResult_Running_OK;
+	apply_head_pose(&rel,&pose,true);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	CHECK(pose.vecPosition[1]==Catch::Approx(1.6f));
+	CHECK_FALSE(rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+	apply_head_pose(&rel,&pose,false);
+	CHECK_FALSE(pose.poseIsValid);
+	// Standby keeps the finite held pose usable, while still reporting OutOfRange.
+	rel.relation_flags=static_cast<xrt_space_relation_flags>(rel.relation_flags & ~XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+	pose.poseIsValid=true;
+	apply_head_pose(&rel,&pose,true);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.vecPosition[1]==Catch::Approx(1.6f));
+	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	rel.relation_flags=static_cast<xrt_space_relation_flags>(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
+	    XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+	pose.poseIsValid=true;
+	apply_head_pose(&rel,&pose,true);
+	CHECK_FALSE(pose.poseIsValid);
 }
 
 TEST_CASE("SteamVR held pose clears velocity retained from the last tracked pose")
@@ -1903,7 +1946,7 @@ TEST_CASE("Rift S unconfirmed position candidates cannot rotate or replace the a
 	obs.inliers = obs.distinct_leds = 6;
 	obs.position_covariance[0] = obs.position_covariance[4] = obs.position_covariance[8] = 1e-6f;
 	obs.hypothesis = "test";
-	rift_s_controller_push_pose_observation(&ctrl.base, &obs);
+	REQUIRE(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
 	const xrt_pose trusted = ctrl.last_tracked_pose;
 	const timepoint_ns trusted_ns = ctrl.last_tracked_pose_ts;
 	const auto tilt_updates = ctrl.optical_tilt_updates;
@@ -1912,7 +1955,7 @@ TEST_CASE("Rift S unconfirmed position candidates cannot rotate or replace the a
 	math_quat_from_angle_vector(DEG_TO_RAD(30.f), &yaw_axis, &obs.pose.orientation);
 	for (int i = 1; i <= 2; ++i) {
 		obs.capture_ns = trusted_ns + i * 10000000LL;
-		rift_s_controller_push_pose_observation(&ctrl.base, &obs);
+		CHECK_FALSE(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
 		CHECK(ctrl.last_tracked_pose_ts == trusted_ns);
 		CHECK(ctrl.last_tracked_pose.position.x == trusted.position.x);
 		CHECK(ctrl.fusion.rot.y == Catch::Approx(0).margin(1e-6));
@@ -1922,12 +1965,59 @@ TEST_CASE("Rift S unconfirmed position candidates cannot rotate or replace the a
 	// A continuous fit at the trusted position clears the rejected candidate.
 	obs.capture_ns += 10000000LL;
 	obs.pose = trusted;
-	rift_s_controller_push_pose_observation(&ctrl.base, &obs);
+	CHECK(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
 	CHECK(ctrl.position_filter.candidate_count == 0);
 	CHECK(ctrl.last_tracked_pose_ts == obs.capture_ns);
 	CHECK(ctrl.diagnostics.optical_accepted == 2);
 	if (ctrl.imu_clock)
 		m_clock_windowed_skew_tracker_destroy(ctrl.imu_clock);
+	os_mutex_destroy(&ctrl.mutex);
+}
+
+TEST_CASE("Rift S confirmed optical reacquisition seeds an age-lost controller without a second search")
+{
+	rift_s_controller ctrl{};
+	ctrl.gravity_initialized = true;
+	ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
+	ctrl.fusion.rot = ctrl.pose.orientation = XRT_QUAT_IDENTITY;
+	os_mutex_init(&ctrl.mutex);
+	rift_s_position_filter_reset(&ctrl.position_filter);
+	ctrl.position_filter.accel_noise_density = 0.31;
+	ctrl.position_filter.bias_random_walk = 0.002;
+	for (int i = 0; i < 100; ++i)
+		REQUIRE(rift_s_controller_record_attitude(&ctrl, 1000000000LL + i * 2000000LL,
+		                                         1000000000LL + i * 2000000LL));
+	t_constellation_pose_observation obs{};
+	obs.capture_ns = 1100000000LL;
+	obs.pose = XRT_POSE_IDENTITY;
+	obs.pose.position = {0.1f, 1.1f, -0.4f};
+	obs.position_covariance[0] = obs.position_covariance[4] = obs.position_covariance[8] = 1e-6f;
+	obs.hypothesis = "confirmed_constellation";
+	REQUIRE(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
+	const xrt_vec3 zero{};
+	for (int i = 100; i <= 420; ++i) {
+		const timepoint_ns ns = 1000000000LL + i * 2000000LL;
+		rift_s_position_filter_imu(&ctrl.position_filter, ns, &zero);
+		REQUIRE(rift_s_controller_record_attitude(&ctrl, ns, ns));
+	}
+	obs.capture_ns = 1800000000LL;
+	obs.pose.position.x += 1;
+	SECTION("Age-based optical loss accepts the already confirmed new track") {
+		REQUIRE(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
+		CHECK(ctrl.position_filter.track_updates == 1);
+		CHECK(ctrl.position_filter.history_count > 0);
+		CHECK(ctrl.position_filter.state.t == 1840000000LL);
+		CHECK(ctrl.position_filter.state.x[0][0] == Catch::Approx(obs.pose.position.x));
+		CHECK(ctrl.position_filter.accel_noise_density == 0.31);
+		CHECK(ctrl.position_filter.bias_random_walk == 0.002);
+		CHECK(ctrl.diagnostics.optical_accepted == 2);
+	}
+	SECTION("A clock discontinuity retains the filter's confirmation gate") {
+		rift_s_position_filter_suspend(&ctrl.position_filter);
+		CHECK_FALSE(rift_s_controller_push_pose_observation(&ctrl.base, &obs));
+		CHECK(ctrl.position_filter.suspended);
+		CHECK(ctrl.diagnostics.optical_accepted == 1);
+	}
 	os_mutex_destroy(&ctrl.mutex);
 }
 
@@ -2001,7 +2091,7 @@ TEST_CASE("Rift S controller does not integrate missing radio motion")
 	CHECK(ctrl.fusion.rot.w == Catch::Approx(before.w));
 	CHECK(ctrl.attitude_history_count == 0);
 	CHECK_FALSE(ctrl.optical_heading_valid);
-	CHECK(ctrl.position_filter.frozen);
+	CHECK(ctrl.position_filter.suspended);
 	REQUIRE(rift_s_controller_record_attitude(&ctrl, 3000000000LL, 3000000000LL));
 	rift_s_attitude_sample sample{};
 	CHECK_FALSE(rift_s_controller_get_attitude(&ctrl, 2000000000LL, &sample));

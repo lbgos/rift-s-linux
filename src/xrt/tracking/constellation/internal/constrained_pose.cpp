@@ -1,6 +1,7 @@
 // Copyright 2026, lbgos
 // SPDX-License-Identifier: BSL-1.0
 #include "constrained_pose.h"
+#include "tracking/t_constellation_motion.h"
 
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
@@ -918,8 +919,8 @@ prior_pairs(Context &ctx, const Pose &prior)
 void
 constellation_constrained_default_config(constellation_constrained_config *c)
 {
-	/* Score/association gates and the angular separation follow the stock Windows defaults.
-	 * Everything else is Monado policy chosen with the synthetic
+	/* Score/association gates and the angular separation are compiled defaults named in the
+	 * handoff specification. Everything else is Monado policy chosen with the synthetic
 	 * partial-ring tests in tests_constellation_constrained: object-space ray noise 1 mm,
 	 * position std 3 cm, yaw std 20 degrees, ambiguity gap chi-square 9, at least 4 observations
 	 * of 3 distinct LEDs (cold and tracking), at most one unmatched blob within 8 mm (twice the
@@ -1362,7 +1363,7 @@ void
 constellation_constrained_default_motion_limits(constellation_motion_limits *limits)
 {
 	// Proposed values: fast hand motion stays below about 3 m/s; 2 cm covers fit noise.
-	*limits = {3.0, 0.02, 10 * pi / 180, 300000000};
+	*limits = {3.0, 0.02, 10 * pi / 180, T_CONSTELLATION_TRACK_MAX_GAP_NS};
 }
 
 bool

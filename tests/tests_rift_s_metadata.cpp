@@ -237,7 +237,7 @@ TEST_CASE("Rift S controller IR LED register matches the Windows radio requests"
 	REQUIRE(rift_s_encode_controller_irled_read(read.data()) == 4);
 	CHECK(read == std::array<uint8_t, 4>{0x28, 0x00, 0xe8, 0x03});
 
-	// The Windows runtime wrote 19/40000 to both controllers.
+	// The Windows session wrote 19/40000 to both controllers (OVRService input.cpp:2277).
 	rift_s_controller_irled_config cfg{40000, 19};
 	std::array<uint8_t, 12> write{};
 	REQUIRE(rift_s_encode_controller_irled_write(&cfg, write.data()) == 12);

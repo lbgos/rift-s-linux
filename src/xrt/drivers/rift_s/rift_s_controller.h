@@ -197,9 +197,6 @@ struct rift_s_controller
 	float last_position_covariance[9];
 	//! Aim/grip position: IMU acceleration integrated at IMU rate, corrected by optical fixes.
 	struct rift_s_position_filter position_filter;
-	//! Presentation-only translation correction after held position reacquires optics.
-	struct xrt_vec3 reacquire_offset;
-	timepoint_ns reacquire_started_ns;
 	//! Successful and reliable optical fixes in the current track (inputs of the loss ladder).
 	uint32_t track_vision_updates, track_reliable_updates;
 	//! Capture time of the newest optical fix given to position_filter.
@@ -405,8 +402,13 @@ rift_s_controller_push_observed_pose(struct xrt_device *xdev, timepoint_ns frame
 bool
 rift_s_controller_get_led_model(struct xrt_device *xdev, struct t_constellation_led_model *led_model);
 // Accept an optical fit. Yaw is corrected only when the fit itself observed it.
-void
+bool
 rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_constellation_pose_observation *obs);
+
+// Feed motion models from the current capture-time filter state. Caller holds the controller mutex
+// and keeps the system devices alive, as the radio dispatch does.
+void
+rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns);
 
 // Controller pose callback. Optical loss preserves IMU orientation and estimates hand position.
 xrt_result_t

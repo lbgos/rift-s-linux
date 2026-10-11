@@ -1,6 +1,7 @@
 // Copyright 2026, lbgos
 // SPDX-License-Identifier: BSL-1.0
 #include "catch_amalgamated.hpp"
+#include "../src/xrt/state_trackers/steamvr_drv/ovrd_world_universe.hpp"
 #include "rift_s/rift_s_slam_guard.h"
 #include "math/m_api.h"
 #include "math/m_vec3.h"
@@ -364,20 +365,27 @@ TEST_CASE("SLAM cannot publish invalid quaternions or a gravity flip")
 	CHECK(rift_s_slam_guard_pose_usable(&inverted, &inverted.orientation));
 }
 
-TEST_CASE("Saved boundary publishes only its recovered world frame after restart")
+TEST_CASE("Failed room localization keeps HMD tracking in an uncalibrated universe")
 {
 	Sim s;
 	s.no_pose = {0, 1.6f, 0};
 	s.g.require_relocalization = true;
 	xrt_pose raw = {yaw_quat(-0.8f), {0.4f, 0.2f, -0.3f}}, out;
-	rift_s_slam_guard_reason reason;
-	for (unsigned i = 0; i < 160; ++i)
-		CHECK_FALSE(s.step(true, raw, &out, &reason));
-	CHECK(reason == RIFT_S_SLAM_GUARD_RELOCALIZING);
-	CHECK_FALSE(s.g.world_valid);
+	REQUIRE(s.settle(raw) > 0);
+	REQUIRE(s.g.world_valid);
 	CHECK_FALSE(s.g.boundary_confirmed);
+	CHECK(rift_s_world_universe("relocalizing", s.ts, s.ts) == 3);
 	CHECK(s.g.resets == 0);
+	xrt_vec3 first = s.g.good.position;
+	for (unsigned i = 0; i < 200; ++i) {
+		raw.position.x += 0.002f;
+		REQUIRE(s.step(true, raw, &out));
+	}
+	CHECK(dist(first, out.position) == Catch::Approx(0.4f).margin(1e-5));
+	CHECK_FALSE(s.g.boundary_confirmed);
+	CHECK(rift_s_slam_guard_query(&s.g, &raw, s.ts, &s.fusion, &s.no_pose, &out));
 
+	// A later room match switches directly to the saved coordinates before enabling bounds.
 	xrt_pose world = {yaw_quat(0.6f), {-0.7f, 1.3f, 0.3f}};
 	rift_s_slam_guard_set_world(&s.g, &world);
 	REQUIRE(s.step(true, raw, &out));
@@ -387,42 +395,48 @@ TEST_CASE("Saved boundary publishes only its recovered world frame after restart
 	CHECK(yaw_of(out.orientation) == Catch::Approx(-0.2f).margin(1e-6));
 	CHECK_FALSE(s.g.world_transition);
 	CHECK(s.g.divergences == 0);
+	CHECK(rift_s_world_universe("localized", s.ts, s.ts) == 2);
 
-	// The replacement VIO gauge must be matched again, while the saved standing origin stays put.
+	// A backend reset loses the room binding, but cannot strand a stable replacement VIO.
 	s.g.reset_pending = true;
 	REQUIRE(rift_s_slam_guard_take_reset(&s.g, s.ts));
 	rift_s_slam_guard_suspend(&s.g, &s.fusion);
 	raw = {yaw_quat(1.2f), {-0.3f, 0.1f, 0.2f}};
-	for (unsigned i = 0; i < 160; ++i)
-		CHECK_FALSE(s.step(true, raw, &out, &reason));
-	CHECK(reason == RIFT_S_SLAM_GUARD_RELOCALIZING);
-	CHECK_FALSE(s.g.world_valid);
+	REQUIRE(s.settle(raw) > 0);
 	CHECK_FALSE(s.g.boundary_confirmed);
+	CHECK(rift_s_world_universe("relocalizing", s.ts, s.ts) == 3);
 	xrt_pose inverse, recovered;
 	math_pose_invert(&raw, &inverse);
 	math_pose_transform(&expected, &inverse, &recovered);
 	rift_s_slam_guard_set_world(&s.g, &recovered);
 	REQUIRE(s.step(true, raw, &out));
 	CHECK(dist(out.position, expected.position) < 1e-6);
-	CHECK(yaw_of(out.orientation) == Catch::Approx(yaw_of(expected.orientation)).margin(1e-6));
 	CHECK_FALSE(s.g.world_transition);
 }
 
-TEST_CASE("Restoring saved bounds revokes a room setup's unconfirmed frame")
+TEST_CASE("Room calibration is enabled only by a fresh confirmed room or explicit setup")
 {
+	const int64_t now = 10000000000LL;
+	CHECK(rift_s_world_universe("setup", now, now) == 2);
+	CHECK(rift_s_world_universe("localized", now, now) == 2);
+	for (auto status : {"", "unanchored", "relocalizing", "save_failed"})
+		CHECK(rift_s_world_universe(status, now, now) == 3);
+	CHECK(rift_s_world_universe("localized", 0, now) == 3);
+	CHECK(rift_s_world_universe("localized", now + 1, now) == 3);
+	CHECK(rift_s_world_universe("localized", now - 2000000001LL, now) == 3);
+	CHECK(rift_s_world_universe("localized", now - 1, now, now) == 3);
+	CHECK(rift_s_world_universe("localized", now, now + 1, now) == 2);
+
 	Sim s;
 	s.no_pose = {0, 1.6f, 0};
 	xrt_pose raw = XRT_POSE_IDENTITY, out;
 	REQUIRE(s.settle(raw) > 0);
-	REQUIRE(s.g.world_valid);
 	s.g.require_relocalization = true;
-	CHECK_FALSE(rift_s_slam_guard_query(&s.g, &raw, s.ts, &s.fusion, &s.no_pose, &out));
-	CHECK_FALSE(s.step(true, raw, &out));
-	CHECK_FALSE(s.g.world_valid);
-	CHECK_FALSE(s.g.world_transition);
+	CHECK(rift_s_slam_guard_query(&s.g, &raw, s.ts, &s.fusion, &s.no_pose, &out));
+	REQUIRE(s.step(true, raw, &out));
+	CHECK_FALSE(s.g.boundary_confirmed);
 	xrt_pose saved{yaw_quat(0.4f), {-0.2f, 1.6f, 0.3f}};
 	rift_s_slam_guard_set_world(&s.g, &saved);
-	REQUIRE(s.settle(raw) > 0);
 	REQUIRE(s.step(true, raw, &out));
 	CHECK(dist(out.position, saved.position) < 1e-6);
 	CHECK(yaw_of(out.orientation) == Catch::Approx(0.4f).margin(1e-6));

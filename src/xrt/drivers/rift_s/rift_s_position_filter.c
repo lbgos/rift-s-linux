@@ -15,8 +15,6 @@
 #include <math.h>
 #include <string.h>
 
-//! Velocity decay time constant while coasting without optical fixes.
-#define COAST_VELOCITY_TAU_S 0.5
 #define INITIAL_VELOCITY_VARIANCE (0.5 * 0.5)
 #define INITIAL_BIAS_VARIANCE (0.5 * 0.5)
 //! Longest single integration step; larger gaps are dropped radio packets.
@@ -34,7 +32,6 @@ propagate(const struct rift_s_position_filter *f,
           const struct xrt_vec3 *accel,
           timepoint_ns t)
 {
-	const bool coasting = f->coasting;
 	double dt = (double)(t - s->t) / U_TIME_1S_IN_NS;
 	s->t = t;
 	if (dt <= 0) {
@@ -43,21 +40,13 @@ propagate(const struct rift_s_position_filter *f,
 	if (dt > MAX_STEP_S) {
 		dt = MAX_STEP_S;
 	}
-	if (coasting && f->track_updates < RIFT_S_POSITION_FILTER_MATURE_UPDATES) {
-		// A young track's velocity comes from a handful of fixes, possibly a wrong one: hold.
-		for (int axis = 0; axis < 3; axis++) {
-			s->x[axis][1] = 0;
-		}
-		return;
-	}
 	const double a[3] = {accel->x, accel->y, accel->z};
-	const double d = coasting ? exp(-dt / COAST_VELOCITY_TAU_S) : 1.0;
-	const double F[3][3] = {{1, dt, -0.5 * dt * dt}, {0, d, -d * dt}, {0, 0, 1}};
+	const double F[3][3] = {{1, dt, -0.5 * dt * dt}, {0, 1, -dt}, {0, 0, 1}};
 	for (int axis = 0; axis < 3; axis++) {
 		double *x = s->x[axis];
 		double u = a[axis] - x[2];
 		x[0] += x[1] * dt + 0.5 * u * dt * dt;
-		x[1] = d * (x[1] + u * dt);
+		x[1] += u * dt;
 
 		double FP[3][3] = {{0}};
 		double (*P)[3] = s->P[axis];
@@ -133,28 +122,12 @@ rift_s_position_filter_imu(struct rift_s_position_filter *f, timepoint_ns t, con
 		f->last_accel = *accel_world;
 		return;
 	}
-	if (f->frozen) {
+	if (f->suspended) {
 		f->state.t = t;
 	} else {
 		propagate(f, &f->state, accel_world, t);
 	}
 	f->last_accel = *accel_world;
-	if (f->initialized && t - f->last_fix_ns > 120 * U_TIME_1MS_IN_NS) {
-		// No measurement can correct acceleration/tilt error while occluded. Bound the
-		// displacement from the last optical fix, including before coasting was noticed.
-		double delta[3] = {f->state.x[0][0] - f->last_fix_position.x, f->state.x[1][0] - f->last_fix_position.y,
-		                   f->state.x[2][0] - f->last_fix_position.z};
-		double distance = sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-		if (distance > 0.1) {
-			const double base[3] = {f->last_fix_position.x, f->last_fix_position.y, f->last_fix_position.z};
-			for (int axis = 0; axis < 3; ++axis) {
-				f->state.x[axis][0] = base[axis] + delta[axis] * 0.1 / distance;
-				f->state.x[axis][1] = 0;
-			}
-		}
-		if (t - f->last_fix_ns > RIFT_S_POSITION_FILTER_BRIDGE_NS)
-			rift_s_position_filter_freeze(f);
-	}
 	if (f->history_count == RIFT_S_POSITION_FILTER_HISTORY) {
 		f->history_start = (f->history_start + 1) % RIFT_S_POSITION_FILTER_HISTORY;
 		f->history_count--;
@@ -197,13 +170,17 @@ confirm_candidate(struct rift_s_position_filter *f,
 	return f->candidate_count >= RIFT_S_POSITION_FILTER_CONFIRM_FIXES;
 }
 
-enum rift_s_position_fix_result
-rift_s_position_filter_fix(struct rift_s_position_filter *f,
+static enum rift_s_position_fix_result
+position_filter_fix(struct rift_s_position_filter *f,
                            timepoint_ns capture,
                            const struct xrt_vec3 *position,
                            const struct xrt_vec3 *variance,
-                           float reset_distance_m)
+                           float reset_distance_m,
+                           bool confirmed_reacquire)
 {
+	// Optical age loss has already passed Constellation's track confirmation.
+	// A clock discontinuity still needs independent filter confirmation.
+	confirmed_reacquire = confirmed_reacquire && !f->suspended;
 	// First retained input after the capture time.
 	unsigned int next = 0;
 	while (next < f->history_count && input_at(f, next)->t <= capture) {
@@ -211,7 +188,7 @@ rift_s_position_filter_fix(struct rift_s_position_filter *f,
 	}
 	// A fix needs the state at or before its capture time; the oldest retained input only has
 	// the state after it.
-	bool reset = !f->initialized || f->frozen;
+	bool reset = !f->initialized || f->suspended || confirmed_reacquire;
 	bool stale = f->history_count != 0 ? next == 0 : capture < f->state.t;
 	if (f->initialized && stale) {
 		f->stale++;
@@ -235,7 +212,8 @@ rift_s_position_filter_fix(struct rift_s_position_filter *f,
 			f->innovation_count++;
 		}
 	}
-	if (reset && f->initialized && !confirm_candidate(f, capture, position, reset_distance_m)) {
+	if (reset && f->initialized && !confirmed_reacquire &&
+	    !confirm_candidate(f, capture, position, reset_distance_m)) {
 		f->rejected++;
 		return RIFT_S_POSITION_FIX_PENDING;
 	}
@@ -252,20 +230,39 @@ rift_s_position_filter_fix(struct rift_s_position_filter *f,
 	f->initialized = true;
 	f->last_fix_ns = capture;
 	f->last_fix_position = *position;
-	f->frozen = false;
-	f->coasting = false;
+	f->suspended = false;
 	// Inputs before the capture keep their states; later ones are replayed from the fused state.
 	replay(f, s, next);
 	return reset ? RIFT_S_POSITION_FIX_RESET : RIFT_S_POSITION_FIX_UPDATED;
 }
 
-void
-rift_s_position_filter_freeze(struct rift_s_position_filter *f)
+enum rift_s_position_fix_result
+rift_s_position_filter_fix(struct rift_s_position_filter *f,
+                           timepoint_ns capture,
+                           const struct xrt_vec3 *position,
+                           const struct xrt_vec3 *variance,
+                           float reset_distance_m)
 {
-	if (!f->initialized || f->frozen) {
+	return position_filter_fix(f, capture, position, variance, reset_distance_m, false);
+}
+
+enum rift_s_position_fix_result
+rift_s_position_filter_reacquire(struct rift_s_position_filter *f,
+                                 timepoint_ns capture,
+                                 const struct xrt_vec3 *position,
+                                 const struct xrt_vec3 *variance,
+                                 float reset_distance_m)
+{
+	return position_filter_fix(f, capture, position, variance, reset_distance_m, true);
+}
+
+void
+rift_s_position_filter_suspend(struct rift_s_position_filter *f)
+{
+	if (!f->initialized || f->suspended) {
 		return;
 	}
-	f->frozen = true;
+	f->suspended = true;
 	for (int axis = 0; axis < 3; axis++) {
 		f->state.x[axis][1] = 0;
 	}
@@ -279,7 +276,7 @@ rift_s_position_filter_predict(const struct rift_s_position_filter *f,
                                struct xrt_vec3 *out_velocity)
 {
 	time_duration_ns ahead = t - f->state.t;
-	if (ahead < 0 || f->frozen || (f->initialized && t - f->last_fix_ns > RIFT_S_POSITION_FILTER_BRIDGE_NS)) {
+	if (ahead < 0 || f->suspended) {
 		ahead = 0;
 	} else if (ahead > max_horizon_ns) {
 		ahead = max_horizon_ns;
@@ -292,21 +289,6 @@ rift_s_position_filter_predict(const struct rift_s_position_filter *f,
 	out_position->x = (float)(s->x[0][0] + s->x[0][1] * dt);
 	out_position->y = (float)(s->x[1][0] + s->x[1][1] * dt);
 	out_position->z = (float)(s->x[2][0] + s->x[2][1] * dt);
-	if (f->initialized && t - f->last_fix_ns > 120 * U_TIME_1MS_IN_NS) {
-		// Queries can run beyond the last IMU sample, including during a radio gap.
-		double delta[3] = {out_position->x - f->last_fix_position.x, out_position->y - f->last_fix_position.y,
-		                   out_position->z - f->last_fix_position.z};
-		double distance = sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-		if (distance > 0.1) {
-			out_position->x = (float)(f->last_fix_position.x + delta[0] * 0.1 / distance);
-			out_position->y = (float)(f->last_fix_position.y + delta[1] * 0.1 / distance);
-			out_position->z = (float)(f->last_fix_position.z + delta[2] * 0.1 / distance);
-			*out_velocity = (struct xrt_vec3){0};
-		}
-		if (t - f->last_fix_ns > RIFT_S_POSITION_FILTER_BRIDGE_NS) {
-			*out_velocity = (struct xrt_vec3){0};
-		}
-	}
 }
 
 void

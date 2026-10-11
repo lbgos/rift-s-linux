@@ -152,6 +152,10 @@ TEST_CASE("Saved floor sends a numeric detection and only seeds manual entry onc
 		}
 	} paths;
 	roomsetup::SavedFloor floor{&messages, &paths};
+	// An unlocalized room must not inject either the old plane or a manual-floor reset.
+	CHECK_FALSE(floor.publish(true, false));
+	CHECK_FALSE(floor.publish(false, false));
+	CHECK(messages.sent.empty());
 	REQUIRE(floor.publish());
 	REQUIRE(messages.sent.size() == 1);
 	auto *result = cJSON_Parse(messages.sent[0].c_str());
@@ -166,6 +170,8 @@ TEST_CASE("Saved floor sends a numeric detection and only seeds manual entry onc
 	REQUIRE(reset);
 	CHECK(cJSON_GetNumberValue(cJSON_GetObjectItem(reset, "value_source")) == 2);
 	cJSON_Delete(reset);
+	CHECK_FALSE(floor.publish(true, false));
+	CHECK(messages.sent.size() == 3);
 }
 
 TEST_CASE("Boundary warning retries failed delivery and removal")

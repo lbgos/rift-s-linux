@@ -44,7 +44,7 @@ enum u_logging_level rift_s_log_level;
  *
  */
 
-DEBUG_GET_ONCE_LOG_OPTION(rift_s_log, "RIFT_S_LOG", U_LOGGING_INFO)
+DEBUG_GET_ONCE_LOG_OPTION(rift_s_log, "RIFT_S_LOG", U_LOGGING_WARN)
 
 #ifdef XRT_BUILD_DRIVER_HANDTRACKING
 DEBUG_GET_ONCE_BOOL_OPTION(rift_s_hand_tracking_as_controller, "RIFT_S_HAND_TRACKING_AS_CONTROLLERS", false)

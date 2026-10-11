@@ -37,8 +37,8 @@ struct rift_s_world_anchor_result
 	bool recorded, relocalized;
 };
 
-// Opt-in bench recorder. Writes at most 600 synchronized camera sets and capture-time SLAM poses.
-// RIFT_S_WORLD_RECORD_DIR is honored only with MONADO_STEAMVR_BENCH enabled.
+// Opt-in diagnostics recorder. Writes synchronized camera sets and capture-time SLAM poses.
+// RIFT_S_WORLD_RECORD_DIR does not change tracking. RIFT_S_WORLD_RECORD_LIMIT caps sets at 1..600.
 void
 rift_s_world_anchor_record_frames(struct rift_s_world_anchor *anchor,
                                   const struct xrt_frame *left,

@@ -6,7 +6,7 @@
  *
  * Validate source samples, separately from historical and predicted queries. A lost pose holds
  * position and follows IMU attitude. Ordinary loss retains the map alignment; a backend reset
- * invalidates it. A saved world requires visual relocalization, never a held-head realignment.
+ * invalidates it. Temporary tracking does not confirm a saved boundary's world frame.
  * @ingroup drv_rift_s
  */
 #include "rift_s_slam_guard.h"
@@ -47,13 +47,21 @@ rift_s_slam_guard_pose_usable(const struct xrt_pose *p, const struct xrt_quat *f
 void
 rift_s_slam_guard_set_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam)
 {
+	bool confirmed = g->boundary_confirmed;
 	g->boundary_confirmed = true;
-	g->world_transition = g->world_valid && g->have_good && g->state == RIFT_S_SLAM_GUARD_TRACKING;
+	g->world_transition = confirmed && g->world_valid && g->have_good &&
+	                      g->state == RIFT_S_SLAM_GUARD_TRACKING;
 	if (g->world_transition) {
 		g->transition_from = g->align;
 		g->transition_to = *world_from_slam;
 		g->transition_start_ns = g->good_ns;
 	} else {
+		if (g->world_valid && g->have_good) {
+			struct xrt_pose inverse, raw_good;
+			math_pose_invert(&g->align, &inverse);
+			math_pose_transform(&inverse, &g->good, &raw_good);
+			math_pose_transform(world_from_slam, &raw_good, &g->good);
+		}
 		g->align = *world_from_slam;
 	}
 	g->world_valid = true;
@@ -100,7 +108,6 @@ rift_s_slam_guard_query(const struct rift_s_slam_guard *g, const struct xrt_pose
                          struct xrt_pose *out)
 {
 	if (g->state != RIFT_S_SLAM_GUARD_TRACKING || !g->world_valid ||
-	    (g->require_relocalization && !g->boundary_confirmed) ||
 	    !rift_s_slam_guard_pose_usable(raw, fusion)) return false;
 	struct xrt_pose aligned;
 	apply_align(&g->align, raw, &aligned);
@@ -293,14 +300,6 @@ rift_s_slam_guard_update(struct rift_s_slam_guard *g,
                          struct xrt_pose *out_pose,
                          enum rift_s_slam_guard_reason *out_reason)
 {
-	if (g->require_relocalization && !g->boundary_confirmed && g->world_valid) {
-		// A failed/cancelled setup can restore saved bounds while the fresh frame is still
-		// active. Revoke that frame before either source or predicted poses are published.
-		g->world_valid = false;
-		g->world_transition = false;
-		if (g->state == RIFT_S_SLAM_GUARD_TRACKING)
-			enter_diverged(g, ts_ns, fusion_orientation, false, 0, 0);
-	}
 	bool usable = slam_valid && rift_s_slam_guard_pose_usable(slam_pose, fusion_orientation);
 	if (usable) {
 		g->invalid_since_ns = 0;
@@ -387,14 +386,8 @@ rift_s_slam_guard_update(struct rift_s_slam_guard *g,
 	}
 
 	if (!g->world_valid) {
-		if (g->require_relocalization && !g->boundary_confirmed) {
-			// SteamVR's saved standing origin belongs to the persisted map, not this VIO
-			// run's arbitrary yaw/translation. Only a visual match can join those frames.
-			*out_reason = RIFT_S_SLAM_GUARD_RELOCALIZING;
-			*out_pose = fallback;
-			return false;
-		}
-		// An explicitly new room can start a fresh frame before it has saved landmarks.
+		// Track in a session frame while matching the saved room. SteamVR must keep
+		// its saved bounds in a separate universe until boundary_confirmed is true.
 		struct xrt_quat inv_raw, delta;
 		math_quat_invert(&slam_pose->orientation, &inv_raw);
 		math_quat_rotate(&fallback.orientation, &inv_raw, &delta);

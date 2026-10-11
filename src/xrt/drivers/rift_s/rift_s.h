@@ -29,6 +29,7 @@
 #include "rift_s_protocol.h"
 #include "rift_s_radio.h"
 #include "rift_s_tracker.h"
+#include "rift_s_motion.h"
 
 #ifndef RIFT_S_H
 #define RIFT_S_H
@@ -111,6 +112,8 @@ struct rift_s_system
 
 	/* Controller devices */
 	struct rift_s_controller *controllers[MAX_TRACKED_DEVICES];
+	//! Shared controller motion cache, fed at IMU capture time.
+	struct rift_s_motion *motion;
 
 	/* Video feed handling */
 	struct xrt_frame_context xfctx;

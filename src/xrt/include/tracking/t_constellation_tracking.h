@@ -107,8 +107,8 @@ struct t_constellation_tracked_device_callbacks
 	void (*push_brightness_update)(struct xrt_device *xdev, uint8_t average_brightness);
 	//! True only when optical heading and capture-time attitude support a rotation prior.
 	bool (*has_heading_prior)(struct xrt_device *xdev, timepoint_ns capture_ns);
-	//! Optional: preferred over push_observed_pose when set, carries fit quality and yaw observability.
-	void (*push_pose_observation)(struct xrt_device *xdev, const struct t_constellation_pose_observation *obs);
+	//! Optional: preferred over push_observed_pose. False releases the hypothesis and its blobs.
+	bool (*push_pose_observation)(struct xrt_device *xdev, const struct t_constellation_pose_observation *obs);
 };
 
 struct t_constellation_tracked_device_connection *

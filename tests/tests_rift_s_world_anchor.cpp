@@ -3,6 +3,7 @@
 #include "catch_amalgamated.hpp"
 #include "rift_s_world_anchor.h"
 #include "rift_s_slam_guard.h"
+#include "../src/xrt/state_trackers/steamvr_drv/ovrd_world_universe.hpp"
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
@@ -505,7 +506,8 @@ TEST_CASE("Cross-session camera map replay", "[.camera-replay]")
 	};
 	unsigned keyframes = 0, matched = 0, attempted = 0, confirmations = 0;
 	int64_t start_ns = 0, confirmed_ns = 0, previous_ns = 0;
-	xrt_pose previous = XRT_POSE_IDENTITY, confirmed = XRT_POSE_IDENTITY, confirmed_head = XRT_POSE_IDENTITY;
+	xrt_pose previous = XRT_POSE_IDENTITY, confirmed = XRT_POSE_IDENTITY, confirmed_head = XRT_POSE_IDENTITY,
+	         confirmed_raw = XRT_POSE_IDENTITY;
 	double max_error = 0, max_vote_translation = 0, max_vote_angle = 0;
 	for (const auto &[dir, record] :
 	     {std::pair{std::string(session_a), true}, std::pair{std::string(session_b), false}}) {
@@ -618,6 +620,7 @@ TEST_CASE("Cross-session camera map replay", "[.camera-replay]")
 				confirmed_ns = ts;
 				confirmed = candidate;
 				confirmed_head = result.world_from_imu;
+				confirmed_raw = raw;
 			}
 			std::printf(
 			    "Replay time_s=%.3f inliers=%u/%u error_px=%.3f votes=%u transform=%.4f,%.4f,%.4f\n",
@@ -637,6 +640,29 @@ TEST_CASE("Cross-session camera map replay", "[.camera-replay]")
 	if (!load_only)
 		REQUIRE(keyframes > 0);
 	REQUIRE(confirmed_ns > 0);
+	if (!load_only && std::strcmp(session_a, session_b) == 0) {
+		// Replaying the same exposures must recover their original gauge, not only
+		// an internally consistent but displaced room pose.
+		CHECK(cv::norm(translation(confirmed)) < 0.025);
+		cv::Vec3d delta;
+		cv::Rodrigues(rotation(confirmed.orientation), delta);
+		CHECK(cv::norm(delta) < M_PI / 180);
+	}
+	rift_s_slam_guard guard{};
+	rift_s_slam_guard_init(&guard);
+	guard.require_relocalization = c.require_boundary;
+	CHECK(rift_s_world_universe("relocalizing", confirmed_ns, confirmed_ns) == 3);
+	rift_s_slam_guard_set_world(&guard, &confirmed);
+	REQUIRE(guard.world_valid);
+	REQUIRE(guard.boundary_confirmed);
+	CHECK_FALSE(guard.world_transition);
+	CHECK(rift_s_world_universe("localized", confirmed_ns, confirmed_ns) == 2);
+	xrt_pose published;
+	math_pose_transform(&guard.align, &confirmed_raw, &published);
+	CHECK(cv::norm(translation(published) - translation(confirmed_head)) < 0.0001);
+	std::printf("Replay publication helper universe=2 saved_world_error_m=%.6f\n",
+	            cv::norm(translation(published) - translation(confirmed_head)));
+
 }
 
 TEST_CASE("Native fisheye recovery tolerates subpixel peripheral feature noise")
@@ -657,6 +683,27 @@ TEST_CASE("Native fisheye recovery tolerates subpixel peripheral feature noise")
 	CHECK(cv::norm(translation(result.world_from_imu) - translation(expected)) < 0.025);
 	CHECK(result.inliers[0] >= 60);
 	CHECK(result.inliers[1] >= 60);
+}
+
+TEST_CASE("Fisheye PnP seed retains native-pixel support at peripheral bearings")
+{
+	auto c = calibration();
+	xrt_pose expected{{0, 0.24740396f, 0, 0.96891242f}, {0.2f, 0.1f, -0.45f}};
+	auto peripheral = observations(c, expected);
+	for (auto &eye : peripheral) {
+		eye.erase(std::remove_if(eye.begin(), eye.end(), [](const auto &o) {
+			return o.pixel.x > 200 && o.pixel.x < 450;
+		}), eye.end());
+		for (unsigned i = 0; i < eye.size(); ++i) {
+			eye[i].pixel.x += float(1.4 * std::sin(i * 1.7));
+			eye[i].pixel.y += float(1.4 * std::cos(i * 2.3));
+		}
+	}
+	rift_s_world_anchor_result result{};
+	REQUIRE(solve(c, peripheral, result));
+	CHECK(result.supporting_cameras == 2);
+	CHECK(result.max_reprojection_px <= 2.5f);
+	CHECK(cv::norm(translation(result.world_from_imu) - translation(expected)) < 0.025);
 }
 
 TEST_CASE("Native reprojection drops a few wrong correspondences without losing the room")

@@ -188,6 +188,16 @@ attitude_sample(struct rift_s_controller *ctrl, unsigned int index)
 	return &ctrl->attitude_history[(ctrl->attitude_history_start + index) % RIFT_S_ATTITUDE_HISTORY_CAPACITY];
 }
 
+static void
+suspend_position_tracking(struct rift_s_controller *ctrl)
+{
+	rift_s_position_filter_suspend(&ctrl->position_filter);
+	if (ctrl->sys != NULL) {
+		rift_s_motion_reset_hand(ctrl->sys->motion,
+		                         ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0);
+	}
+}
+
 /* Forget the device-to-host clock mapping and everything captured against it. The next sample
  * starts a new mapping. Caller holds the mutex. */
 static void
@@ -202,7 +212,7 @@ reset_clock_mapping(struct rift_s_controller *ctrl)
 	ctrl->clock_stable_samples = 0;
 	ctrl->optical_heading_valid = false;
 	// Retained IMU times no longer match the optical capture times: hold the position.
-	rift_s_position_filter_freeze(&ctrl->position_filter);
+	suspend_position_tracking(ctrl);
 }
 
 bool
@@ -262,7 +272,7 @@ rift_s_controller_record_attitude(struct rift_s_controller *ctrl,
 		ctrl->attitude_history_count = ctrl->clock_stable_samples = 0;
 		ctrl->optical_heading_valid = false;
 		// Retained IMU times no longer match the optical capture times: hold the position.
-		rift_s_position_filter_freeze(&ctrl->position_filter);
+		suspend_position_tracking(ctrl);
 		ctrl->diagnostics.reject_clock++;
 		ctrl->diagnostics.reject_clock_by[RIFT_S_CLOCK_DISCONTINUITY]++;
 	}
@@ -651,7 +661,7 @@ reset_fusion_interval(struct rift_s_controller *ctrl, const struct xrt_quat *ori
 	ctrl->gravity_accel_sum = ctrl->gravity_gyro_sum = (struct xrt_vec3){0};
 	ctrl->gravity_moving = false;
 	ctrl->rest = (struct rift_s_rest_stats){0};
-	rift_s_position_filter_freeze(&ctrl->position_filter);
+	suspend_position_tracking(ctrl);
 }
 
 static bool
@@ -813,8 +823,6 @@ static void
 reset_position_filter(struct rift_s_controller *ctrl)
 {
 	rift_s_position_filter_reset(&ctrl->position_filter);
-	ctrl->reacquire_offset = (struct xrt_vec3){0};
-	ctrl->reacquire_started_ns = 0;
 	float accel_noise = debug_get_float_option_rift_s_position_accel_noise();
 	float bias_walk = debug_get_float_option_rift_s_position_bias_walk();
 	if (accel_noise > 0) {
@@ -833,15 +841,13 @@ reset_position_filter(struct rift_s_controller *ctrl)
 #define RIFT_S_POSITION_RESET_DISTANCE_M 0.15f
 // Longest render-time extrapolation of aim/grip.
 #define RIFT_S_MAX_PREDICTION_NS (100 * U_TIME_1MS_IN_NS)
-// Resume the optical filter immediately, but remove the held-pose display offset over 100 ms.
-#define RIFT_S_REACQUIRE_BLEND_NS (100 * U_TIME_1MS_IN_NS)
 
 enum position_tracking
 {
 	POSITION_NONE,     // never fixed: no position estimate
 	POSITION_TRACKED,  // fresh optical fix
 	POSITION_COASTING, // IMU-only, within the position duration of the loss ladder
-	POSITION_LOST,     // held at the last estimate, waiting for an optical reset
+	POSITION_LOST,     // no reliable position confidence
 };
 
 static enum position_tracking
@@ -851,17 +857,13 @@ position_tracking_at(const struct rift_s_controller *ctrl, timepoint_ns t, bool 
 	if (!ctrl->position_filter.initialized) {
 		return POSITION_NONE;
 	}
-	if (ctrl->position_filter.frozen) {
+	if (ctrl->position_filter.suspended) {
 		return POSITION_LOST;
 	}
 	time_duration_ns position_duration, velocity_duration;
 	rift_s_tracking_loss_durations(ctrl->track_vision_updates, ctrl->track_reliable_updates, &position_duration,
 	                               &velocity_duration);
 	time_duration_ns age = t > ctrl->last_fix_ns ? t - ctrl->last_fix_ns : 0;
-	if (position_duration > RIFT_S_POSITION_FILTER_BRIDGE_NS)
-		position_duration = RIFT_S_POSITION_FILTER_BRIDGE_NS;
-	if (velocity_duration > position_duration)
-		velocity_duration = position_duration;
 	*velocity_tracked = age <= velocity_duration;
 	if (age > position_duration) {
 		return POSITION_LOST;
@@ -869,23 +871,40 @@ position_tracking_at(const struct rift_s_controller *ctrl, timepoint_ns t, bool 
 	return age > RIFT_S_COAST_AFTER_NS ? POSITION_COASTING : POSITION_TRACKED;
 }
 
-// Apply the loss ladder at IMU time: coast, then hold the position once it is lost.
-static void
-update_position_tracking(struct rift_s_controller *ctrl, timepoint_ns capture_ns)
+// Adapt the Monado filter's current uncertainty to the model reliability gate. Normal
+// vision delivery latency must not activate a model merely because capture time is old.
+void
+rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns)
 {
+	if (ctrl->sys == NULL || ctrl->sys->motion == NULL || !ctrl->position_filter.initialized) {
+		return;
+	}
+	struct xrt_device *head = rift_s_system_get_hmd(ctrl->sys);
+	struct xrt_space_relation head_relation = XRT_SPACE_RELATION_ZERO;
+	if (head == NULL ||
+	    head->get_tracked_pose(head, XRT_INPUT_GENERIC_HEAD_POSE, capture_ns, &head_relation) != XRT_SUCCESS ||
+	    (head_relation.relation_flags &
+	     (XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)) !=
+	        (XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)) {
+		return;
+	}
 	bool velocity_tracked;
 	enum position_tracking state = position_tracking_at(ctrl, capture_ns, &velocity_tracked);
-	struct rift_s_position_filter *f = &ctrl->position_filter;
-	f->coasting = state == POSITION_COASTING;
-	if (state == POSITION_LOST && !f->frozen) {
-		rift_s_position_filter_freeze(f);
-		RIFT_S_DEBUG("Controller position hand=%s state=lost age_ms=%.1f vision_updates=%u reliable_updates=%u"
-		             " held=%.3f,%.3f,%.3f",
-		             hand_alias(ctrl), (double)(capture_ns - ctrl->last_fix_ns) / U_TIME_1MS_IN_NS,
-		             ctrl->track_vision_updates, ctrl->track_reliable_updates, f->state.x[0][0],
-		             f->state.x[1][0], f->state.x[2][0]);
-		ctrl->track_vision_updates = ctrl->track_reliable_updates = 0;
+	struct rift_s_motion_sample sample = {0};
+	sample.timestamp_ns = capture_ns;
+	sample.pose.orientation = ctrl->pose.orientation;
+	rift_s_position_filter_predict(&ctrl->position_filter, capture_ns, 0, &sample.pose.position,
+	                               &sample.linear_velocity);
+	sample.linear_acceleration = ctrl->world_accel;
+	sample.angular_velocity = ctrl->fusion.last.gyro;
+	for (int axis = 0; axis < 3; ++axis) {
+		sample.position_variance[axis] =
+		    state != POSITION_LOST && !ctrl->position_filter.suspended && ctrl->track_vision_updates >= 3
+		        ? ctrl->position_filter.state.P[axis][0][0]
+		        : -1;
 	}
+	unsigned int hand = ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0;
+	rift_s_motion_update(ctrl->sys->motion, hand, &sample, &head_relation.pose);
 }
 
 bool
@@ -1018,8 +1037,8 @@ handle_imu_update(struct rift_s_controller *ctrl,
 		timepoint_ns capture_ns = attitude_sample(ctrl, ctrl->attitude_history_count - 1)->capture_ns;
 		ctrl->last_imu_capture_ns = capture_ns;
 		if (ctrl->world_accel_valid) {
-			update_position_tracking(ctrl, capture_ns);
 			rift_s_position_filter_imu(&ctrl->position_filter, capture_ns, &ctrl->world_accel);
+			rift_s_controller_update_motion(ctrl, capture_ns);
 		}
 	}
 	if (log_imu) {
@@ -1629,22 +1648,8 @@ rift_s_controller_get_fusion_pose(struct rift_s_controller *ctrl,
 	return true;
 }
 
-// Translation smoothing is only for presentation, never the capture-time association prior.
-static bool
-apply_reacquire_offset(const struct rift_s_controller *ctrl, timepoint_ns t, struct xrt_vec3 *position)
-{
-	if (ctrl->reacquire_started_ns == 0 || t >= ctrl->reacquire_started_ns + RIFT_S_REACQUIRE_BLEND_NS) {
-		return false;
-	}
-	double u =
-	    t > ctrl->reacquire_started_ns ? (double)(t - ctrl->reacquire_started_ns) / RIFT_S_REACQUIRE_BLEND_NS : 0;
-	float weight = (float)(1 - u * u * (3 - 2 * u));
-	*position = m_vec3_add(*position, m_vec3_mul_scalar(ctrl->reacquire_offset, weight));
-	return true;
-}
-
-// Aim/grip: gyro orientation and the unchanged IMU/optical position filter. After the bounded
-// bridge, hold a valid estimated position indefinitely with optical confidence cleared.
+// Motion-model estimates are separate from the optical association prior and are applied
+// at the IMU origin. The device/aim/grip offsets are applied afterwards.
 static bool
 predict_aim_grip(struct rift_s_controller *ctrl, int64_t at_timestamp_ns, struct xrt_space_relation *rel)
 {
@@ -1665,20 +1670,27 @@ predict_aim_grip(struct rift_s_controller *ctrl, int64_t at_timestamp_ns, struct
 		struct xrt_vec3 velocity;
 		rift_s_position_filter_predict(&ctrl->position_filter, at_timestamp_ns, RIFT_S_MAX_PREDICTION_NS,
 		                               &rel->pose.position, &velocity);
-		rel->relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
 		if (state != POSITION_LOST) {
-			rel->relation_flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+			rel->relation_flags |=
+			    XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
 		}
 		if (state != POSITION_LOST && velocity_tracked) {
 			rel->linear_velocity = velocity;
 			rel->relation_flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
 		}
-		if (apply_reacquire_offset(ctrl, at_timestamp_ns, &rel->pose.position)) {
-			// SteamVR must not extrapolate the filter velocity across this presentation correction.
-			rel->linear_velocity = (struct xrt_vec3){0};
-			rel->relation_flags &= ~XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
+		source = state == POSITION_TRACKED ? "optical" : state == POSITION_COASTING ? "inertial" : "unreliable";
+		if (ctrl->sys != NULL && ctrl->sys->motion != NULL) {
+			struct xrt_space_relation estimate = XRT_SPACE_RELATION_ZERO;
+			unsigned int hand = ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0;
+			enum rift_s_motion_model model =
+			    rift_s_motion_get(ctrl->sys->motion, hand, at_timestamp_ns, &estimate);
+			if (model != RIFT_S_MOTION_NONE) {
+				*rel = estimate;
+				static const char *const names[] = {"none",           "at_rest",     "near_head",
+				                                    "hand_over_hand", "behind_back", "out_of_fov"};
+				source = names[model];
 		}
-		source = state == POSITION_TRACKED ? "optical" : state == POSITION_COASTING ? "coast" : "held";
+		}
 	}
 	if (source != ctrl->position_source) {
 		bool fallback = state == POSITION_NONE;
@@ -1751,16 +1763,23 @@ rift_s_controller_get_tracked_pose(struct xrt_device *xdev,
 	} else {
 		have_position = predict_aim_grip(ctrl, at_timestamp_ns, rel);
 	}
-	bool position_valid = name == XRT_INPUT_GENERIC_TRACKER_POSE ||
-	                      (rel->relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0;
+	const enum xrt_space_relation_flags position_flags =
+	    rel->relation_flags & (XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+	// Transform estimated coordinates through the lever arms without promoting confidence.
+	if (name != XRT_INPUT_GENERIC_TRACKER_POSE && have_position) {
+		rel->relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
+	}
 	os_mutex_unlock(&ctrl->mutex);
 
 	m_relation_chain_resolve(&xrc, out_relation);
 
-	if (!have_position || !position_valid) {
-		out_relation->relation_flags &=
-		    ~(XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
-		      XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
+	if (name != XRT_INPUT_GENERIC_TRACKER_POSE) {
+		out_relation->relation_flags =
+		    (out_relation->relation_flags &
+		     ~(XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT)) |
+		    position_flags;
+		if (!have_position)
+			out_relation->relation_flags &= ~XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
 	}
 
 	return XRT_SUCCESS;
@@ -1934,17 +1953,14 @@ fuse_optical_position(struct rift_s_controller *ctrl,
                       timepoint_ns processing_ns)
 {
 	struct xrt_vec3 variance = optical_position_variance(obs->position_covariance);
-	bool was_held = ctrl->position_filter.initialized && ctrl->position_filter.frozen;
-	struct xrt_vec3 held_position = {0}, velocity;
-	if (was_held) {
-		rift_s_position_filter_predict(&ctrl->position_filter, processing_ns, RIFT_S_MAX_PREDICTION_NS,
-		                               &held_position, &velocity);
-		apply_reacquire_offset(ctrl, processing_ns, &held_position);
-	}
-	bool was_lost = !ctrl->position_filter.initialized || ctrl->position_filter.frozen;
+	bool velocity_tracked;
+	bool age_lost = ctrl->position_filter.initialized && !ctrl->position_filter.suspended &&
+	                position_tracking_at(ctrl, obs->capture_ns, &velocity_tracked) == POSITION_LOST;
+	bool was_lost = age_lost || !ctrl->position_filter.initialized || ctrl->position_filter.suspended;
 	enum rift_s_position_fix_result result =
-	    rift_s_position_filter_fix(&ctrl->position_filter, obs->capture_ns, &obs->pose.position, &variance,
-	                               RIFT_S_POSITION_RESET_DISTANCE_M);
+	    (age_lost ? rift_s_position_filter_reacquire : rift_s_position_filter_fix)(
+	    &ctrl->position_filter, obs->capture_ns, &obs->pose.position, &variance,
+	    RIFT_S_POSITION_RESET_DISTANCE_M);
 	if (result == RIFT_S_POSITION_FIX_STALE) {
 		return result;
 	}
@@ -1963,13 +1979,6 @@ fuse_optical_position(struct rift_s_controller *ctrl,
 		return result;
 	}
 	if (result == RIFT_S_POSITION_FIX_RESET) {
-		if (was_held) {
-			struct xrt_vec3 resumed_position;
-			rift_s_position_filter_predict(&ctrl->position_filter, processing_ns, RIFT_S_MAX_PREDICTION_NS,
-			                               &resumed_position, &velocity);
-			ctrl->reacquire_offset = m_vec3_sub(held_position, resumed_position);
-			ctrl->reacquire_started_ns = processing_ns;
-		}
 		// A new track: the loss ladder counts from here.
 		ctrl->track_vision_updates = ctrl->track_reliable_updates = 0;
 		RIFT_S_DEBUG("Controller position hand=%s state=reset reason=%s capture_ns=%" PRIi64
@@ -2016,7 +2025,7 @@ apply_optical_tilt(struct rift_s_controller *ctrl, timepoint_ns capture_ns, cons
 	ctrl->last_optical_tilt_ns = capture_ns;
 }
 
-void
+bool
 rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_constellation_pose_observation *obs)
 {
 	struct rift_s_controller *ctrl = (struct rift_s_controller *)(xdev);
@@ -2039,7 +2048,7 @@ rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_
 	if (reject != NULL) {
 		log_fusion(ctrl, frame_mono_ns, processing_ns, reject, obs);
 		os_mutex_unlock(&ctrl->mutex);
-		return;
+		return false;
 	}
 	// Candidates must pass position confirmation before changing the IMU heading or
 	// the association prior. Otherwise a rejected fit can steer the next search.
@@ -2047,7 +2056,7 @@ rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_
 	if (position_result == RIFT_S_POSITION_FIX_PENDING || position_result == RIFT_S_POSITION_FIX_STALE) {
 		log_fusion(ctrl, frame_mono_ns, processing_ns, "reject_position", obs);
 		os_mutex_unlock(&ctrl->mutex);
-		return;
+		return false;
 	}
 	struct xrt_quat optical = pose->orientation;
 	math_quat_normalize(&optical);
@@ -2091,6 +2100,7 @@ rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_
 	ctrl->diagnostics.optical_accepted++;
 	log_fusion(ctrl, frame_mono_ns, processing_ns, "accepted", obs);
 	os_mutex_unlock(&ctrl->mutex);
+	return true;
 }
 
 void
@@ -2303,6 +2313,8 @@ rift_s_controller_update_configuration(struct rift_s_controller *ctrl, uint64_t 
 		ctrl->irled_requested = false;
 		reset_position_filter(ctrl);
 		ctrl->track_vision_updates = ctrl->track_reliable_updates = 0;
+		rift_s_motion_reset_hand(ctrl->sys->motion,
+		                         ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0);
 		ctrl->last_fix_ns = 0;
 		ctrl->imu_descriptor[0] = '\0';
 		ctrl->gravity_initialized = false;

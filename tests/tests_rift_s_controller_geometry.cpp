@@ -16,7 +16,7 @@ struct FactoryCamera
 	std::array<float, 2> tangential;
 	xrt_matrix_4x4 device_from_camera;
 };
-// Factory camera calibration read from a Rift S headset.
+// VM124 factory camera calibration recorded in the real r14 session.
 const std::array<FactoryCamera, 5> factory = {{
     {{190.499924f, 190.499924f, 312.359253f, 233.292801f},
      {0.274657339f, 0.072651282f, -0.284994245f, 0.224762872f, -0.0842394754f, 0.0130622024f},

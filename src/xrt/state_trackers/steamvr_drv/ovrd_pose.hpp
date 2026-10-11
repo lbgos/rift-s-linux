@@ -97,6 +97,22 @@ apply_pose(struct xrt_space_relation *rel,
 }
 
 inline void
+apply_head_pose(struct xrt_space_relation *rel, vr::DriverPose_t *pose, bool allow_position_estimate)
+{
+	apply_pose(rel, pose, XRT_SPACE_RELATION_POSITION_VALID_BIT, true);
+	if (allow_position_estimate) {
+		const auto valid = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT;
+		pose->poseIsValid = finite_pose(rel->pose) && (rel->relation_flags & valid) == valid;
+		if (pose->poseIsValid) copy_quat(&rel->pose.orientation, &pose->qRotation);
+	}
+	if ((rel->relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) == 0 ||
+	    (rel->relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) == 0) {
+		pose->result = vr::TrackingResult_Running_OutOfRange;
+		if (!allow_position_estimate) pose->poseIsValid = false;
+	}
+}
+
+inline void
 transform_rift_s_touch_relation(struct xrt_space_relation *rel,
                                 const struct xrt_pose *grip_to_model,
                                 const struct xrt_pose *origin)

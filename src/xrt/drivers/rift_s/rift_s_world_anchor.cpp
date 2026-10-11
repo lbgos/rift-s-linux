@@ -183,6 +183,29 @@ spread(const std::vector<cv::Point2d> &pixels, const rift_s_camera_calibration &
 	return occupied >= 4 && maxx - minx > 0.25 * c.roi.extent.w && maxy - miny > 0.2 * c.roi.extent.h;
 }
 
+// OpenCV seeds PnP in the perspective plane. A native pixel has a different
+// scale there at each fisheye bearing. Only the final native-pixel score decides support.
+double
+perspective_pixel_scale(const rift_s_camera_calibration &c, cv::Vec3d ray)
+{
+	double radius = std::hypot(ray[0], ray[1]), theta = std::atan2(radius, ray[2]);
+	cv::Vec2d angular = radius > 1e-12 ? cv::Vec2d{ray[0], ray[1]} * (theta / radius)
+	                                  : cv::Vec2d{0, 0};
+	constexpr double eps = 1e-6;
+	auto dx = (distort(c, angular + cv::Vec2d{eps, 0}) - distort(c, angular - cv::Vec2d{eps, 0})) / (2 * eps);
+	auto dy = (distort(c, angular + cv::Vec2d{0, eps}) - distort(c, angular - cv::Vec2d{0, eps})) / (2 * eps);
+	cv::Matx22d distortion{dx[0], dy[0], dx[1], dy[1]};
+	double gain = theta > 1e-12 ? std::tan(theta) / theta : 1;
+	double radial = theta > 1e-8 ? (1 / (ray[2] * ray[2]) - gain) / (theta * theta) : 2.0 / 3;
+	cv::Matx22d perspective = gain * cv::Matx22d::eye() + radial * cv::Matx22d{
+	    angular[0] * angular[0], angular[0] * angular[1], angular[0] * angular[1], angular[1] * angular[1]};
+	cv::Matx22d jacobian = perspective * distortion.inv() * cv::Matx22d{1 / c.projection.fx, 0, 0, 1 / c.projection.fy};
+	auto squared = jacobian.t() * jacobian;
+	double eigenvalue = 0.5 * (squared(0, 0) + squared(1, 1) +
+	                          std::hypot(squared(0, 0) - squared(1, 1), 2 * squared(0, 1)));
+	return std::sqrt(eigenvalue);
+}
+
 // PnP supplies the robust seed. All subsequent fitting is on the four parameters
 // allowed by gravity, using the calibrated fisheye residual rather than perspective pixels.
 bool
@@ -628,7 +651,7 @@ struct rift_s_world_anchor
 	cv::Mat reference_images[RIFT_S_WORLD_MAX_CAMERAS];
 	Features reference_features[RIFT_S_WORLD_MAX_CAMERAS];
 	std::string record_dir;
-	unsigned recorded_pairs = 0;
+	unsigned recorded_pairs = 0, record_limit = 600;
 	cv::Ptr<cv::ORB> orb = cv::ORB::create(1400, 1.2f, 8, 19, 0, 2, cv::ORB::HARRIS_SCORE, 31, 12);
 };
 
@@ -702,6 +725,7 @@ rift_s_world_anchor_solve_rig_gravity(const rift_s_world_anchor_config *config,
 				const auto &c = config->camera[eye];
 				std::vector<cv::Point3d> world;
 				std::vector<cv::Point2d> normalized, pixels;
+				double threshold = 0;
 				for (uint32_t i = 0; i < counts[eye]; ++i) {
 					const auto &o = obs[eye][i];
 					cv::Vec3d ray;
@@ -712,10 +736,10 @@ rift_s_world_anchor_solve_rig_gravity(const rift_s_world_anchor_config *config,
 					world.emplace_back(o.world_point.x, o.world_point.y, o.world_point.z);
 					normalized.emplace_back(ray[0] / ray[2], ray[1] / ray[2]);
 					pixels.emplace_back(o.pixel.x, o.pixel.y);
+					threshold = std::max(threshold, MAX_ERROR_PX * perspective_pixel_scale(c, ray));
 				}
 				cv::Vec3d rv, tv;
 				cv::Mat inliers;
-				double threshold = MAX_ERROR_PX / std::max(c.projection.fx, c.projection.fy);
 				result->rejection = "pnp";
 				bool solved =
 				    cv::solvePnPRansac(world, normalized, cv::Matx33d::eye(), cv::noArray(), rv, tv,
@@ -950,9 +974,15 @@ rift_s_world_anchor_create(const rift_s_world_anchor_config *config, const char 
 		a->config = *config;
 		resolve_boundary_path(a->config);
 		a->path = path ? path : "";
-		const char *record = std::getenv("RIFT_S_WORLD_RECORD_DIR"),
-		           *bench = std::getenv("MONADO_STEAMVR_BENCH");
-		if (record && record[0] && bench && (std::strcmp(bench, "1") == 0 || std::strcmp(bench, "true") == 0)) {
+		const char *record = std::getenv("RIFT_S_WORLD_RECORD_DIR");
+		if (record && record[0]) {
+			// Diagnostics must not enable synthetic poses or override headset proximity.
+			if (const char *limit = std::getenv("RIFT_S_WORLD_RECORD_LIMIT")) {
+				char *end = nullptr;
+				unsigned long value = std::strtoul(limit, &end, 10);
+				if (end != limit && *end == 0 && value > 0 && value <= 600)
+					a->record_limit = unsigned(value);
+			}
 			if (mkdir(record, 0700) == 0 || errno == EEXIST) {
 				a->record_dir = record;
 				FILE *file = std::fopen((a->record_dir + "/calibration.bin").c_str(), "wb");
@@ -984,7 +1014,7 @@ rift_s_world_anchor_record_rig_frames(rift_s_world_anchor *a,
                                       unsigned count,
                                       const xrt_pose *raw)
 {
-	if (!a || a->record_dir.empty() || a->recorded_pairs >= 600 || !frames || count < 2 ||
+	if (!a || a->record_dir.empty() || a->recorded_pairs >= a->record_limit || !frames || count < 2 ||
 	    count > RIFT_S_WORLD_MAX_CAMERAS || !frames[0])
 		return;
 	for (unsigned eye = 0; eye < count; ++eye) {

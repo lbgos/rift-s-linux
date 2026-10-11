@@ -29,7 +29,7 @@ position_at(const rift_s_position_filter &f, timepoint_ns t)
 	return p;
 }
 
-TEST_CASE("Rift S loss ladder matches the Windows defaults")
+TEST_CASE("Rift S configured loss durations retain independent position and velocity gates")
 {
 	time_duration_ns p, v;
 	rift_s_tracking_loss_durations(0, 0, &p, &v);
@@ -114,50 +114,27 @@ TEST_CASE("Rift S position filter follows motion between delayed optical fixes")
 	CHECK(f->gated == 0);
 }
 
-TEST_CASE("Rift S position filter coasts with bounded drift, holds when frozen and resets on reacquire")
+TEST_CASE("Rift S position propagation preserves measured motion outside the camera view")
 {
 	auto f = make_filter();
-	const xrt_vec3 zero = {0, 0, 0};
 	const xrt_vec3 here = {0.3f, 1.0f, -0.4f};
-	timepoint_ns t = MS;
-	for (; t < 1000 * MS; t += IMU_STEP) {
-		rift_s_position_filter_imu(f.get(), t, &zero);
-		if ((t / IMU_STEP) % 16 == 0) {
-			rift_s_position_filter_fix(f.get(), t, &here, &OPTICAL_VARIANCE, 0.15f);
-		}
-	}
-	// Optical loss with a 0.5 m/s^2 uncorrected acceleration error: coast for the 0.5 s ladder step.
-	f->coasting = true;
-	const xrt_vec3 error = {0.5f, 0, 0};
-	for (timepoint_ns end = t + 500 * MS; t < end; t += IMU_STEP) {
-		rift_s_position_filter_imu(f.get(), t, &error);
-	}
-	xrt_vec3 coasted = {(float)f->state.x[0][0], (float)f->state.x[1][0], (float)f->state.x[2][0]};
-	// The 500 ms bridge with decaying velocity: a(tau t - tau^2 (1 - e^-t/tau)) = 4.6 cm.
-	CHECK(fabsf(coasted.x - here.x) < 0.05f);
-	CHECK(fabsf(coasted.x - here.x) > 0.0f);
-
-	rift_s_position_filter_freeze(f.get());
-	for (timepoint_ns end = t + 2000 * MS; t < end; t += IMU_STEP) {
-		rift_s_position_filter_imu(f.get(), t, &error);
-	}
-	xrt_vec3 held = position_at(*f, t + 50 * MS);
-	CHECK(held.x == Catch::Approx(coasted.x).margin(1e-6));
+	REQUIRE(rift_s_position_filter_fix(f.get(), MS, &here, &OPTICAL_VARIANCE, 0.15f) == RIFT_S_POSITION_FIX_RESET);
+	// A hand accelerated at 1 m/s^2 for a second travels 0.5 m. Optical loss does not
+	// introduce an arbitrary displacement clamp, velocity damping, or reset maturity.
+	const xrt_vec3 accel = {1, 0, 0};
+	for (timepoint_ns t = MS + IMU_STEP; t <= 1001 * MS; t += IMU_STEP)
+		rift_s_position_filter_imu(f.get(), t, &accel);
 	xrt_vec3 p, v;
-	rift_s_position_filter_predict(f.get(), t, 100 * MS, &p, &v);
-	CHECK(v.x == 0.0f);
-
-	// Reacquire somewhere else: three consistent fixes re-initialize.
-	const xrt_vec3 there = {0.6f, 1.1f, -0.2f};
-	CHECK(rift_s_position_filter_fix(f.get(), t - 96 * MS, &there, &OPTICAL_VARIANCE, 0.15f) ==
-	      RIFT_S_POSITION_FIX_PENDING);
-	CHECK(rift_s_position_filter_fix(f.get(), t - 63 * MS, &there, &OPTICAL_VARIANCE, 0.15f) ==
-	      RIFT_S_POSITION_FIX_PENDING);
-	CHECK(f->frozen);
-	CHECK(rift_s_position_filter_fix(f.get(), t - 30 * MS, &there, &OPTICAL_VARIANCE, 0.15f) ==
-	      RIFT_S_POSITION_FIX_RESET);
-	CHECK_FALSE(f->frozen);
-	CHECK(position_at(*f, t).x == Catch::Approx(there.x).margin(0.01));
+	rift_s_position_filter_predict(f.get(), 1001 * MS, 100 * MS, &p, &v);
+	CHECK(p.x == Catch::Approx(here.x + 0.5).margin(1e-6));
+	CHECK(v.x == Catch::Approx(1).margin(1e-6));
+	CHECK(f->track_updates == 1);
+	CHECK_FALSE(f->suspended);
+	// A clock discontinuity is separate: suspend propagation until a new accepted track.
+	rift_s_position_filter_suspend(f.get());
+	rift_s_position_filter_imu(f.get(), 1003 * MS, &accel);
+	CHECK(position_at(*f, 1003 * MS).x == Catch::Approx(p.x).margin(1e-6));
+	CHECK(f->state.x[0][1] == 0);
 }
 
 TEST_CASE("Rift S position filter resets on a confirmed large innovation and rejects fixes older than its history")
@@ -227,7 +204,7 @@ TEST_CASE("Rift S position filter stays close to optical under a time-varying ac
 
 // r13 worn log, left hand behind the back: after a long track was held, single wrong fits ~1 m
 // away re-initialized the filter, and coasting on their velocity drifted it further.
-TEST_CASE("Rift S held position ignores isolated wrong fits and needs a consistent reacquire")
+TEST_CASE("Rift S suspended filter ignores isolated wrong fits and needs a consistent reacquire")
 {
 	auto f = make_filter();
 	const xrt_vec3 zero = {0, 0, 0};
@@ -239,7 +216,7 @@ TEST_CASE("Rift S held position ignores isolated wrong fits and needs a consiste
 			rift_s_position_filter_fix(f.get(), t - 20 * MS, &here, &OPTICAL_VARIANCE, 0.15f);
 		}
 	}
-	rift_s_position_filter_freeze(f.get());
+	rift_s_position_filter_suspend(f.get());
 	// Scattered single fits, each one frame apart, never two in agreement.
 	const xrt_vec3 wrong[] = {{-0.99f, 0.29f, 0.40f},
 	                          {-1.02f, -0.18f, 0.71f},
@@ -255,7 +232,7 @@ TEST_CASE("Rift S held position ignores isolated wrong fits and needs a consiste
 		CHECK(p.x == Catch::Approx(here.x).margin(1e-3));
 		CHECK(p.z == Catch::Approx(here.z).margin(1e-3));
 	}
-	CHECK(f->frozen);
+	CHECK(f->suspended);
 	// The hand comes back: three consistent fixes take over.
 	const xrt_vec3 back = {0.25f, 0.05f, 0.1f};
 	enum rift_s_position_fix_result r = RIFT_S_POSITION_FIX_PENDING;
@@ -269,60 +246,22 @@ TEST_CASE("Rift S held position ignores isolated wrong fits and needs a consiste
 	CHECK(position_at(*f, t).x == Catch::Approx(back.x + 0.02f).margin(0.01));
 }
 
-TEST_CASE("Rift S young track holds instead of coasting on velocity from a few fixes")
+TEST_CASE("Replacement fixes confirm throughout the Constellation capture cadence")
 {
-	auto f = make_filter();
-	const xrt_vec3 zero = {0, 0, 0};
-	timepoint_ns t = MS;
-	// Two fixes 33 ms apart and 3 cm apart (a wrong pair implies ~1 m/s), then nothing.
-	const xrt_vec3 a = {0.07f, 0.17f, 0.59f}, b = {0.10f, 0.17f, 0.59f};
-	rift_s_position_filter_fix(f.get(), t, &a, &OPTICAL_VARIANCE, 0.15f);
-	for (timepoint_ns end = t + 33 * MS; t < end; t += IMU_STEP)
-		rift_s_position_filter_imu(f.get(), t, &zero);
-	rift_s_position_filter_fix(f.get(), t, &b, &OPTICAL_VARIANCE, 0.15f);
-	CHECK(f->track_updates == 2);
-	const double fused = f->state.x[0][0];
-	f->coasting = true;
-	for (timepoint_ns end = t + 250 * MS; t < end; t += IMU_STEP)
-		rift_s_position_filter_imu(f.get(), t, &zero);
-	CHECK(f->state.x[0][0] == Catch::Approx(fused).margin(1e-6));
-	CHECK(f->state.x[0][1] == 0.0);
-}
-
-TEST_CASE("Optical loss bounds IMU displacement and freezes after the bridge")
-{
-	auto f = make_filter();
-	xrt_vec3 here = {0.5f, 1.2f, -0.9f}, error = {-20, 0, 0};
-	REQUIRE(rift_s_position_filter_fix(f.get(), MS, &here, &OPTICAL_VARIANCE, 0.15f) == RIFT_S_POSITION_FIX_RESET);
-	f->track_updates = 30;
-	for (timepoint_ns t = 3 * MS; t <= 1000 * MS; t += IMU_STEP) {
-		f->coasting = t > 121 * MS;
-		rift_s_position_filter_imu(f.get(), t, &error);
-		if (t > 121 * MS)
-			CHECK(fabs(position_at(*f, t).x - here.x) <= 0.101);
+	for (const time_duration_ns gap : {240 * MS, 280 * MS, 300 * MS, 301 * MS}) {
+		CAPTURE(gap);
+		auto f = make_filter();
+		const xrt_vec3 here = {0, 1, -0.5f}, replacement = {0.5f, 1, -0.5f}, zero = {};
+		timepoint_ns t = 1000 * MS;
+		REQUIRE(rift_s_position_filter_fix(f.get(), t, &here, &OPTICAL_VARIANCE, 0.15f) ==
+		        RIFT_S_POSITION_FIX_RESET);
+		for (unsigned i = 0; i < RIFT_S_POSITION_FILTER_CONFIRM_FIXES; ++i) {
+			t += gap;
+			rift_s_position_filter_imu(f.get(), t, &zero);
+			const auto result = rift_s_position_filter_fix(f.get(), t, &replacement, &OPTICAL_VARIANCE, 0.15f);
+			CHECK(result == (i + 1 == RIFT_S_POSITION_FILTER_CONFIRM_FIXES &&
+			                 gap <= T_CONSTELLATION_TRACK_MAX_GAP_NS
+			                     ? RIFT_S_POSITION_FIX_RESET : RIFT_S_POSITION_FIX_PENDING));
+		}
 	}
-	CHECK(f->frozen);
-	xrt_vec3 held = position_at(*f, 1000 * MS);
-	for (timepoint_ns t = 1001 * MS; t < 2000 * MS; t += IMU_STEP)
-		rift_s_position_filter_imu(f.get(), t, &error);
-	CHECK(position_at(*f, 2000 * MS).x == held.x);
-}
-
-TEST_CASE("Optical-loss queries bound prediction during a radio gap")
-{
-	auto f = make_filter();
-	xrt_vec3 here = {0.5f, 1.2f, -0.9f}, zero = {0, 0, 0};
-	REQUIRE(rift_s_position_filter_fix(f.get(), MS, &here, &OPTICAL_VARIANCE, 0.15f) == RIFT_S_POSITION_FIX_RESET);
-	f->track_updates = 30;
-	rift_s_position_filter_imu(f.get(), 100 * MS, &zero);
-	f->state.x[0][0] = here.x - 0.09;
-	f->state.x[0][1] = -4;
-	xrt_vec3 p, v;
-	rift_s_position_filter_predict(f.get(), 150 * MS, 50 * MS, &p, &v);
-	CHECK(p.x == Catch::Approx(here.x - 0.1).margin(1e-5));
-	CHECK(v.x == 0);
-	// Past the bridge the held estimate is not extrapolated.
-	rift_s_position_filter_predict(f.get(), RIFT_S_POSITION_FILTER_BRIDGE_NS + 100 * MS, 50 * MS, &p, &v);
-	CHECK(p.x == Catch::Approx(here.x - 0.09).margin(1e-5));
-	CHECK(v.x == 0);
 }

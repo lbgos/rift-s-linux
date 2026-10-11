@@ -33,7 +33,7 @@
 #include "internal/ransac_pnp.h"
 #include "internal/sample.h"
 
-DEBUG_GET_ONCE_LOG_OPTION(ct_log, "CONSTELLATION_LOG", U_LOGGING_INFO)
+DEBUG_GET_ONCE_LOG_OPTION(ct_log, "CONSTELLATION_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_FLOAT_OPTION(ct_score_gate, "CONSTELLATION_SCORE_GATE_M", 0.004)
 DEBUG_GET_ONCE_FLOAT_OPTION(ct_association_gate, "CONSTELLATION_ASSOCIATION_GATE_M", 0.15)
 DEBUG_GET_ONCE_FLOAT_OPTION(ct_ray_noise, "CONSTELLATION_RAY_NOISE_M", 0.001)
@@ -371,19 +371,22 @@ constellation_tracked_device_connection_has_heading(struct t_constellation_track
 	return ret;
 }
 
-static void
+static bool
 constellation_tracked_device_connection_notify_observation(struct t_constellation_tracked_device_connection *ctdc,
                                                            const struct t_constellation_pose_observation *obs)
 {
+	bool accepted = false;
 	os_mutex_lock(&ctdc->lock);
 	if (!ctdc->disconnected) {
 		if (ctdc->cb->push_pose_observation) {
-			ctdc->cb->push_pose_observation(ctdc->xdev, obs);
+			accepted = ctdc->cb->push_pose_observation(ctdc->xdev, obs);
 		} else if (ctdc->cb->push_observed_pose) {
 			ctdc->cb->push_observed_pose(ctdc->xdev, obs->capture_ns, &obs->pose);
+			accepted = true;
 		}
 	}
 	os_mutex_unlock(&ctdc->lock);
+	return accepted;
 }
 
 static const char *ct_stage_names[CT_STAGE_COUNT] = {"fast", "constrained", "p3p"};
@@ -798,10 +801,10 @@ track_gate_locked(struct t_constellation_tracker *ct,
 		d->last_failure_capture_ns = capture_ns;
 		d->last_failure_processing_ns = os_monotonic_get_ns();
 	}
-	log_track_transition_locked(ct, device, before, capture_ns,
-	                            verdict == CONSTELLATION_TRACK_HOLD_RESTART ? "jumps"
-	                            : verdict == CONSTELLATION_TRACK_PUBLISH    ? "confirmed"
-	                                                                        : "candidate");
+	if (verdict != CONSTELLATION_TRACK_PUBLISH) {
+		log_track_transition_locked(ct, device, before, capture_ns,
+		                            verdict == CONSTELLATION_TRACK_HOLD_RESTART ? "jumps" : "candidate");
+	}
 	return verdict == CONSTELLATION_TRACK_PUBLISH ? NULL : constellation_track_verdict_name(verdict);
 }
 
@@ -833,7 +836,14 @@ observation_from_result(const struct constellation_constrained_result *r,
 
 /* Publish one rig pose per exposure. Labels are evidence from this accepted hypothesis,
  * never independent ownership carried from an earlier frame. */
-static bool
+enum joint_pose_submission
+{
+	JOINT_POSE_HELD,
+	JOINT_POSE_FUSION_REJECTED,
+	JOINT_POSE_PUBLISHED,
+};
+
+static enum joint_pose_submission
 submit_joint_pose(struct t_constellation_tracker *ct,
                   struct tracking_sample_device_state *state,
                   struct constellation_tracking_sample *sample,
@@ -842,6 +852,7 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 	struct constellation_tracker_device *device = &ct->devices[state->dev_index];
 	struct constellation_constrained_result *r = &state->joint_result;
 	os_mutex_lock(&ct->tracked_device_lock);
+	const struct constellation_track previous_track = device->track;
 	const char *held = NULL;
 	if (device->have_last_seen_pose && sample->timestamp <= device->last_seen_pose_ts) {
 		device->diagnostics.stale++;
@@ -856,8 +867,25 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 		log_device_summary_locked(ct, device, false);
 		os_mutex_unlock(&ct->tracked_device_lock);
 		log_joint_result(ct, sample, state, stage, held);
-		return false;
+		return JOINT_POSE_HELD;
 	}
+	struct xrt_pose P_xrworld_model, P_xrworld_device;
+	pose_flip_YZ(&r->P_world_model, &P_xrworld_model);
+	math_pose_transform(&P_xrworld_model, &device->led_model.P_model_device, &P_xrworld_device);
+	struct t_constellation_pose_observation obs;
+	observation_from_result(r, sample->timestamp, &P_xrworld_device, &obs);
+	if (!constellation_tracked_device_connection_notify_observation(device->connection, &obs)) {
+		// Fusion declined this pose. Keep its accepted prior and leave the blobs available.
+		device->track = previous_track;
+		device->diagnostics.last_failure = "fusion_rejected";
+		device->diagnostics.last_failure_capture_ns = sample->timestamp;
+		device->diagnostics.last_failure_processing_ns = os_monotonic_get_ns();
+		log_device_summary_locked(ct, device, false);
+		os_mutex_unlock(&ct->tracked_device_lock);
+		log_joint_result(ct, sample, state, stage, "fusion_rejected");
+		return JOINT_POSE_FUSION_REJECTED;
+	}
+	log_track_transition_locked(ct, device, previous_track.state, sample->timestamp, "confirmed");
 	device->have_last_seen_pose = true;
 	device->last_seen_pose_ts = sample->timestamp;
 	device->last_seen_pose = r->P_world_model;
@@ -914,11 +942,6 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 		os_mutex_unlock(&ct->cam[v].bw_lock);
 	}
 
-	struct xrt_pose P_xrworld_model, P_xrworld_device;
-	pose_flip_YZ(&state->final_pose, &P_xrworld_model);
-	math_pose_transform(&P_xrworld_model, &device->led_model.P_model_device, &P_xrworld_device);
-	struct t_constellation_pose_observation obs;
-	observation_from_result(r, sample->timestamp, &P_xrworld_device, &obs);
 	struct xrt_vec3 head = {NAN, NAN, NAN};
 	if (head_relative(sample, device, &r->P_world_model, &head)) {
 		device->diagnostics.last_published_head = head;
@@ -964,7 +987,6 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 		         projected ? maximum_pixel_error : NAN, r->fit_chi_square, r->fit_chi_square_limit, r->cost_m);
 	}
 	constellation_tracked_device_connection_notify_brightness_update(device->connection, brightness / r->inliers);
-	constellation_tracked_device_connection_notify_observation(device->connection, &obs);
 
 	if (ct->controller_masks_sink) {
 		for (unsigned v = 0; v < sample->n_views; v++) {
@@ -987,7 +1009,7 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 	log_device_summary_locked(ct, device, false);
 	os_mutex_unlock(&ct->tracked_device_lock);
 	log_joint_result(ct, sample, state, stage, "none");
-	return true;
+	return JOINT_POSE_PUBLISHED;
 }
 
 /* A competing candidate keeps a shared blob only with this much more inlier support. */
@@ -1004,17 +1026,45 @@ arbitrate_and_submit(struct t_constellation_tracker *ct,
 {
 	const struct constellation_constrained_result *claims[CONSTELLATION_MAX_DEVICES];
 	bool published[CONSTELLATION_MAX_DEVICES] = {0};
+	bool viable[CONSTELLATION_MAX_DEVICES] = {0};
+	bool attempted[CONSTELLATION_MAX_DEVICES] = {0};
 	enum constellation_constrained_claim blocked[CONSTELLATION_MAX_DEVICES];
 	unsigned blockers[CONSTELLATION_MAX_DEVICES];
 	for (unsigned d = 0; d < sample->n_devices; d++) {
 		claims[d] = &sample->devices[d].joint_result;
 		published[d] = sample->devices[d].found_device_pose;
+		viable[d] = candidates[d];
 	}
-	constellation_constrained_arbitrate_with_owners(claims, published, candidates, blocked, blockers,
-	                                                sample->n_devices, ARBITRATION_SUPPORT_MARGIN);
+	for (unsigned round = 0; round < sample->n_devices; round++) {
+		// Held optical candidates remain competitors. Only fusion rejection releases a claim.
+		bool competitors[CONSTELLATION_MAX_DEVICES] = {0};
+		for (unsigned d = 0; d < sample->n_devices; d++) {
+			competitors[d] = viable[d] && !published[d] && claims[d] != NULL;
+		}
+		constellation_constrained_arbitrate_with_owners(claims, published, competitors, blocked, blockers,
+		                                                sample->n_devices, ARBITRATION_SUPPORT_MARGIN);
+		bool released = false;
+		for (unsigned d = 0; d < sample->n_devices; d++) {
+			candidates[d] = competitors[d];
+			if (!competitors[d] || attempted[d]) {
+				continue;
+			}
+			attempted[d] = true;
+			enum joint_pose_submission result = submit_joint_pose(ct, &sample->devices[d], sample, stage);
+			if (result == JOINT_POSE_FUSION_REJECTED) {
+				claims[d] = NULL;
+				released = true;
+			} else if (result == JOINT_POSE_PUBLISHED) {
+				published[d] = true;
+			}
+		}
+		if (!released) {
+			break;
+		}
+	}
 	for (unsigned d = 0; d < sample->n_devices; d++) {
 		struct tracking_sample_device_state *state = &sample->devices[d];
-		if (blocked[d] != CONSTELLATION_CLAIM_NONE) {
+		if (!attempted[d] && blocked[d] != CONSTELLATION_CLAIM_NONE) {
 			os_mutex_lock(&ct->tracked_device_lock);
 			ct->devices[state->dev_index].diagnostics.shared_blob++;
 			ct->devices[state->dev_index].diagnostics.shared_by[blocked[d]]++;
@@ -1060,9 +1110,6 @@ arbitrate_and_submit(struct t_constellation_tracker *ct,
 			                 blocked[d] == CONSTELLATION_CLAIM_PUBLISHED   ? "shared_blob_published"
 			                 : blocked[d] == CONSTELLATION_CLAIM_CANDIDATE ? "shared_blob_candidate"
 			                                                               : "shared_blob_rejected");
-		}
-		if (candidates[d]) {
-			submit_joint_pose(ct, state, sample, stage);
 		}
 	}
 }
@@ -1459,7 +1506,7 @@ constellation_tracker_process_frame_fast(struct xrt_frame_sink *sink, struct xrt
 	os_mutex_unlock(&ct->tracked_device_lock);
 
 	/* Fast path: a trusted position prior (recent optical fix) bounds association, so the
-	 * stock low-count gates apply. Everything else goes to the long search. */
+	 * recovered low-count gates apply. Everything else goes to the long search. */
 	struct constellation_constrained_view views[CONSTELLATION_MAX_CAMERAS];
 	unsigned n_views = joint_views(ct, sample, views);
 	unsigned blob_count = sample_blob_count(sample);

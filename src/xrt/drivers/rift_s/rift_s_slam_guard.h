@@ -57,7 +57,7 @@ struct rift_s_slam_guard
 	bool world_transition;
 	struct xrt_pose transition_from, transition_to;
 	int64_t transition_start_ns;
-	//! A saved standing frame requires visual confirmation before publishing position tracking.
+	//! Saved bounds require visual confirmation; session position tracking remains available.
 	bool require_relocalization;
 	enum rift_s_slam_guard_state state;
 

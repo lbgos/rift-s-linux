@@ -88,7 +88,7 @@ struct Scene
 			math_pose_invert(&v.P_world_cam, &v.P_cam_world);
 		constellation_constrained_default_config(&config);
 		config.time_budget_us = 2000000;
-		// These fixtures exercise the stock scorer minimum (inliers > sample size) with three
+		// These fixtures exercise the recovered scorer minimum (inliers > sample size) with three
 		// LEDs, so they relax Monado's stricter cold-acquisition and tracking policy.
 		config.minimum_cold_inliers = 3;
 		config.minimum_cold_distinct_leds = 0;
@@ -877,7 +877,7 @@ TEST_CASE("Cold low-count acquisition never accepts a wrong pose in randomized p
 	CHECK(arbitrated_same_tilt.wrong == 0);
 }
 
-TEST_CASE("Stock minimum count alone admits wrong identities that the cold policy rejects")
+TEST_CASE("Recovered minimum count alone admits wrong identities that the cold policy rejects")
 {
 	// Documents why the cold policy exists: inliers > sample size is necessary, not sufficient.
 	constellation_constrained_config minimum;

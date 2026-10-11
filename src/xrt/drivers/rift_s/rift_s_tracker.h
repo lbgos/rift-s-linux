@@ -35,6 +35,15 @@
 
 struct rift_s_hmd_config;
 
+struct rift_s_world_diagnostics
+{
+	uint64_t attempts, usable;
+	timepoint_ns capture_ns, sample_ns;
+	bool pose_valid;
+	uint32_t pose_flags;
+	struct rift_s_world_anchor_result result;
+};
+
 enum rift_s_tracker_pose
 {
 	RIFT_S_TRACKER_POSE_IMU,
@@ -65,6 +74,7 @@ struct rift_s_tracker
 	struct xrt_pose world_candidate;
 	uint64_t world_candidate_generation;
 	timepoint_ns world_candidate_ns;
+	struct rift_s_world_diagnostics world_diagnostics;
 
 	//! Camera arrival watchdog uses the host clock, not predicted pose time.
 	timepoint_ns last_camera_arrival_ns;
@@ -181,6 +191,9 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
                       struct rift_s_hmd_config *hmd_config);
 void
 rift_s_tracker_start(struct rift_s_tracker *t);
+//! Join consumers and release queued camera frames before destroying the frame context.
+void
+rift_s_tracker_stop(struct rift_s_tracker *t);
 void
 rift_s_tracker_set_standby(struct rift_s_tracker *t, bool standby);
 void

@@ -350,6 +350,8 @@ if(XRT_BUILD_DRIVER_RIFT_S)
 		rift_s/rift_s_controller.h
 		rift_s/rift_s_position_filter.c
 		rift_s/rift_s_position_filter.h
+		rift_s/rift_s_motion.cpp
+		rift_s/rift_s_motion.h
 		rift_s/rift_s_slam_guard.c
 		rift_s/rift_s_slam_guard.h
 		rift_s/rift_s_firmware.c

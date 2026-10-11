@@ -197,6 +197,12 @@ rift_s_system_create(struct xrt_prober *xp,
 		goto cleanup;
 	}
 
+	sys->motion = rift_s_motion_create();
+	if (sys->motion == NULL) {
+		RIFT_S_ERROR("Failed to allocate controller motion cache");
+		goto cleanup;
+	}
+
 	if (read_hmd_config(hid_hmd, &sys->hmd_config) < 0) {
 		RIFT_S_ERROR("Failed to read HMD configuration");
 		goto cleanup;
@@ -282,6 +288,11 @@ rift_s_system_free(struct rift_s_system *sys)
 	/* Stop the packet reading thread */
 	os_thread_helper_destroy(&sys->oth);
 
+	/* The world worker reads SLAM and camera buffers owned by the frame context. */
+	if (sys->tracker != NULL) {
+		rift_s_tracker_stop(sys->tracker);
+	}
+
 	/* Stop all the frame processing (has to happen before the cameras
 	 * and tracker are destroyed */
 	xrt_frame_context_destroy_nodes(&sys->xfctx);
@@ -310,6 +321,7 @@ rift_s_system_free(struct rift_s_system *sys)
 
 	os_mutex_destroy(&sys->dev_mutex);
 
+	rift_s_motion_destroy(&sys->motion);
 	free(sys);
 }
 

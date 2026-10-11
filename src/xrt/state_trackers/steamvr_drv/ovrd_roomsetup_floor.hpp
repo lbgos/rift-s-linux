@@ -84,9 +84,9 @@ public:
 		frame.write(active);
 	}
 	bool
-	publish(bool initialize_manual = false)
+	publish(bool initialize_manual = false, bool saved_plane_trusted = true)
 	{
-		if (!handle || !paths)
+		if (!saved_plane_trusted || !handle || !paths)
 			return false;
 		vr::HmdMatrix34_t standing{}, setup{};
 		if (!transforms(standing, setup))

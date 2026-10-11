@@ -105,6 +105,7 @@ static bool update_world_notification(vr::IVRNotifications &notifications,
 		    warning.c_str(), vr::EVRNotificationStyle_Application, nullptr, &created) !=
 		    vr::VRNotificationError_OK) return false;
 		id = created;
+		fprintf(stderr, "monado-roomsetup-guard: Guardian notification %u: %s\n", created, warning.c_str());
 	}
 	delivered = warning;
 	return true;
@@ -261,6 +262,10 @@ int main(int argc, char **argv)
 	fs::path path = calibration_path(log_path);
 	OverflowLog diagnostics(log_path);
 	if (!system || !setup || path.empty() || !snapshot(*setup, path)) { shutdown(); return 1; }
+	char model[128] = {};
+	system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_ModelNumber_String,
+	                                     model, sizeof(model));
+	const bool is_rift_s = std::strstr(model, "Oculus Rift S") != nullptr;
 	vr::VROverlayHandle_t overlay = vr::k_ulOverlayHandleInvalid;
 	if (overlays) overlays->CreateOverlay("monado.roomsetup.guard", "Monado playspace setup", &overlay);
 	if (write(ready, "1", 1) != 1) { shutdown(); return 1; }
@@ -301,6 +306,7 @@ int main(int argc, char **argv)
 	auto floor_deadline = std::chrono::steady_clock::time_point{};
 	bool running = true;
 	bool world_setup = false;
+	bool saved_plane_trusted = !is_rift_s;
 	auto world_cancel_deadline = std::chrono::steady_clock::time_point{};
 	std::string world_warning;
 	vr::VRNotificationId world_notification = 0;
@@ -338,6 +344,10 @@ int main(int argc, char **argv)
 					if (saved && compositor_failed()) failed = true;
 				}
 				if ((next == 2 || next == 3 || drawing(next)) && !world_setup && !failed) {
+					// Capture trust before begin switches the tracker into a new setup frame.
+					saved_plane_trusted = !is_rift_s || (world_status() == "localized" &&
+					    system->GetUint64TrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
+					        vr::Prop_CurrentUniverseId_Uint64) == 2);
 					world_setup = true;
 					world_cancel_deadline = {};
 					world_command("begin");
@@ -383,9 +393,9 @@ int main(int argc, char **argv)
 		if (status == "save_failed")
 			warning = "Visual boundary map could not be saved. Check Monado config write access before restarting VR.";
 		else if (status == "unanchored")
-			warning = "Boundary has no visual anchor. Complete room setup once to save its physical location.";
+			warning = "Guardian not found: no usable saved room map. Run Room Setup to anchor the boundary.";
 		else if (status == "relocalizing")
-			warning = "Boundary not confirmed, look around. Temporary tracking is active.";
+			warning = "Guardian not found. Uncover headset cameras and look around. If the room stays unavailable, run Room Setup.";
 		auto now = std::chrono::steady_clock::now();
 		if (warning != world_warning && notifications && overlays && now >= next_notification_attempt) {
 			next_notification_attempt = now + std::chrono::seconds(1);
@@ -395,7 +405,8 @@ int main(int argc, char **argv)
 				update_world_notification(*notifications, overlay, warning, world_warning, world_notification);
 		}
 		if (floor_pending) {
-			if (step == 0 || floor->publish(step == 2) || std::chrono::steady_clock::now() > floor_deadline)
+			if (step == 0 || floor->publish(step == 2, saved_plane_trusted) ||
+			    std::chrono::steady_clock::now() > floor_deadline)
 				floor_pending = false;
 		}
 		floor->update_frame(step == 2 || step == 3 || step == 4 || step == 5 || step == 7);

@@ -66,7 +66,7 @@ enum constellation_constrained_solver_status
 
 struct constellation_constrained_config
 {
-	//! Object-space score gate in metres (stock default, not an active setting).
+	//! Object-space score gate in metres (compiled default from the handoff spec, not an active setting).
 	double score_gate_m;
 	//! Broad object-space association gate in metres for candidate edges.
 	double association_gate_m;
@@ -88,18 +88,18 @@ struct constellation_constrained_config
 	double minimum_bearing_separation_rad;
 	double minimum_depth_m;
 	double maximum_depth_m;
-	/* Proposed noise/uncertainty policy, not device calibration. */
+	/* Proposed noise/uncertainty policy, not recovered device calibration. */
 	double ray_noise_std_m;
 	double maximum_position_std_m;
 	double maximum_yaw_std_rad;
 	//! Minimum likelihood gap (chi-square units of ray_noise_std_m) to the best competing assignment.
 	double ambiguity_chi_square;
-	/* Monado verification policy, beyond the stock scorer count (inliers > sample size):
+	/* Monado verification policy, beyond the recovered scorer count (inliers > sample size):
 	 * accepted observations required when acquiring without a trusted position prior, and the
 	 * distinct physical LEDs among them. Repeated views of one LED do not fix its identity. */
 	unsigned minimum_cold_inliers;
 	unsigned minimum_cold_distinct_leds;
-	/* The same counts for searches around a trusted prior. The stock minimum (inliers > sample
+	/* The same counts for searches around a trusted prior. The recovered minimum (inliers > sample
 	 * size, so 2 for the retained prior) let one stale prior keep re-verifying itself on two blobs
 	 * in worn use; a published pose now needs this much evidence on every path. */
 	unsigned minimum_tracking_inliers;

@@ -9,6 +9,7 @@
 
 #include "xrt/xrt_defines.h"
 #include "util/u_time.h"
+#include "tracking/t_constellation_motion.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +17,7 @@ extern "C" {
 
 /*!
  * Defaults chosen on the synthetic cases in tests_rift_s_position_filter (noise at rest, delayed
- * fixes during a hand swing, slowly varying acceleration error); no Meta values are used.
+ * fixes during a hand swing, slowly varying acceleration error); no Meta values were recovered.
  * Continuous white acceleration noise density, (m/s^2)^2 per Hz, and bias random walk,
  * (m/s^2)^2 per second.
  */
@@ -25,25 +26,12 @@ extern "C" {
 
 /*!
  * Mutually consistent fixes needed before a fix that disagrees with the estimate (a gated
- * innovation, or any fix while the position is held after loss) replaces it. A single wrong
+ * innovation, or any fix after an IMU clock discontinuity) replaces it. A single wrong
  * constellation fit, e.g. a partial ring seen behind the back, must not move the hand.
  */
 #define RIFT_S_POSITION_FILTER_CONFIRM_FIXES 3
 //! Longest gap between consecutive candidate fixes of one confirmation.
-#define RIFT_S_POSITION_FILTER_CONFIRM_GAP_NS (250 * U_TIME_1MS_IN_NS)
-/*!
- * Fixes before a track's velocity is trusted for coasting; younger tracks hold their position
- * when fixes stop. Matches the "more than 10 updates" step of the loss ladder.
- */
-#define RIFT_S_POSITION_FILTER_MATURE_UPDATES 11
-
-/*!
- * Longest optical gap the IMU bridges before the position is frozen and reported lost: the
- * 0.5 s step of the loss ladder. Fixes arrive every 33 ms, so in view only real occlusion
- * reaches it; displacement while bridging stays bounded to 10 cm from the last fix.
- */
-#define RIFT_S_POSITION_FILTER_BRIDGE_NS (500 * U_TIME_1MS_IN_NS)
-
+#define RIFT_S_POSITION_FILTER_CONFIRM_GAP_NS T_CONSTELLATION_TRACK_MAX_GAP_NS
 //! IMU inputs retained for replaying after a delayed optical fix: 1 s at 500 Hz.
 #define RIFT_S_POSITION_FILTER_HISTORY 512
 
@@ -68,10 +56,8 @@ struct rift_s_position_filter_input
 struct rift_s_position_filter
 {
 	bool initialized;
-	//! Velocity damping and no bias update: no optical fix for longer than the coast threshold.
-	bool coasting;
-	//! Position frozen and velocity zero: tracking was lost; waits for an optical reset.
-	bool frozen;
+	//! IMU clock or device discontinuity: stop propagation until a confirmed optical reset.
+	bool suspended;
 	//! Process noise; set by reset(), may be overridden afterwards.
 	double accel_noise_density, bias_random_walk;
 	struct rift_s_position_filter_state state;
@@ -114,7 +100,7 @@ rift_s_position_filter_imu(struct rift_s_position_filter *f, timepoint_ns t, con
 /*!
  * Fuse an optical position at its capture time. @p variance is the per-axis measurement variance
  * in m^2. The first fix initializes the filter. An innovation beyond @p reset_distance_m, or any fix
- * while frozen, is a candidate: it re-initializes position and velocity (the Windows "6DoF reset")
+ * while suspended, is a candidate: it re-initializes position and velocity (the Windows "6DoF reset")
  * only once RIFT_S_POSITION_FILTER_CONFIRM_FIXES consecutive candidates agree within
  * @p reset_distance_m of each other; until then the estimate is kept and PENDING returned.
  */
@@ -125,9 +111,18 @@ rift_s_position_filter_fix(struct rift_s_position_filter *f,
                            const struct xrt_vec3 *variance,
                            float reset_distance_m);
 
-//! Stop integrating: hold the current position with zero velocity until the next reset.
+//! Seed a Constellation-confirmed track after optical age loss, retaining IMU history and noise.
+//! Stale samples and clock/device discontinuities still use the normal rejection/confirmation gates.
+enum rift_s_position_fix_result
+rift_s_position_filter_reacquire(struct rift_s_position_filter *f,
+                                 timepoint_ns capture,
+                                 const struct xrt_vec3 *position,
+                                 const struct xrt_vec3 *variance,
+                                 float reset_distance_m);
+
+//! Suspend integration after an IMU clock/device discontinuity, until the next optical reset.
 void
-rift_s_position_filter_freeze(struct rift_s_position_filter *f);
+rift_s_position_filter_suspend(struct rift_s_position_filter *f);
 
 /*!
  * Position and velocity at @p t. Times after the last IMU sample extrapolate with constant
@@ -141,7 +136,7 @@ rift_s_position_filter_predict(const struct rift_s_position_filter *f,
                                struct xrt_vec3 *out_velocity);
 
 /*!
- * Windows controller loss ladder (its default configuration): how long position and velocity
+ * Controller loss duration configuration: how long position and velocity
  * stay tracked after the last optical update, by the number of successful and reliable optical
  * updates in the current track.
  */

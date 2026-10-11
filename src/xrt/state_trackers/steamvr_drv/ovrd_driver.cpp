@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
 
 #include "math/m_api.h"
 #include "ovrd_log.hpp"
@@ -26,6 +27,8 @@
 #include "ovrd_display.hpp"
 #include "ovrd_camera.hpp"
 #include "ovrd_roomsetup_guard_process.hpp"
+#include "ovrd_world_universe.hpp"
+#include "../../drivers/rift_s/rift_s_world_control.h"
 #include <memory>
 #include "openvr_driver.h"
 
@@ -79,6 +82,28 @@ is_rift_s_touch(const struct xrt_device *xdev)
 {
 	static const char prefix[] = "Oculus Rift S";
 	return xdev->name == XRT_DEVICE_TOUCH_CONTROLLER && strncmp(xdev->str, prefix, sizeof(prefix) - 1) == 0;
+}
+
+static void
+update_rift_s_universe(vr::PropertyContainerHandle_t container, uint64_t &universe, int64_t &last_poll)
+{
+	int64_t now = os_monotonic_get_ns();
+	if (now - last_poll < 500000000LL) return;
+	last_poll = now;
+	char path[1024];
+	rift_s_world_control_path("status", path, sizeof(path));
+	std::ifstream stream(path);
+	int64_t stamp = 0;
+	std::string status;
+	stream >> stamp >> status;
+	static const int64_t started = now;
+	uint64_t next = rift_s_world_universe(status, stamp, now, started);
+	if (next == universe) return;
+	auto error = vr::VRProperties()->SetUint64Property(container, vr::Prop_CurrentUniverseId_Uint64, next);
+	if (error == vr::TrackedProp_Success) {
+		universe = next;
+		ovrd_log("Rift S room universe=%llu status=%s\n", (unsigned long long)next, status.c_str());
+	}
 }
 
 // DebugRequest bench commands expire so a stopped script cannot hold a trigger.
@@ -896,6 +921,8 @@ public:
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
 			if (m_unObjectId != vr::k_unTrackedDeviceIndexInvalid) {
+				if (is_rift_s_touch(m_xdev))
+					update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll);
 				vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_unObjectId, GetPose(),
 				                                                   sizeof(vr::DriverPose_t));
 			}
@@ -928,7 +955,8 @@ public:
 		m_ulPropertyContainer = vr::VRProperties()->TrackedDeviceToPropertyContainer(m_unObjectId);
 
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
-		vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, 2);
+		m_worldUniverse = is_rift_s_touch(m_xdev) ? 3 : 2;
+		vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
 		vr::VRProperties()->SetInt32Property(m_ulPropertyContainer, vr::Prop_DeviceClass_Int32, vr::TrackedDeviceClass_Controller);
 
 		if (m_hand == XRT_HAND_LEFT) {
@@ -1260,6 +1288,8 @@ public:
 	vr::DriverPose_t m_pose;
 	vr::TrackedDeviceIndex_t m_unObjectId;
 	vr::PropertyContainerHandle_t m_ulPropertyContainer;
+	uint64_t m_worldUniverse = 3;
+	int64_t m_worldPoll = 0;
 
 	bool m_emulate_index_controller = false;
 
@@ -1370,6 +1400,8 @@ private:
 
 	vr::TrackedDeviceIndex_t m_trackedDeviceIndex = 0;
 	vr::PropertyContainerHandle_t m_ulPropertyContainer = vr::k_ulInvalidPropertyContainer;
+	uint64_t m_worldUniverse = 3;
+	int64_t m_worldPoll = 0;
 
 	float m_flSecondsFromVsyncToPhotons = -1;
 	float m_flDisplayFrequency = -1;
@@ -1448,6 +1480,8 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		if (m_benchProximity)
 			vr::VRDriverInput()->UpdateBooleanComponent(m_benchProximity, true, 0);
+		if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0)
+			update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll);
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, GetPose(),
 		                                                   sizeof(vr::DriverPose_t));
 	}
@@ -1482,7 +1516,8 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 		ovrd_log("MONADO_STEAMVR_BENCH enabled: synthetic fallback and awake HMD\n");
 	}
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
-	vr::VRProperties()->SetUint64Property( m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, 2);
+	m_worldUniverse = strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 ? 3 : 2;
+	vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
 
     if (m_xdev->camera) {
         vr::EVRInitError queue_error = vr::VRInitError_None;
@@ -1672,12 +1707,8 @@ CDeviceDriver_Monado::GetPose()
 	    .shouldApplyHeadModel = !m_xdev->supported.position_tracking,
 	    .deviceIsConnected = true,
 	};
-	// A loss of positional tracking still has a finite held position. Dropping it sent Y=0 to games.
-	apply_pose(&rel, &t, XRT_SPACE_RELATION_POSITION_VALID_BIT);
-	if (!(rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT)) {
-		t.result = vr::TrackingResult_Running_OutOfRange;
-		t.poseIsValid = false;
-	}
+	// Rift S keeps a finite fallback while VIO recovers or the saved room awaits visual confirmation.
+	apply_head_pose(&rel, &t, strcmp(m_xdev->str, "Oculus Rift S") == 0);
 
 #ifdef DUMP_POSE
 	ovrd_log("get hmd pose %f %f %f %f, %f %f %f\n", t.qRotation.x, t.qRotation.y, t.qRotation.z, t.qRotation.w,

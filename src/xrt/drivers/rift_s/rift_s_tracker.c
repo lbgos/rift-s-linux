@@ -603,12 +603,27 @@ rift_s_tracker_create(struct xrt_tracking_origin *origin,
 }
 
 void
-rift_s_tracker_destroy(struct rift_s_tracker *t)
+rift_s_tracker_stop(struct rift_s_tracker *t)
 {
+	// Drain an in-flight camera submission and prevent subsequent callbacks from queuing work.
+	os_mutex_lock(&t->slam_mutex);
+	os_mutex_lock(&t->mutex);
+	t->ready_for_data = false;
+	os_mutex_unlock(&t->mutex);
+	os_mutex_unlock(&t->slam_mutex);
+
 	if (t->world_thread_initialized)
-		os_thread_helper_destroy(&t->world_thread);
+		os_thread_helper_stop_and_wait(&t->world_thread);
 	for (int eye = 0; eye < RIFT_S_CAMERA_COUNT; eye++)
 		xrt_frame_reference(&t->world_frames[eye], NULL);
+}
+
+void
+rift_s_tracker_destroy(struct rift_s_tracker *t)
+{
+	rift_s_tracker_stop(t);
+	if (t->world_thread_initialized)
+		os_thread_helper_destroy(&t->world_thread);
 	rift_s_world_anchor_destroy(t->world_anchor);
 	rift_s_passthrough_destroy(t->base.camera);
 	t_stereo_camera_calibration_reference(&t->stereo_calib, NULL);
@@ -1207,11 +1222,21 @@ world_write_status(struct rift_s_tracker *t)
 	                    : (t->slam_guard.boundary_confirmed && !t->slam_guard.world_transition) ? "localized"
 	                    : t->world_map_available                                                ? "relocalizing"
 	                                                                                            : "unanchored";
+	struct rift_s_world_diagnostics diagnostics = t->world_diagnostics;
+	bool standby = t->standby, paused = t->slam_paused, restarting = t->slam_restart_pending;
+	uint64_t generation = t->slam_generation;
+	uint32_t confirmations = t->world_confirmations;
 	os_mutex_unlock(&t->mutex);
 	static timepoint_ns last_write_ns;
 	static const char *last_state;
 	timepoint_ns now_ns = os_monotonic_get_ns();
 	if (state == last_state && now_ns - last_write_ns < 500 * U_TIME_1MS_IN_NS) return;
+	if (state != last_state && strcmp(state, "relocalizing") == 0) {
+		RIFT_S_WARN("Guardian not found: saved room is not localized; boundary unavailable. "
+		            "Uncover headset cameras and look around. If the room stays unavailable, run Room Setup.");
+	} else if (state != last_state && strcmp(state, "unanchored") == 0) {
+		RIFT_S_WARN("Guardian not found: no usable saved room map. Run Room Setup to anchor the boundary.");
+	}
 	last_write_ns = now_ns;
 	last_state = state;
 	char path[1024], temp[1050];
@@ -1219,7 +1244,21 @@ world_write_status(struct rift_s_tracker *t)
 	snprintf(temp, sizeof(temp), "%s.tmp", path);
 	FILE *file = fopen(temp, "w");
 	if (!file) return;
-	fprintf(file, "%lld %s\n", (long long)os_monotonic_get_ns(), state);
+	// The first two fields remain the guard's status protocol. Diagnostics are
+	// available without a debug launch or stopping tracking with a debugger.
+	const struct rift_s_world_anchor_result *result = &diagnostics.result;
+	fprintf(file, "%lld %s attempts=%" PRIu64 " usable=%" PRIu64
+	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u standby=%d paused=%d restart=%d"
+	              " generation=%" PRIu64 " confirmations=%u keyframes=%u"
+	              " features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u"
+	              " matched=%d rejection=%s\n",
+	        (long long)os_monotonic_get_ns(), state, diagnostics.attempts, diagnostics.usable,
+	        (long long)diagnostics.capture_ns, (long long)diagnostics.sample_ns, diagnostics.pose_valid,
+	        diagnostics.pose_flags, standby, paused, restarting, generation, confirmations, result->keyframes,
+	        result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
+	        result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
+	        result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
+	        result->relocalized, result->rejection ? result->rejection : "none");
 	if (fclose(file) == 0) rename(temp, path);
 }
 
@@ -1352,6 +1391,11 @@ rift_s_world_thread(void *ptr)
 			                     valid ? &capture.pose.orientation : NULL, &result);
 			attempts++;
 			usable += valid;
+			os_mutex_lock(&t->mutex);
+			t->world_diagnostics = (struct rift_s_world_diagnostics){
+			    .attempts = attempts, .usable = usable, .capture_ns = capture_ns, .sample_ns = source_ns,
+			    .pose_valid = valid, .pose_flags = capture.relation_flags, .result = result};
+			os_mutex_unlock(&t->mutex);
 			if (capture_ns - last_attempt_log_ns >= U_TIME_1S_IN_NS) {
 				last_attempt_log_ns = capture_ns;
 				RIFT_S_INFO("World attempt=%" PRIu64 " usable=%" PRIu64
