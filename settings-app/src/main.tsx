@@ -78,48 +78,6 @@ function KeyValues({ rows }: { rows: [string, string][] }) {
   return <div className="t kv">{rows.map(([label, value]) => <div key={label}><span>{label}</span><span>{value}</span></div>)}</div>;
 }
 
-function MirrorPreview({ enabled }: { enabled: boolean }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const [error, setError] = useState('');
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      let failed = false;
-      if (document.visibilityState === 'visible') {
-        try {
-          const bytes = await invoke<ArrayBuffer>('mirror_frame');
-          if (cancelled) return;
-          const dimensions = new DataView(bytes);
-          const width = dimensions.getUint32(0, true), height = dimensions.getUint32(4, true);
-          if (width < 1 || width > 512 || height < 1 || height > 720 || bytes.byteLength !== 8 + width * height * 4) {
-            throw new Error('SteamVR preview unavailable');
-          }
-          const target = canvas.current;
-          const context = target?.getContext('2d');
-          if (target && context) {
-            if (target.width !== width || target.height !== height) { target.width = width; target.height = height; }
-            context.putImageData(new ImageData(new Uint8ClampedArray(bytes, 8), width, height), 0, 0);
-          }
-          setError('');
-        } catch (e) {
-          failed = true;
-          if (!cancelled) {
-            const target = canvas.current;
-            if (target) target.getContext('2d')?.clearRect(0, 0, target.width, target.height);
-            setError(String(e));
-          }
-        }
-      }
-      if (!cancelled) timer = setTimeout(poll, failed || document.visibilityState !== 'visible' ? 1000 : 100);
-    }
-    void poll();
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [enabled]);
-  return <div className="well preview"><canvas ref={canvas} aria-label="Live SteamVR compositor preview"/>{error && <output role="status">{error}</output>}</div>;
-}
-
 function App() {
   const [view, setView] = useState<View>(currentView);
   const [data, setData] = useState<Snapshot>({});
@@ -167,14 +125,13 @@ function App() {
     <main>
       <section className={`view${view === 'headset' ? ' on' : ''}`} id="headset">
         <div className="col">
-          <h2>Stream display <button className="btn sm" disabled={busy !== null} onClick={() => void action('mirror', 'vr_action', { action: 'mirror' })}>Open VR View</button></h2>
-          <MirrorPreview enabled={view === 'headset'}/>
-          <div className="stats">
-            <div><span>Display</span><b>{data.display?.join(' × ') ?? missing}</b></div>
-            <div><span>Refresh</span><b>{format(data.refresh, ' Hz')}</b></div>
-            <div title="Total render GPU time for the latest compositor frame"><span>Frame time</span><b>{format(data.frameTime, ' ms', 1)}</b></div>
-            <div title="Dropped frames in the latest compositor frame"><span>Dropped</span><b>{data.dropped ?? missing}</b></div>
-          </div>
+          <h2>Display <button className="btn sm" disabled={busy !== null} onClick={() => void action('mirror', 'vr_action', { action: 'mirror' })}>Open VR View</button></h2>
+          <KeyValues rows={[
+            ['Resolution', data.display?.join(' × ') ?? missing],
+            ['Refresh', format(data.refresh, ' Hz')],
+            ['Frame time', format(data.frameTime, ' ms', 1)],
+            ['Dropped frames', data.dropped == null ? missing : String(data.dropped)],
+          ]}/>
           {feedback.mirror && fb('mirror')}
         </div>
         <div className="col">

@@ -20,7 +20,6 @@ use tungstenite::{client::IntoClientRequest, Message};
 unsafe extern "C" {
     fn rifts_snapshot(path: *const std::ffi::c_char) -> *const std::ffi::c_char;
     fn rifts_action(action: i32) -> i32;
-    fn rifts_preview(size: *mut u32) -> *const u8;
     fn rifts_shutdown();
 }
 static VR: Mutex<()> = Mutex::new(());
@@ -347,19 +346,6 @@ fn vr_action(action: &str) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
-fn mirror_frame() -> Result<tauri::ipc::Response, String> {
-    let _lock = VR.lock().map_err(|e| e.to_string())?;
-    vr_snapshot()?;
-    let mut size = 0;
-    let pixels = unsafe { rifts_preview(&mut size) };
-    if pixels.is_null() || !(8..=4_000_000).contains(&size) {
-        return Err("SteamVR preview unavailable".into());
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(pixels, size as usize) }.to_vec();
-    Ok(tauri::ipc::Response::new(bytes))
-}
-
 fn start_native_room_setup() -> Result<(), String> {
     // SteamVR 2.17's dashboard handler enters its own native room setup at
     // step 7. No CEF debugger, copied web assets or configuration edits.
@@ -573,7 +559,7 @@ fn main() {
                     use webkit2gtk::{SettingsExt, WebViewExt};
                     if let Some(settings) = webview.inner().settings() {
                         // This control panel needs no accelerated WebKit layers. Avoid GBM
-                        // buffer failures on NVIDIA; the OpenVR mirror keeps its GL context.
+                        // buffer failures on NVIDIA.
                         settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::Never);
                     }
                 })?;
@@ -584,7 +570,6 @@ fn main() {
             snapshot,
             set_ipd,
             vr_action,
-            mirror_frame,
             export_logs,
             restart_steamvr
         ])

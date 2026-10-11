@@ -6,10 +6,7 @@
 #include <string>
 #include <vector>
 
-extern "C" const uint8_t *rifts_mirror_frame(vr::IVRCompositor *, uint32_t *);
-extern "C" void rifts_mirror_shutdown(vr::IVRCompositor *);
-
-// Background client; mirror pixels come from the native compositor export.
+// Background client for SteamVR state and native dashboard actions.
 namespace {
 void *library = nullptr;
 vr::IVRSystem *vr_system = nullptr;
@@ -171,11 +168,7 @@ extern "C" int rifts_action(int action) {
     if(action==3 && chaperone) { chaperone->ResetZeroPose(vr::TrackingUniverseStanding); return 1; }
     return 0;
 }
-extern "C" const uint8_t *rifts_preview(uint32_t *size) {
-    return rifts_mirror_frame(compositor, size);
-}
 extern "C" void rifts_shutdown() {
-    rifts_mirror_shutdown(compositor);
     if(camera_handle && camera) camera->ReleaseVideoStreamingService(camera_handle);
     camera_handle=0; camera=nullptr; previous_frame=false;
     if(library) { auto shutdown=reinterpret_cast<void (*)()>(dlsym(library,"VR_ShutdownInternal")); if(shutdown) shutdown(); dlclose(library); }
