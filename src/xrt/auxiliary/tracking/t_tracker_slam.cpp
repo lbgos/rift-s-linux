@@ -83,7 +83,7 @@
 
 //! @see t_slam_tracker_config
 DEBUG_GET_ONCE_LOG_OPTION(slam_log, "SLAM_LOG", U_LOGGING_INFO)
-DEBUG_GET_ONCE_OPTION(vit_system_library_path, "VIT_SYSTEM_LIBRARY_PATH", PREFERRED_VIT_SYSTEM_LIBRARY)
+DEBUG_GET_ONCE_OPTION(vit_system_library_path, "VIT_SYSTEM_LIBRARY_PATH", nullptr)
 DEBUG_GET_ONCE_OPTION(slam_config, "SLAM_CONFIG", nullptr)
 DEBUG_GET_ONCE_BOOL_OPTION(slam_ui, "SLAM_UI", false)
 // Unknown backends remain opt-in; safety-patched backends advertise recreation support.
@@ -1690,6 +1690,13 @@ t_slam_fill_default_config(struct t_slam_tracker_config *config)
 {
 	config->log_level = debug_get_log_option_slam_log();
 	config->vit_system_library_path = debug_get_option_vit_system_library_path();
+	if (config->vit_system_library_path == nullptr) {
+		// Source installations may use /usr/local/lib, outside the system loader's search path.
+		std::error_code error;
+		config->vit_system_library_path = std::filesystem::is_regular_file(XRT_VIT_INSTALLED_LIBRARY, error)
+		                                      ? XRT_VIT_INSTALLED_LIBRARY
+		                                      : PREFERRED_VIT_SYSTEM_LIBRARY;
+	}
 	config->slam_config = debug_get_option_slam_config();
 	config->slam_ui = debug_get_bool_option_slam_ui();
 	config->submit_from_start = debug_get_bool_option_slam_submit_from_start();
@@ -1722,7 +1729,7 @@ t_slam_create(struct xrt_frame_context *xfctx,
 
 	t.log_level = log_level;
 
-	SLAM_INFO("Loading VIT system library from VIT_SYSTEM_LIBRARY_PATH='%s'", config->vit_system_library_path);
+	SLAM_INFO("Loading VIT system library '%s'", config->vit_system_library_path);
 
 	if (!t_vit_bundle_load(&t.vit, config->vit_system_library_path)) {
 		SLAM_ERROR("Failed to load VIT system library from '%s'", config->vit_system_library_path);

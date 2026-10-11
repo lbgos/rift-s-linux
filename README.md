@@ -15,7 +15,7 @@ Known rough edges:
 
 ## Build and install
 
-Head tracking needs Basalt. Clone Basalt, apply the patches in `patches/basalt/` in order, then build and install it by its own readme so that `libbasalt.so` is on the library path. If it is somewhere else, set `VIT_SYSTEM_LIBRARY_PATH`.
+Head tracking needs Basalt. Clone Basalt, apply the patches in `patches/basalt/` in order, then build and install it by its own readme using the same installation prefix as Monado. The driver finds `libbasalt.so` in that prefix's library directory automatically. System library installations also work. `VIT_SYSTEM_LIBRARY_PATH` is an optional override for development builds.
 
 ```
 git clone https://gitlab.freedesktop.org/mateosss/basalt.git
