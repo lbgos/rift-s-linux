@@ -14,6 +14,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+use tauri::Manager;
 use tungstenite::{client::IntoClientRequest, Message};
 
 unsafe extern "C" {
@@ -565,6 +566,20 @@ fn main() {
         window.height = height;
     }
     tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                window.with_webview(|webview| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = webview.inner().settings() {
+                        // This control panel needs no accelerated WebKit layers. Avoid GBM
+                        // buffer failures on NVIDIA; the OpenVR mirror keeps its GL context.
+                        settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::Never);
+                    }
+                })?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             snapshot,
             set_ipd,

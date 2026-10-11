@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -42,9 +45,8 @@ void release_current()
 }
 }
 
-// Called under the bridge mutex. Context ownership is released between calls,
-// so Tauri's command workers can use the same native OpenVR mirror safely.
-extern "C" const uint8_t *rifts_mirror_frame(vr::IVRCompositor *compositor, uint32_t *size)
+// Runs only on the mirror worker. The bridge mutex serializes caller access to pixels.
+const uint8_t *read_frame(vr::IVRCompositor *compositor, uint32_t *size)
 {
     *size = 0;
     if (!compositor || !make_current()) return nullptr;
@@ -93,7 +95,7 @@ extern "C" const uint8_t *rifts_mirror_frame(vr::IVRCompositor *compositor, uint
     return pixels.data();
 }
 
-extern "C" void rifts_mirror_shutdown(vr::IVRCompositor *compositor)
+void destroy_mirror(vr::IVRCompositor *compositor)
 {
     if (!display) return;
     if (make_current()) {
@@ -111,4 +113,69 @@ extern "C" void rifts_mirror_shutdown(vr::IVRCompositor *compositor)
     surface = 0; context = nullptr; display = nullptr;
     scaled_width = scaled_height = 0;
     pixels.clear();
+}
+
+namespace {
+// OpenVR's GLX export retains thread-local context state. Keep import, readback and
+// release on one thread even when the Tauri command pool changes callers.
+class MirrorWorker {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::thread thread;
+    vr::IVRCompositor *compositor = nullptr;
+    bool pending = false, complete = false, shutdown = false;
+    const uint8_t *frame = nullptr;
+    uint32_t size = 0;
+
+    void run()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            changed.wait(lock, [&] { return pending; });
+            auto *client = compositor;
+            bool stop = shutdown;
+            lock.unlock();
+            if (stop) destroy_mirror(client);
+            else frame = read_frame(client, &size);
+            lock.lock();
+            pending = false;
+            complete = true;
+            changed.notify_all();
+            if (stop) return;
+        }
+    }
+public:
+    const uint8_t *read(vr::IVRCompositor *client, uint32_t *out_size)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!thread.joinable()) thread = std::thread([this] { run(); });
+        compositor = client;
+        pending = true; complete = false; shutdown = false;
+        changed.notify_all();
+        changed.wait(lock, [&] { return complete; });
+        *out_size = size;
+        return frame;
+    }
+    void stop(vr::IVRCompositor *client)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (!thread.joinable()) return;
+        compositor = client;
+        pending = true; complete = false; shutdown = true;
+        changed.notify_all();
+        changed.wait(lock, [&] { return complete; });
+        lock.unlock();
+        thread.join();
+    }
+    ~MirrorWorker() { stop(nullptr); }
+};
+MirrorWorker worker;
+}
+extern "C" const uint8_t *rifts_mirror_frame(vr::IVRCompositor *compositor, uint32_t *size)
+{
+    return worker.read(compositor, size);
+}
+extern "C" void rifts_mirror_shutdown(vr::IVRCompositor *compositor)
+{
+    worker.stop(compositor);
 }
