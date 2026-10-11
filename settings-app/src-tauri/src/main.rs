@@ -330,7 +330,7 @@ fn vr_action(action: &str) -> Result<String, String> {
         return Err("Unavailable while SteamVR is in bench mode".into());
     }
     let (id, response) = match action {
-        "mirror" => (1, "SteamVR mirror opened."),
+        "mirror" => (1, "SteamVR VR View opened."),
         "room" => (2, "Room setup is running in the headset."),
         "recenter" => (3, "Recentered."),
         _ => return Err("Unknown action".into()),

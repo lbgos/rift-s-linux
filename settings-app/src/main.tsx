@@ -125,7 +125,7 @@ function App() {
     <main>
       <section className={`view${view === 'headset' ? ' on' : ''}`} id="headset">
         <div className="col">
-          <h2>Stream display <button className="btn sm" disabled={busy !== null} onClick={() => void action('mirror', 'vr_action', { action: 'mirror' })}>Open mirror window</button></h2>
+          <h2>Stream display <button className="btn sm" disabled={busy !== null} onClick={() => void action('mirror', 'vr_action', { action: 'mirror' })}>Open VR View</button></h2>
           <div className="well empty">{feedback.mirror || 'Preview is available in the SteamVR mirror window.'}</div>
           <div className="stats">
             <div><span>Display</span><b>{data.display?.join(' × ') ?? missing}</b></div>

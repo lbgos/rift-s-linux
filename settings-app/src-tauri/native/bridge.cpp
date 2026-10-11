@@ -11,6 +11,7 @@ namespace {
 void *library = nullptr;
 vr::IVRSystem *vr_system = nullptr;
 vr::IVRCompositor *compositor = nullptr;
+vr::IVRSettings *settings = nullptr;
 vr::IVRChaperone *chaperone = nullptr;
 vr::IVRChaperoneSetup *setup = nullptr;
 vr::IVROverlay *overlay = nullptr;
@@ -39,6 +40,7 @@ bool connect(const char *path) {
     if (error != vr::VRInitError_None) return false;
     vr_system = get<vr::IVRSystem>(generic, vr::IVRSystem_Version);
     compositor = get<vr::IVRCompositor>(generic, vr::IVRCompositor_Version);
+    settings = get<vr::IVRSettings>(generic, vr::IVRSettings_Version);
     chaperone = get<vr::IVRChaperone>(generic, vr::IVRChaperone_Version);
     setup = get<vr::IVRChaperoneSetup>(generic, vr::IVRChaperoneSetup_Version);
     overlay = get<vr::IVROverlay>(generic, vr::IVROverlay_Version);
@@ -157,7 +159,11 @@ extern "C" const char *rifts_snapshot(const char *path) {
 
 extern "C" int rifts_action(int action) {
     if(!vr_system) return 0;
-    if(action==1 && compositor) { compositor->ShowMirrorWindow(); return 1; }
+    if(action==1 && settings) {
+        vr::EVRSettingsError error = vr::VRSettingsError_None;
+        settings->SetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_MirrorViewVisibility_Bool, true, &error);
+        return error == vr::VRSettingsError_None;
+    }
     if(action==2 && overlay) { overlay->ShowDashboard(""); return 1; }
     if(action==3 && chaperone) { chaperone->ResetZeroPose(vr::TrackingUniverseStanding); return 1; }
     return 0;
@@ -166,5 +172,5 @@ extern "C" void rifts_shutdown() {
     if(camera_handle && camera) camera->ReleaseVideoStreamingService(camera_handle);
     camera_handle=0; camera=nullptr; previous_frame=false;
     if(library) { auto shutdown=reinterpret_cast<void (*)()>(dlsym(library,"VR_ShutdownInternal")); if(shutdown) shutdown(); dlclose(library); }
-    library=nullptr; vr_system=nullptr; compositor=nullptr; chaperone=nullptr; setup=nullptr; overlay=nullptr; display=nullptr;
+    library=nullptr; vr_system=nullptr; compositor=nullptr; settings=nullptr; chaperone=nullptr; setup=nullptr; overlay=nullptr; display=nullptr;
 }
