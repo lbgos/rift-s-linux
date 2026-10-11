@@ -4,7 +4,7 @@
 
 :root{
   color-scheme:dark;
-  --bg:#232427;--bar:#2c2d31;--well:#000;--line:#3a3c41;
+  --bg:#000;--bar:#000;--well:#000;--line:#3a3c41;
   --fg:#fff;--mut:#a0a2a9;--ctl:#3a3c41;--ctl-h:#47494f;--lit:#ececee;--acc:#6cb4e4;
   --font:"Open Sans","Noto Sans",system-ui,sans-serif;
 }
@@ -74,6 +74,9 @@ input[type=range]::-moz-range-thumb{width:.625rem;height:1.375rem;border-radius:
 /* stream */
 .well{flex:1;min-height:0;background:var(--well);display:flex}
 .well svg{flex:1;width:100%;height:100%;min-width:0;min-height:0}
+.preview{position:relative;align-items:center;justify-content:center;overflow:hidden}
+.preview canvas{width:100%;height:100%;object-fit:contain}
+.preview output{position:absolute;color:var(--mut);font-size:.9rem}
 .stats{display:flex;gap:2.5rem;margin-top:.75rem;font-size:.9rem;min-height:1.5rem}
 .stats span{color:var(--mut)}
 .stats b{font-weight:600;margin-left:.5rem}
