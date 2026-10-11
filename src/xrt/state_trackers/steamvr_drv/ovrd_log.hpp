@@ -16,6 +16,7 @@ extern "C" {
 #include <stdarg.h>
 
 #include "xrt/xrt_compiler.h"
+#include "util/u_logging.h"
 
 #ifdef __cplusplus
 }
@@ -26,10 +27,25 @@ extern "C" {
 static vr::IVRDriverLog *s_pLogFile = NULL;
 
 static inline void
+ovrd_log_sink(const char *, int, const char *func, enum u_logging_level level,
+              const char *format, va_list args, void *)
+{
+	if (level < U_LOGGING_WARN || level == U_LOGGING_RAW || !s_pLogFile) {
+		return;
+	}
+	char message[1024], line[1152];
+	vsnprintf(message, sizeof(message), format, args);
+	snprintf(line, sizeof(line), "%s [%s] %s", level == U_LOGGING_ERROR ? "ERROR" : "WARN",
+	         func ? func : "monado", message);
+	s_pLogFile->Log(line);
+}
+
+static inline void
 ovrd_log_init(vr::IVRDriverLog *pDriverLog)
 {
-	// Noop
-	s_pLogFile = vr::VRDriverLog();
+	s_pLogFile = pDriverLog;
+	// Register before device workers start; remove after they have joined in Cleanup.
+	u_log_set_sink(ovrd_log_sink, nullptr);
 }
 
 // Cannot use the XRT_PRINTF_FORMAT macro on a function definition.
@@ -58,5 +74,6 @@ ovrd_log(const char *fmt, ...)
 static inline void
 ovrd_log_cleanup()
 {
+	u_log_set_sink(nullptr, nullptr);
 	s_pLogFile = nullptr;
 }

@@ -122,6 +122,11 @@ struct constellation_device_diagnostics
 	//! shared_blob split by the kind of claim that won the blob.
 	uint64_t shared_by[CONSTELLATION_CLAIM_REJECTED + 1];
 	uint64_t stale;
+	uint64_t stale_track, stale_exposure;
+	uint64_t first_exposure_ns, last_acquisition_warning_ns;
+	uint64_t search_duration_ns[CT_STAGE_COUNT];
+	uint64_t budget_exhausted[CT_STAGE_COUNT];
+	uint64_t max_attempt_age_ns;
 	//! Verified results not published because they did not continue the track, by origin.
 	uint64_t jumps[CT_ORIGIN_COUNT];
 	//! Results held for confirmation, and holds replaced by an inconsistent next result.
@@ -578,14 +583,36 @@ log_joint_result(struct t_constellation_tracker *ct,
 	}
 }
 
-/* Periodic per-device summary at DEBUG, so a worn session separates missing observations,
- * solver rejection, blob arbitration and driver-side rejection for each hand. Caller holds
- * tracked_device_lock. */
+/* Periodic per-device summary at INFO, with rate-limited cold-acquisition diagnostics at WARN.
+ * Caller holds tracked_device_lock. */
 static void
 log_device_summary_locked(struct t_constellation_tracker *ct, struct constellation_tracker_device *device, bool force)
 {
 	struct constellation_device_diagnostics *d = &device->diagnostics;
 	uint64_t now = os_monotonic_get_ns();
+	if (!d->published && d->first_exposure_ns && now > d->first_exposure_ns &&
+	    now - d->first_exposure_ns >= 5 * (uint64_t)U_TIME_1S_IN_NS &&
+	    now - d->last_acquisition_warning_ns >= 10 * (uint64_t)U_TIME_1S_IN_NS) {
+		d->last_acquisition_warning_ns = now;
+		CT_WARN(ct, "Controller acquisition pending hand=%s elapsed_ms=%.1f track=%s"
+		            " cold=%" PRIu64 "/%" PRIu64 " p3p=%" PRIu64 "/%" PRIu64
+		            " average_search_ms=%.2f/%.2f budget_exhausted=%" PRIu64 "/%" PRIu64
+		            " max_capture_age_ms=%.1f confirming=%" PRIu64 " unconfirmed=%" PRIu64
+		            " stale_track=%" PRIu64 " stale_exposure=%" PRIu64
+		            " shared=%" PRIu64 " last_failure=%s",
+		        device->alias, (double)(now - d->first_exposure_ns) / U_TIME_1MS_IN_NS,
+		        constellation_track_state_name(device->track.state),
+		        d->accepted[CT_STAGE_COLD], d->attempts[CT_STAGE_COLD],
+		        d->accepted[CT_STAGE_P3P], d->attempts[CT_STAGE_P3P],
+		        d->attempts[CT_STAGE_COLD] ? (double)d->search_duration_ns[CT_STAGE_COLD] /
+		            d->attempts[CT_STAGE_COLD] / U_TIME_1MS_IN_NS : 0,
+		        d->attempts[CT_STAGE_P3P] ? (double)d->search_duration_ns[CT_STAGE_P3P] /
+		            d->attempts[CT_STAGE_P3P] / U_TIME_1MS_IN_NS : 0,
+		        d->budget_exhausted[CT_STAGE_COLD], d->budget_exhausted[CT_STAGE_P3P],
+		        (double)d->max_attempt_age_ns / U_TIME_1MS_IN_NS, d->confirming, d->unconfirmed,
+		        d->stale_track, d->stale_exposure, d->shared_blob,
+		        d->last_failure ? d->last_failure : "none");
+	}
 	if (!force && (ct->log_level > U_LOGGING_INFO || now - d->last_summary_ns < 5 * (uint64_t)U_TIME_1S_IN_NS)) {
 		return;
 	}
@@ -648,11 +675,18 @@ count_attempt(struct t_constellation_tracker *ct,
               enum ct_stage stage,
               uint64_t capture_ns,
               bool accepted,
-              enum constellation_constrained_rejection rejection)
+              enum constellation_constrained_rejection rejection,
+              uint64_t started_ns,
+              bool budget_exhausted)
 {
+	uint64_t finished_ns = os_monotonic_get_ns();
 	os_mutex_lock(&ct->tracked_device_lock);
 	struct constellation_device_diagnostics *d = &ct->devices[state->dev_index].diagnostics;
 	d->attempts[stage]++;
+	d->search_duration_ns[stage] += finished_ns - started_ns;
+	d->budget_exhausted[stage] += budget_exhausted;
+	if (finished_ns > capture_ns && finished_ns - capture_ns > d->max_attempt_age_ns)
+		d->max_attempt_age_ns = finished_ns - capture_ns;
 	unsigned inliers = state->joint_result.inliers;
 	d->best_inliers[inliers == 0 ? 0 : inliers < 4 ? 1 : inliers < 8 ? 2 : 3]++;
 	if (accepted) {
@@ -769,7 +803,7 @@ track_gate_locked(struct t_constellation_tracker *ct,
 	    &device->track, &next, r->vision_determines_yaw, have_ref_imu ? &ref_imu : NULL, &excess, &rotation);
 	switch (verdict) {
 	case CONSTELLATION_TRACK_PUBLISH: break;
-	case CONSTELLATION_TRACK_HOLD_STALE: d->stale++; break;
+	case CONSTELLATION_TRACK_HOLD_STALE: d->stale++; d->stale_track++; break;
 	case CONSTELLATION_TRACK_HOLD_UNCONFIRMED: d->unconfirmed++; /* fallthrough */
 	case CONSTELLATION_TRACK_HOLD_CONFIRMING: d->confirming++; break;
 	case CONSTELLATION_TRACK_HOLD_JUMP:
@@ -856,6 +890,7 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 	const char *held = NULL;
 	if (device->have_last_seen_pose && sample->timestamp <= device->last_seen_pose_ts) {
 		device->diagnostics.stale++;
+		device->diagnostics.stale_exposure++;
 		held = "stale_exposure";
 	} else {
 		held = track_gate_locked(ct, device, r, sample->timestamp);
@@ -1219,10 +1254,12 @@ joint_p3p_fallback(struct t_constellation_tracker *ct,
                    struct constellation_constrained_view *views,
                    unsigned n_views,
                    struct constellation_constrained_config *config,
-                   enum constellation_constrained_rejection *rejection)
+                   enum constellation_constrained_rejection *rejection,
+                   bool *budget_exhausted)
 {
 	// Without a verified P3P root, the cold result stays as the claim but is not P3P's verdict.
 	*rejection = CONSTELLATION_CONSTRAINED_NO_PAIR;
+	*budget_exhausted = false;
 	struct joint_p3p_context *ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		return false;
@@ -1236,7 +1273,11 @@ joint_p3p_fallback(struct t_constellation_tracker *ct,
 	for (unsigned v = 0; v < sample->n_views; v++) {
 		struct tracking_sample_frame *view = &sample->views[v];
 		uint64_t now = os_monotonic_get_ns();
-		if (now >= deadline || ctx->overflow) {
+		if (now >= deadline) {
+			*budget_exhausted = true;
+			break;
+		}
+		if (ctx->overflow) {
 			break;
 		}
 		if (!view->bwobs || view->bwobs->num_blobs < 3) {
@@ -1267,6 +1308,7 @@ joint_p3p_fallback(struct t_constellation_tracker *ct,
 		                                        CS_FLAG_JOINT_P3P,
 		                                    &pose, &state->prior_pos_error, &state->prior_rot_error,
 		                                    &view->cam_gravity_vector, state->gravity_error_rad, &score);
+		*budget_exhausted |= cam->cs->budget_exhausted;
 		cam->cs->pose_candidate_cb = NULL;
 		cam->cs->pose_candidate_userdata = NULL;
 		cam->cs->excluded_blobs = NULL;
@@ -1459,6 +1501,8 @@ constellation_tracker_process_frame_fast(struct xrt_frame_sink *sink, struct xrt
 		// Collect the controller prior pose
 		struct xrt_space_relation xsr;
 		device->diagnostics.exposures++;
+		if (!device->diagnostics.first_exposure_ns)
+			device->diagnostics.first_exposure_ns = xf->timestamp;
 		if (!constellation_tracked_device_connection_get_tracked_pose(device->connection, xf->timestamp,
 		                                                              &xsr)) {
 			device->diagnostics.no_attitude++;
@@ -1521,10 +1565,12 @@ constellation_tracker_process_frame_fast(struct xrt_frame_sink *sink, struct xrt
 		}
 		struct constellation_constrained_config config;
 		joint_config(&config, sample->timestamp, true);
+		uint64_t search_started_ns = os_monotonic_get_ns();
 		candidates[i] = constellation_constrained_search(state->led_model, views, n_views,
 		                                                 &state->P_world_obj_prior, state->reliable_heading,
 		                                                 true, &config, &state->joint_result);
-		count_attempt(ct, state, CT_STAGE_FAST, sample->timestamp, candidates[i], state->joint_result.rejection);
+		count_attempt(ct, state, CT_STAGE_FAST, sample->timestamp, candidates[i], state->joint_result.rejection,
+		              search_started_ns, state->joint_result.budget_exhausted);
 		if (!candidates[i]) {
 			log_joint_result(ct, sample, state, ct_stage_names[CT_STAGE_FAST],
 			                 constellation_constrained_rejection_name(state->joint_result.rejection));
@@ -1649,10 +1695,12 @@ constellation_tracker_process_frame_long(struct t_constellation_tracker *ct,
 		}
 		struct constellation_constrained_config config;
 		joint_config(&config, sample->timestamp, false);
+		uint64_t search_started_ns = os_monotonic_get_ns();
 		candidates[d] = constellation_constrained_search(state->led_model, views, n_views,
 		                                                 &state->P_world_obj_prior, state->reliable_heading,
 		                                                 state->trusted_position, &config, &state->joint_result);
-		count_attempt(ct, state, CT_STAGE_COLD, sample->timestamp, candidates[d], state->joint_result.rejection);
+		count_attempt(ct, state, CT_STAGE_COLD, sample->timestamp, candidates[d], state->joint_result.rejection,
+		              search_started_ns, state->joint_result.budget_exhausted);
 		if (candidates[d]) {
 			continue;
 		}
@@ -1662,8 +1710,12 @@ constellation_tracker_process_frame_long(struct t_constellation_tracker *ct,
 		 * another solver to select one of the same competing identities. */
 		if (state->joint_result.rejection != CONSTELLATION_CONSTRAINED_AMBIGUOUS) {
 			enum constellation_constrained_rejection p3p_rejection;
-			candidates[d] = joint_p3p_fallback(ct, sample, state, views, n_views, &config, &p3p_rejection);
-			count_attempt(ct, state, CT_STAGE_P3P, sample->timestamp, candidates[d], p3p_rejection);
+			bool p3p_budget_exhausted;
+			search_started_ns = os_monotonic_get_ns();
+			candidates[d] = joint_p3p_fallback(ct, sample, state, views, n_views, &config, &p3p_rejection,
+			                                   &p3p_budget_exhausted);
+			count_attempt(ct, state, CT_STAGE_P3P, sample->timestamp, candidates[d], p3p_rejection,
+			              search_started_ns, p3p_budget_exhausted);
 			if (!candidates[d]) {
 				log_joint_result(ct, sample, state, ct_stage_names[CT_STAGE_P3P],
 				                 constellation_constrained_rejection_name(p3p_rejection));
@@ -1690,14 +1742,20 @@ constellation_tracker_process_frame_long(struct t_constellation_tracker *ct,
 		}
 		struct constellation_constrained_config config;
 		joint_config(&config, sample->timestamp, false);
+		uint64_t search_started_ns = os_monotonic_get_ns();
 		candidates[d] = constellation_constrained_search(state->led_model, remaining, n_views,
 		                                                 &state->P_world_obj_prior, state->reliable_heading,
 		                                                 state->trusted_position, &config, &state->joint_result);
-		count_attempt(ct, state, CT_STAGE_COLD, sample->timestamp, candidates[d], state->joint_result.rejection);
+		count_attempt(ct, state, CT_STAGE_COLD, sample->timestamp, candidates[d], state->joint_result.rejection,
+		              search_started_ns, state->joint_result.budget_exhausted);
 		if (!candidates[d] && state->joint_result.rejection != CONSTELLATION_CONSTRAINED_AMBIGUOUS) {
 			enum constellation_constrained_rejection rejection;
-			candidates[d] = joint_p3p_fallback(ct, sample, state, remaining, n_views, &config, &rejection);
-			count_attempt(ct, state, CT_STAGE_P3P, sample->timestamp, candidates[d], rejection);
+			bool p3p_budget_exhausted;
+			search_started_ns = os_monotonic_get_ns();
+			candidates[d] = joint_p3p_fallback(ct, sample, state, remaining, n_views, &config, &rejection,
+			                                   &p3p_budget_exhausted);
+			count_attempt(ct, state, CT_STAGE_P3P, sample->timestamp, candidates[d], rejection,
+			              search_started_ns, p3p_budget_exhausted);
 		}
 		CT_TRACE(ct, "Tracking device=%s capture=%" PRIu64 " stage=unclaimed excluded=%u accepted=%d",
 		         ct->devices[state->dev_index].alias, sample->timestamp, excluded, candidates[d]);

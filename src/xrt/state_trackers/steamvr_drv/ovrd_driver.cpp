@@ -1895,6 +1895,7 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	xret = xrt_instance_create(NULL, &m_xinst);
 	if (xret != XRT_SUCCESS) {
 		ovrd_log("Failed to create instance\n");
+		ovrd_log_cleanup();
 		return vr::VRInitError_Init_HmdNotFound;
 	}
 
@@ -1902,6 +1903,7 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	if (xret < 0) {
 		ovrd_log("Failed to create system devices\n");
 		xrt_instance_destroy(&m_xinst);
+		ovrd_log_cleanup();
 		return vr::VRInitError_Init_HmdNotFound;
 	}
 	if (m_xsysd->static_roles.head == NULL) {
@@ -1910,6 +1912,7 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 		xrt_system_devices_destroy(&m_xsysd);
 		xrt_system_destroy(&m_xsys);
 		xrt_instance_destroy(&m_xinst);
+		ovrd_log_cleanup();
 		return vr::VRInitError_Init_HmdNotFound;
 	}
 
@@ -1964,12 +1967,17 @@ CServerDriver_Monado::Cleanup()
 	xrt_system_devices_destroy(&m_xsysd);
 	xrt_system_destroy(&m_xsys);
 	m_xhmd = NULL;
-	m_left->m_xdev = NULL;
-	m_right->m_xdev = NULL;
+	if (m_left) {
+		m_left->m_xdev = NULL;
+	}
+	if (m_right) {
+		m_right->m_xdev = NULL;
+	}
 
 	if (m_xinst) {
 		xrt_instance_destroy(&m_xinst);
 	}
+	ovrd_log_cleanup();
 }
 
 void
