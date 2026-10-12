@@ -486,11 +486,9 @@ update_haptics(struct rift_s_system *sys)
 		struct rift_s_haptic_radio *h = &sys->haptics[hand];
 		timepoint_ns now = os_monotonic_get_ns();
 		os_mutex_lock(&sys->dev_mutex);
-		uint8_t desired = now < h->end_ns ? h->amplitude : 0;
-		bool needed = !h->in_flight && now >= h->retry_ns &&
-		              (desired != h->applied_amplitude ||
-		               (desired != 0 && (h->device_id != h->applied_device_id || now >= h->refresh_ns)));
-		uint64_t id = h->device_id;
+		uint8_t desired;
+		uint64_t id;
+		bool needed = rift_s_haptic_next(h, now, &id, &desired);
 		os_mutex_unlock(&sys->dev_mutex);
 		if (!needed)
 			continue;
@@ -510,12 +508,9 @@ update_haptics(struct rift_s_system *sys)
 		// The request may have changed while the pairing list was read.
 		if (h->device_id == 0)
 			h->device_id = id;
-		id = h->device_id;
-		desired = os_monotonic_get_ns() < h->end_ns ? h->amplitude : 0;
-		// Stop the previous physical controller before driving a replacement.
-		if (h->applied_amplitude != 0 && h->applied_device_id != id) {
-			id = h->applied_device_id;
-			desired = 0;
+		if (!rift_s_haptic_next(h, os_monotonic_get_ns(), &id, &desired)) {
+			os_mutex_unlock(&sys->dev_mutex);
+			continue;
 		}
 		if (id == 0 || (desired == 0 && h->applied_amplitude == 0)) {
 			h->retry_ns = os_monotonic_get_ns() + 100 * U_TIME_1MS_IN_NS;

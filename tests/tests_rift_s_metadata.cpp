@@ -384,3 +384,47 @@ TEST_CASE("Rift S raw haptics encode the HAL register and bound amplitude and du
 	value.amplitude = 0;
 	CHECK(rift_s_haptic_duration(&value) == 0);
 }
+
+TEST_CASE("Rift S haptics stop the applied identity before replacing it")
+{
+	rift_s_haptic_radio h{};
+	h.device_id = 2;
+	h.applied_device_id = 1;
+	h.amplitude = h.applied_amplitude = 102;
+	h.end_ns = 100;
+	h.refresh_ns = 80;
+	uint64_t id = 0;
+	uint8_t amplitude = 0;
+	REQUIRE(rift_s_haptic_next(&h, 10, &id, &amplitude));
+	CHECK(id == 1);
+	CHECK(amplitude == 0);
+	// An ACK for the old request must not suppress the replacement's same amplitude.
+	h.applied_amplitude = 0;
+	REQUIRE(rift_s_haptic_next(&h, 11, &id, &amplitude));
+	CHECK(id == 2);
+	CHECK(amplitude == 102);
+	h.applied_device_id = 2;
+	h.applied_amplitude = 102;
+	CHECK_FALSE(rift_s_haptic_next(&h, 12, &id, &amplitude));
+	REQUIRE(rift_s_haptic_next(&h, 80, &id, &amplitude));
+	CHECK(amplitude == 102);
+	REQUIRE(rift_s_haptic_next(&h, 100, &id, &amplitude));
+	CHECK(amplitude == 0);
+	// Cancellation is coalesced while a transaction is outstanding, then sent after ACK.
+	h.in_flight = true;
+	h.end_ns = 0;
+	CHECK_FALSE(rift_s_haptic_next(&h, 101, &id, &amplitude));
+	h.in_flight = false;
+	REQUIRE(rift_s_haptic_next(&h, 101, &id, &amplitude));
+	CHECK(id == 2);
+	CHECK(amplitude == 0);
+	h.applied_amplitude = 0;
+	CHECK_FALSE(rift_s_haptic_next(&h, 102, &id, &amplitude));
+	h.device_id = 3;
+	h.end_ns = 200;
+	h.retry_ns = 150;
+	CHECK_FALSE(rift_s_haptic_next(&h, 149, &id, &amplitude));
+	REQUIRE(rift_s_haptic_next(&h, 150, &id, &amplitude));
+	CHECK(id == 3);
+	CHECK(amplitude == 102);
+}

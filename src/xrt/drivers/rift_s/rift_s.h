@@ -28,6 +28,7 @@
 #include "rift_s_firmware.h"
 #include "rift_s_protocol.h"
 #include "rift_s_radio.h"
+#include "rift_s_haptics.h"
 #include "rift_s_tracker.h"
 #include "rift_s_motion.h"
 
@@ -75,16 +76,6 @@ struct rift_s_tracked_device
 {
 	uint64_t device_id;
 	rift_s_device_type device_type;
-};
-
-struct rift_s_haptic_radio
-{
-	struct rift_s_system *sys;
-	unsigned hand;
-	uint64_t device_id, sent_device_id, applied_device_id;
-	timepoint_ns end_ns, refresh_ns, retry_ns;
-	uint8_t amplitude, sent_amplitude, applied_amplitude;
-	bool in_flight;
 };
 
 struct rift_s_system

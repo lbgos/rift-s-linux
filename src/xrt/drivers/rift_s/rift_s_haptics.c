@@ -29,3 +29,20 @@ rift_s_haptic_duration(const struct xrt_output_value_vibration *value)
 		duration = 60LL * U_TIME_1S_IN_NS;
 	return duration;
 }
+
+
+bool
+rift_s_haptic_next(const struct rift_s_haptic_radio *h, timepoint_ns now, uint64_t *id, uint8_t *amplitude)
+{
+	if (h->in_flight || now < h->retry_ns)
+		return false;
+	*id = h->device_id;
+	*amplitude = now < h->end_ns ? h->amplitude : 0;
+	if (h->applied_amplitude != 0 && h->applied_device_id != *id) {
+		*id = h->applied_device_id;
+		*amplitude = 0;
+		return true;
+	}
+	return *amplitude != h->applied_amplitude ||
+	       (*amplitude != 0 && (*id != h->applied_device_id || now >= h->refresh_ns));
+}

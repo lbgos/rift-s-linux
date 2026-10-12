@@ -7,6 +7,20 @@
 extern "C" {
 #endif
 
+struct rift_s_haptic_radio
+{
+	struct rift_s_system *sys;
+	unsigned hand;
+	uint64_t device_id, sent_device_id, applied_device_id;
+	timepoint_ns end_ns, refresh_ns, retry_ns;
+	uint8_t amplitude, sent_amplitude, applied_amplitude;
+	bool in_flight;
+};
+
+//! Select the next serialized write, stopping an old identity before its replacement.
+bool
+rift_s_haptic_next(const struct rift_s_haptic_radio *h, timepoint_ns now, uint64_t *id, uint8_t *amplitude);
+
 //! The HAL raw-motor register has amplitude only; it uses the motor's native frequency.
 size_t
 rift_s_encode_haptic_raw(float amplitude, uint8_t out[5]);
