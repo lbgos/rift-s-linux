@@ -569,7 +569,7 @@ handle_packets(struct rift_s_system *sys)
 				handle_hmd_report(sys, now, buf, size);
 			else if (buf[0] == 0x67)
 				handle_controller_report(sys, now, buf, size);
-			else if (buf[0] == 0x66) {
+			else if (buf[0] == 0x66 && size >= 2) {
 				/* System state packet. Enable the screen if the prox sensor is
 				 * triggered. */
 				bool prox_sensor = (buf[1] == 0) ? false : true;
