@@ -18,12 +18,12 @@ DEBUG_GET_ONCE_LOG_OPTION(passthrough_log, "RIFT_S_LOG", U_LOGGING_INFO)
 /* Fixed resampling sample baked at camera-create time. The native source
  * geometry never changes, so the integer base pixel and the fractional
  * weights are invariant; only the per-frame bounds against the live source
- * size and the row stride vary. An ix < 0 entry failed projection or fell
+ * size and the row stride vary. An ix == UINT32_MAX entry failed projection or fell
  * outside the finite non-negative native image plane. */
 struct rift_s_resample
 {
-	int32_t ix;
-	int32_t iy;
+	uint32_t ix;
+	uint32_t iy;
 	float dx;
 	float dy;
 	float omdx; /* 1 - dx */
@@ -205,8 +205,8 @@ get_frame(struct xrt_camera *camera, struct xrt_frame **out)
 			struct xrt_frame *src = raw[eye];
 			/* Per-frame live geometry: baked indices/weights stay valid,
 			 * but the source size and row stride come from this capture. */
-			int32_t w_limit = (int32_t)(src->width - 1);
-			int32_t h_limit = (int32_t)(src->height - 1);
+			uint32_t w_limit = src->width - 1;
+			uint32_t h_limit = src->height - 1;
 			size_t stride = src->stride;
 			const uint8_t *base = src->data;
 			const struct rift_s_resample *map = p->map[eye];
@@ -215,7 +215,7 @@ get_frame(struct xrt_camera *camera, struct xrt_frame **out)
 				for (uint32_t x = 0; x < VIEW_SIZE; ++x) {
 					const struct rift_s_resample *s = &map[y * VIEW_SIZE + x];
 					uint8_t value = 0;
-					if (s->ix >= 0 && s->ix < w_limit && s->iy >= 0 && s->iy < h_limit) {
+					if (s->ix < w_limit && s->iy < h_limit) {
 						const uint8_t *a =
 						    base + (size_t)s->iy * stride + (uint32_t)s->ix;
 						/* Same float expression ordering as the
@@ -278,7 +278,7 @@ rift_s_passthrough_create(const struct rift_s_camera_calibration_block *calibrat
 				 * bound keeps the uint32 truncation below defined. */
 				if (!rift_s_passthrough_project(c, rx, ry, &uv) || !(uv.x >= 0) ||
 				    !(uv.y >= 0) || !(uv.x < 4294967296.f) || !(uv.y < 4294967296.f)) {
-					*s = (struct rift_s_resample){.ix = -1, .iy = -1};
+					*s = (struct rift_s_resample){.ix = UINT32_MAX, .iy = UINT32_MAX};
 					continue;
 				}
 				/* Match the original per-pixel casts exactly: truncate
@@ -286,8 +286,8 @@ rift_s_passthrough_create(const struct rift_s_camera_calibration_block *calibrat
 				uint32_t ux = (uint32_t)uv.x, uy = (uint32_t)uv.y;
 				float dx = uv.x - ux, dy = uv.y - uy;
 				*s = (struct rift_s_resample){
-				    .ix = (int32_t)ux,
-				    .iy = (int32_t)uy,
+				    .ix = ux,
+				    .iy = uy,
 				    .dx = dx,
 				    .dy = dy,
 				    .omdx = 1 - dx,
