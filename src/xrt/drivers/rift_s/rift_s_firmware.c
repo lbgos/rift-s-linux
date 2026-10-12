@@ -200,7 +200,8 @@ rift_s_config_parse_camera_config(struct rift_s_camera_calibration *cam_config, 
 	int id = -1;
 
 	item = u_json_get(camera_json, "Id");
-	if (item == NULL || (id = strtol(cJSON_GetStringValue(item), NULL, 10)) != camera_id) {
+	const char *id_str = cJSON_GetStringValue(item);
+	if (id_str == NULL || (id = strtol(id_str, NULL, 10)) != camera_id) {
 		RIFT_S_ERROR("Camera entry id %d doesn't match expected %d", id, camera_id);
 		return false;
 	}
@@ -230,7 +231,8 @@ rift_s_config_parse_camera_config(struct rift_s_camera_calibration *cam_config, 
 
 	obj = u_json_get(camera_json, "Projection");
 	item = u_json_get(obj, "Model");
-	if (item == NULL || strcmp(cJSON_GetStringValue(item), "PinholeSymmetric") != 0) {
+	const char *projection_model = cJSON_GetStringValue(item);
+	if (projection_model == NULL || strcmp(projection_model, "PinholeSymmetric") != 0) {
 		RIFT_S_ERROR("Missing/invalid camera projection model type %s in camera %d",
 		             item != NULL ? cJSON_GetStringValue(item) : "NULL", camera_id);
 		return false;
@@ -252,7 +254,8 @@ rift_s_config_parse_camera_config(struct rift_s_camera_calibration *cam_config, 
 	/* Fisheye62 distortion */
 	obj = u_json_get(camera_json, "Distortion");
 	item = u_json_get(obj, "Model");
-	if (item == NULL || strcmp(cJSON_GetStringValue(item), "Fisheye62") != 0) {
+	const char *distortion_model = cJSON_GetStringValue(item);
+	if (distortion_model == NULL || strcmp(distortion_model, "Fisheye62") != 0) {
 		RIFT_S_ERROR("Missing/invalid camera distortion model type %s in camera %d",
 		             item != NULL ? cJSON_GetStringValue(item) : "NULL", camera_id);
 		return false;
