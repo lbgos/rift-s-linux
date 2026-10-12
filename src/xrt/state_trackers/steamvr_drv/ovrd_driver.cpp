@@ -1974,21 +1974,27 @@ CServerDriver_Monado::Cleanup()
 		vr::VRSettings()->SetBool("power", "pauseCompositorOnStandby", m_savedBenchPause);
 		m_restoreBenchPause = false;
 	}
+	// Deactivate is idempotent; make sure no pose thread outlives the xrt devices.
 	if (m_MonadoDeviceDriver != NULL) {
+		m_MonadoDeviceDriver->Deactivate();
 		delete m_MonadoDeviceDriver;
 		m_MonadoDeviceDriver = NULL;
+	}
+	if (m_left != NULL) {
+		m_left->Deactivate();
+		delete m_left;
+		m_left = NULL;
+	}
+	if (m_right != NULL) {
+		m_right->Deactivate();
+		delete m_right;
+		m_right = NULL;
 	}
 
 	xrt_space_overseer_destroy(&m_xso);
 	xrt_system_devices_destroy(&m_xsysd);
 	xrt_system_destroy(&m_xsys);
 	m_xhmd = NULL;
-	if (m_left) {
-		m_left->m_xdev = NULL;
-	}
-	if (m_right) {
-		m_right->m_xdev = NULL;
-	}
 
 	if (m_xinst) {
 		xrt_instance_destroy(&m_xinst);
