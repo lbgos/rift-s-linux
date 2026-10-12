@@ -5,6 +5,7 @@
 #include "os/os_time.h"
 #include "util/u_frame.h"
 #include "util/u_logging.h"
+#include "util/u_debug.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
@@ -12,8 +13,7 @@
 #define VIEW_SIZE 320
 #define MAX_AGE_NS (250 * U_TIME_1MS_IN_NS)
 
-// Owned by target_builder_rift_s.c via RIFT_S_LOG; declared here to avoid a heavy header.
-extern enum u_logging_level rift_s_log_level;
+DEBUG_GET_ONCE_LOG_OPTION(passthrough_log, "RIFT_S_LOG", U_LOGGING_INFO)
 
 struct rift_s_passthrough
 {
@@ -144,11 +144,11 @@ rift_s_passthrough_push(struct xrt_camera *camera, struct xrt_frame *left, struc
 		uint64_t now = os_monotonic_get_ns();
 		if (now - p->last_diag_ns >= 5ULL * U_TIME_1S_IN_NS) {
 			p->last_diag_ns = now;
-			// Periodic stereo health is debug-only; rejection warnings below still emit.
-			if (rift_s_log_level <= U_LOGGING_DEBUG) {
+			// Periodic stereo health is debug-only; rejection warnings still emit.
+			if (debug_get_log_option_passthrough_log() <= U_LOGGING_DEBUG) {
 				struct sensor_pixels pixels[2] = {measure_pixels(left), measure_pixels(right)};
 				double count = (double)left->width * left->height;
-				U_LOG_IFL_D(rift_s_log_level,
+				U_LOG_IFL_D(debug_get_log_option_passthrough_log(),
 				            "Passthrough stereo sequence=%" PRIu64 " timestamp=%" PRIu64
 				            " left=%u,%u,%.3f right=%u,%u,%.3f rejected=%" PRIu64,
 				            left->source_sequence, left->timestamp, pixels[0].min, pixels[0].max,
