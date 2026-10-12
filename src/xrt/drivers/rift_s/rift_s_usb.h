@@ -16,7 +16,7 @@ enum rift_s_usb_result
 static inline enum rift_s_usb_result
 rift_s_usb_read_error(int error, uint32_t consecutive)
 {
-	if (error == ENODEV || error == ENXIO || error == EBADF || error == EIO)
+	if (error == ENODEV || error == ENXIO || error == EBADF)
 		return RIFT_S_USB_LOST;
 	if (error == EINTR || error == EAGAIN || error == EINPROGRESS || error == ETIMEDOUT)
 		return RIFT_S_USB_RETRY;

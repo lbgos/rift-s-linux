@@ -21,6 +21,14 @@
 #include <unistd.h>
 #include <fstream>
 
+// Pose-only fixtures still model an attached hardware session.
+static rift_s_system &online_test_system()
+{
+	static rift_s_system system{};
+	xrt_atomic_s32_store(&system.transport_online, 1);
+	return system;
+}
+
 TEST_CASE("Rift S tracker stop joins the world consumer and drains borrowed camera frames")
 {
 	rift_s_tracker tracker{};
@@ -67,8 +75,10 @@ TEST_CASE("Rift S read errors distinguish interruptions from lost handles with b
 		CHECK(rift_s_usb_read_error(error, 1) == RIFT_S_USB_RETRY);
 		CHECK(rift_s_usb_read_error(error, 100) == RIFT_S_USB_RETRY);
 	}
-	for (int error : {ENODEV, ENXIO, EBADF, EIO})
+	for (int error : {ENODEV, ENXIO, EBADF})
 		CHECK(rift_s_usb_read_error(error, 1) == RIFT_S_USB_LOST);
+	CHECK(rift_s_usb_read_error(EIO, 1) == RIFT_S_USB_RETRY);
+	CHECK(rift_s_usb_read_error(EIO, 8) == RIFT_S_USB_LOST);
 	CHECK(rift_s_usb_read_error(EPIPE, 1) == RIFT_S_USB_RETRY);
 	CHECK(rift_s_usb_read_error(EPIPE, 8) == RIFT_S_USB_LOST);
 	CHECK(rift_s_usb_backoff_ns(1) == 2000000);
@@ -237,9 +247,11 @@ TEST_CASE("Rift S controller estimated coordinates survive loss of position conf
 	rift_s_hmd hmd = {};
 	hmd.base.get_tracked_pose = get_test_head_pose;
 	rift_s_system sys = {};
+	xrt_atomic_s32_store(&sys.transport_online, 1);
 	sys.hmd = &hmd;
 	os_mutex_init(&sys.dev_mutex);
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.sys = &sys;
 	ctrl.gravity_initialized = true;
 	ctrl.pose.orientation.w = 1;
@@ -309,9 +321,11 @@ TEST_CASE("Rift S mature track bridges a short optical gap and clears optical co
 	rift_s_hmd hmd = {};
 	hmd.base.get_tracked_pose = get_test_head_pose;
 	rift_s_system sys = {};
+	xrt_atomic_s32_store(&sys.transport_online, 1);
 	sys.hmd = &hmd;
 	os_mutex_init(&sys.dev_mutex);
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.sys = &sys;
 	ctrl.gravity_initialized = true;
 	ctrl.pose.orientation.w = 1;
@@ -342,6 +356,7 @@ TEST_CASE("Rift S stationary startup calibrates low-magnitude gravity and gyro b
 {
 	for (const xrt_vec3 accel : {xrt_vec3{7.6148f, 3.9714f, 1.6924f}, xrt_vec3{-6.9321f, 6.7900f, 1.8497f}}) {
 		rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 		m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 		os_mutex_init(&ctrl.mutex);
 		ctrl.accel = accel;
@@ -471,6 +486,7 @@ TEST_CASE("Rift S accelerometer bias from rest windows explains the right contro
 TEST_CASE("Rift S fusion uses the estimated accelerometer bias")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 	const xrt_vec3 bias = {-0.067f, -1.983f, 0.355f}, still = {0, 0, 0};
 	timepoint_ns t = 1000000000;
@@ -497,6 +513,7 @@ TEST_CASE("Rift S fusion uses the estimated accelerometer bias")
 TEST_CASE("Rift S moving startup does not wait indefinitely for stationary samples")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 	ctrl.accel = {0, 9.82f, 0};
 	ctrl.gyro = {0.4f, 0, 0};
@@ -526,6 +543,7 @@ record_test_attitude(rift_s_controller &ctrl, int sample, float yaw)
 TEST_CASE("Rift S counts repeated IMU reports apart from clock errors")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.device_type = RIFT_S_DEVICE_LEFT_CONTROLLER;
 	os_mutex_init(&ctrl.mutex);
 	auto imu_report = [&](uint32_t device_us, timepoint_ns arrival_ns) {
@@ -570,6 +588,7 @@ TEST_CASE("Rift S IMU clock re-anchors after a stale first timestamp instead of 
 	// accepted sample was ~1521 s ahead, and every later sample was rejected as clock_backwards
 	// (backwards_us shrinking by 1e6 per second, ~25 minutes of a hand glued to the head).
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
 	os_mutex_init(&ctrl.mutex);
 	auto imu_report = [&](uint32_t device_us, timepoint_ns arrival_ns) {
@@ -627,6 +646,7 @@ TEST_CASE("Rift S IMU clock re-anchors after a stale first timestamp instead of 
 TEST_CASE("Rift S IMU clock re-anchors after a run of small backwards steps")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.device_type = RIFT_S_DEVICE_LEFT_CONTROLLER;
 	os_mutex_init(&ctrl.mutex);
 	auto imu_report = [&](uint32_t device_us, timepoint_ns arrival_ns) {
@@ -658,6 +678,7 @@ TEST_CASE("Rift S IMU clock re-anchors after a run of small backwards steps")
 TEST_CASE("Rift S reports use the firmware TrackedObject calibration in sensor units")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	os_mutex_init(&ctrl.mutex);
 	m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 	ctrl.have_calibration = ctrl.have_config = true;
@@ -700,6 +721,7 @@ TEST_CASE("Rift S reports use the firmware TrackedObject calibration in sensor u
 TEST_CASE("Rift S controller IMU waits for the descriptor, then falls back to factory gyro calibration")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	os_mutex_init(&ctrl.mutex);
 	m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 	ctrl.have_calibration = ctrl.have_config = true;
@@ -767,6 +789,7 @@ TEST_CASE("Rift S head and camera output invert the firmware transform from IMU"
 TEST_CASE("Rift S IMU clock mapping holds steady through radio bursts and stalls")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	ctrl.fusion.rot = XRT_QUAT_IDENTITY;
 	std::mt19937 rng(0xc10c);
@@ -841,6 +864,7 @@ TEST_CASE("Rift S IMU clock re-anchors at once after a sleep that wraps the devi
 	// so device time advanced 632 s. The mapping then crept 1/64 per sample towards the new offset
 	// and reset the capture history on 662 consecutive samples before tracking could start.
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	ctrl.fusion.rot = XRT_QUAT_IDENTITY;
 	const time_duration_ns delay = 3000000;
@@ -893,6 +917,7 @@ TEST_CASE("Rift S IMU clock mapping works when the device clock is ahead of the 
 	m_clock_windowed_skew_tracker_destroy(tracker);
 
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	ctrl.fusion.rot = XRT_QUAT_IDENTITY;
 	for (int i = 0; i < 2000; i++) {
@@ -908,6 +933,7 @@ TEST_CASE("Rift S IMU clock mapping works when the device clock is ahead of the 
 TEST_CASE("Rift S delayed optical yaw corrects capture attitude and preserves later rotation")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = ctrl.update_yaw_from_optical = true;
 	ctrl.device_type = RIFT_S_DEVICE_LEFT_CONTROLLER;
 	os_mutex_init(&ctrl.mutex);
@@ -946,6 +972,7 @@ TEST_CASE("Rift S delayed optical yaw corrects capture attitude and preserves la
 TEST_CASE("Rift S capture attitude rejects stale, future, gapped and missing history")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	os_mutex_init(&ctrl.mutex);
 	xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
@@ -984,6 +1011,7 @@ TEST_CASE("Rift S capture attitude rejects stale, future, gapped and missing his
 TEST_CASE("Rift S capture prior never marks synthetic fallback as tracked position")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	os_mutex_init(&ctrl.mutex);
 	for (int i = 0; i < 40; i++) {
@@ -1004,6 +1032,7 @@ TEST_CASE("Rift S capture prior never marks synthetic fallback as tracked positi
 TEST_CASE("Rift S position-only optical fits never confirm the IMU heading they echo")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = ctrl.update_yaw_from_optical = true;
 	ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
 	os_mutex_init(&ctrl.mutex);
@@ -1248,6 +1277,7 @@ namespace {
 struct PublishedPoseController
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	explicit PublishedPoseController(bool right)
 	{
 		ctrl.base.device_type =
@@ -1557,6 +1587,7 @@ namespace {
 struct FusionRig
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	xrt_vec3 bias;
 	xrt_quat truth = XRT_QUAT_IDENTITY;
 	timepoint_ns t = 1000000000;
@@ -1677,6 +1708,7 @@ TEST_CASE("Rift S accurate accelerometer keeps gravity levelling with optical ti
 TEST_CASE("Rift S capture attitude diagnostics distinguish bounds tilt and radio gaps")
 {
 	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
 	rift_s_attitude_sample sample{};
 	CHECK_FALSE(rift_s_controller_get_attitude(&ctrl, 1, &sample));
 	CHECK(ctrl.diagnostics.last_attitude_reject == RIFT_S_ATTITUDE_EMPTY);
@@ -1795,10 +1827,12 @@ TEST_CASE("Rift S motion estimates pass through production grip/model offsets wi
 		rift_s_hmd hmd{};
 		hmd.base.get_tracked_pose=get_test_head_pose;
 		rift_s_system sys{};
+	xrt_atomic_s32_store(&sys.transport_online, 1);
 		sys.hmd=&hmd;
 		sys.motion=rift_s_motion_create();
 		REQUIRE(sys.motion != nullptr);
 		rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
 		ctrl.sys=&sys;
 		ctrl.base.device_type=left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
 		ctrl.gravity_initialized=true;
@@ -2043,6 +2077,7 @@ TEST_CASE("SteamVR pose conversion rejects nonfinite pose components")
 TEST_CASE("Rift S unconfirmed position candidates cannot rotate or replace the association prior")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = ctrl.update_yaw_from_optical = true;
 	ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
 	ctrl.fusion.rot = ctrl.pose.orientation = XRT_QUAT_IDENTITY;
@@ -2091,6 +2126,7 @@ TEST_CASE("Rift S unconfirmed position candidates cannot rotate or replace the a
 TEST_CASE("Rift S confirmed optical reacquisition seeds an age-lost controller without a second search")
 {
 	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
 	ctrl.gravity_initialized = true;
 	ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
 	ctrl.fusion.rot = ctrl.pose.orientation = XRT_QUAT_IDENTITY;
@@ -2187,6 +2223,7 @@ TEST_CASE("Rift S complete grip to SteamVR model chain preserves metric position
 TEST_CASE("Rift S controller does not integrate missing radio motion")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	m_imu_3dof_init(&ctrl.fusion, 0);
 	ctrl.accel = {0, 9.81f, 0};
 	ctrl.gyro = {0, 1, 0};
@@ -2218,6 +2255,7 @@ TEST_CASE("Rift S controller does not integrate missing radio motion")
 TEST_CASE("Rift S controller rejects extreme finite IMU and recovers attitude")
 {
 	rift_s_controller ctrl = {};
+	ctrl.sys = &online_test_system();
 	m_imu_3dof_init(&ctrl.fusion, 0);
 	ctrl.accel = {0, 9.81f, 0};
 	rift_s_controller_update_fusion(&ctrl, 1000000000LL);

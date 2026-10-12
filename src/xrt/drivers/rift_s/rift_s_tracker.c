@@ -1317,7 +1317,7 @@ world_write_status(struct rift_s_tracker *t)
 	if (state == last_state && now_ns - last_write_ns < 500 * U_TIME_1MS_IN_NS) return;
 	const struct rift_s_world_anchor_result *result = &diagnostics.result;
 	if (strcmp(state, "relocalizing") == 0 && !standby && !paused && !restarting &&
-	    now_ns - t->world_last_diagnostic_ns >= 10ULL * U_TIME_1S_IN_NS) {
+	    now_ns - t->world_last_diagnostic_ns >= 10LL * U_TIME_1S_IN_NS) {
 		t->world_last_diagnostic_ns = now_ns;
 		RIFT_S_WARN("Room recognition pending attempts=%" PRIu64 " usable=%" PRIu64
 		            " capture_ns=%lld sample_ns=%lld valid=%d flags=%u history=%d generation=%" PRIu64
