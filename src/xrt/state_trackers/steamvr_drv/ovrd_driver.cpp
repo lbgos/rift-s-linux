@@ -28,6 +28,7 @@
 #include "ovrd_camera.hpp"
 #include "ovrd_roomsetup_guard_process.hpp"
 #include "ovrd_world_universe.hpp"
+#include "ovrd_chaperone_origin.hpp"
 #include "../../drivers/rift_s/rift_s_world_control.h"
 #include <memory>
 #include "openvr_driver.h"
@@ -1517,6 +1518,8 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 		ovrd_log("MONADO_STEAMVR_BENCH enabled: synthetic fallback and awake HMD\n");
 	}
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
+	if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 && !rift_s_prepare_session_origin())
+		ovrd_log("Could not prepare unbounded Rift S session origin\n");
 	m_worldUniverse = strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 ? 3 : 2;
 	vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
 

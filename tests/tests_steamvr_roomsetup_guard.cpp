@@ -4,6 +4,7 @@
 #define main roomsetup_guard_entry
 #include "../src/xrt/state_trackers/steamvr_drv/ovrd_roomsetup_guard.cpp"
 #undef main
+#include "../src/xrt/state_trackers/steamvr_drv/ovrd_chaperone_origin.hpp"
 
 namespace {
 struct LogFixture
@@ -204,4 +205,27 @@ TEST_CASE("Boundary warning retries failed delivery and removal")
 	REQUIRE(update_world_notification(api, 1, "", delivered, id));
 	CHECK(delivered.empty());
 	CHECK(id == 0);
+}
+
+TEST_CASE("Native session origin has no geometry and preserves the saved room")
+{
+    LogFixture fixture;
+    const std::string saved = R"({"universeID":"2","standing":{"translation":[1,2,3],"yaw":0.7},"play_area":[2,3],"collision_bounds":[[1,2,3]]})";
+    fixture.write(R"({"jsonid":"chaperone_info","version":5,"universes":[)" + saved + "]}");
+    REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
+    auto bytes = read_file(fixture.path);
+    REQUIRE(bytes.find(saved) != std::string::npos);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> document(cJSON_Parse(bytes.c_str()), cJSON_Delete);
+    auto universes = cJSON_GetObjectItemCaseSensitive(document.get(), "universes");
+    REQUIRE(cJSON_GetArraySize(universes) == 2);
+    auto origin = cJSON_GetArrayItem(universes, 1);
+    CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(origin, "standing")));
+    CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(origin, "seated")));
+    CHECK(cJSON_GetObjectItemCaseSensitive(origin, "play_area") == nullptr);
+    CHECK(cJSON_GetObjectItemCaseSensitive(origin, "collision_bounds") == nullptr);
+    REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
+    CHECK(read_file(fixture.path) == bytes);
+    fixture.write("broken json");
+    CHECK_FALSE(rift_s_prepare_session_origin(fixture.path.string()));
+    CHECK(read_file(fixture.path) == "broken json");
 }

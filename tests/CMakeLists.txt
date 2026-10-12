@@ -229,7 +229,7 @@ if(TARGET monado_roomsetup_vulkan)
 endif()
 
 if(TARGET monado-roomsetup-guard)
-	add_executable(tests_steamvr_roomsetup_guard tests_steamvr_roomsetup_guard.cpp)
+	add_executable(tests_steamvr_roomsetup_guard tests_steamvr_roomsetup_guard.cpp ../src/xrt/state_trackers/steamvr_drv/ovrd_chaperone_origin.cpp)
 	target_link_libraries(tests_steamvr_roomsetup_guard PRIVATE xrt-external-catch2 xrt-external-openvr aux_util ${CMAKE_DL_LIBS})
 	add_test(NAME tests_steamvr_roomsetup_guard COMMAND tests_steamvr_roomsetup_guard)
 endif()
