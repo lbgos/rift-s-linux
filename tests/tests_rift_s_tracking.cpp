@@ -140,6 +140,9 @@ TEST_CASE("Rift S device loss invalidates old hardware epochs and joins the worl
 	CHECK(tracker.slam_guard.require_relocalization);
 	CHECK(frame.reference.count == 1);
 	CHECK(tracker.world_frames[0] == nullptr);
+	xrt_space_relation offline{};
+	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_IMU, 0, &offline);
+	CHECK(offline.relation_flags == 0);
 	rift_s_tracker_device_lost(&tracker);
 	CHECK(tracker.slam_generation == 9);
 	os_thread_helper_destroy(&tracker.world_thread);
@@ -251,7 +254,6 @@ TEST_CASE("Rift S controller estimated coordinates survive loss of position conf
 	sys.hmd = &hmd;
 	os_mutex_init(&sys.dev_mutex);
 	rift_s_controller ctrl = {};
-	ctrl.sys = &online_test_system();
 	ctrl.sys = &sys;
 	ctrl.gravity_initialized = true;
 	ctrl.pose.orientation.w = 1;
@@ -325,7 +327,6 @@ TEST_CASE("Rift S mature track bridges a short optical gap and clears optical co
 	sys.hmd = &hmd;
 	os_mutex_init(&sys.dev_mutex);
 	rift_s_controller ctrl = {};
-	ctrl.sys = &online_test_system();
 	ctrl.sys = &sys;
 	ctrl.gravity_initialized = true;
 	ctrl.pose.orientation.w = 1;
@@ -755,6 +756,7 @@ TEST_CASE("Rift S controller IMU waits for the descriptor, then falls back to fa
 TEST_CASE("Rift S head and camera output invert the firmware transform from IMU")
 {
 	rift_s_tracker tracker = {};
+	tracker.ready_for_data = true;
 	os_mutex_init(&tracker.mutex);
 	tracker.pose.position = {1, 1.6f, -2};
 	const xrt_vec3 y = {0, 1, 0}, x = {1, 0, 0};

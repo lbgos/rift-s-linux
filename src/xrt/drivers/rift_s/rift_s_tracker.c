@@ -1082,7 +1082,7 @@ rift_s_tracker_get_tracked_pose_imu(struct xrt_device *xdev,
 
 	rift_s_tracker_get_tracked_pose(tracker, RIFT_S_TRACKER_POSE_IMU, at_timestamp_ns, out_relation);
 
-	return XRT_SUCCESS;
+	return out_relation->relation_flags != 0 ? XRT_SUCCESS : XRT_ERROR_POSE_NOT_ACTIVE;
 }
 
 void
@@ -1101,6 +1101,11 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 
 	// Off-head (proximity) or without camera frames, SLAM input is stopped and the head pose is held.
 	os_mutex_lock(&t->mutex);
+	if (!t->ready_for_data) {
+		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		os_mutex_unlock(&t->mutex);
+		return;
+	}
 	check_camera_timeout_locked(t, os_monotonic_get_ns());
 	bool query_slam = t->tracking.slam_enabled && t->slam_over_3dof;
 	bool paused = t->tracking.slam_enabled && (t->standby || t->slam_paused || t->slam_restart_pending);
