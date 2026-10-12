@@ -297,6 +297,9 @@ rift_s_hexdump_buffer(const char *label, const unsigned char *buf, int length)
 	RIFT_S_DEBUG("%s", outbuf);
 }
 
+/* Firmware JSON blocks are tens of KB at most; the length field is device-controlled. */
+#define RIFT_S_MAX_FW_BLOCK_LEN (1u << 20)
+
 static int
 get_feature_report(struct os_hid_device *hid, uint8_t cmd, uint8_t *buf, int len)
 {
@@ -374,7 +377,7 @@ rift_s_read_firmware_block(struct os_hid_device *dev, uint8_t block_id, char **d
 	/* The block header is 12 bytes. 8 byte checksum, 4 byte size? */
 	block_len = *(uint32_t *)(buf + 16);
 
-	if (block_len < 0xC || block_len == 0xFFFFFFFF)
+	if (block_len < 0xC || block_len == 0xFFFFFFFF || block_len > RIFT_S_MAX_FW_BLOCK_LEN)
 		return -1; /* Invalid block */
 
 #if 0
@@ -384,6 +387,8 @@ rift_s_read_firmware_block(struct os_hid_device *dev, uint8_t block_id, char **d
 
 	/* Copy the contents of the fw block, minus the header */
 	outbuf = malloc(block_len + 1);
+	if (outbuf == NULL)
+		return -1;
 	outbuf[block_len] = 0;
 	total_read = 0x0;
 
