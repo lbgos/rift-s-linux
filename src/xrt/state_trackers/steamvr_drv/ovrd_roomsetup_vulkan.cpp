@@ -640,8 +640,9 @@ vkDestroyBuffer(VkDevice handle, VkBuffer buffer, const VkAllocationCallbacks *a
 	{
 		std::lock_guard guard(mutex);
 		device->buffers.erase(buffer);
-		auto ring = device->rings.find(buffer);
-		if (ring != device->rings.end()) ring->second.disable("ring destroyed");
+		// Drop the entry so a later buffer reusing this handle is re-detected
+		// at map time instead of inheriting a dead disabled recovery.
+		device->rings.erase(buffer);
 	}
 	next<PFN_vkDestroyBuffer>(device, "vkDestroyBuffer")(handle, buffer, allocator);
 }
