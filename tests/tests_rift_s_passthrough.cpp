@@ -207,3 +207,106 @@ TEST_CASE("Passthrough rectification and export share the 110 degree pinhole")
 	CHECK(pixel.x == Catch::Approx(320 + 200 * atan(159.5 / camera->focal_length.x)).margin(1e-4));
 	rift_s_passthrough_destroy(camera);
 }
+
+TEST_CASE("Passthrough precomputed resampling matches the scalar reference")
+{
+	// Representative fisheye calibration: tangential terms plus the
+	// rolled/pitched mounting of the front sensors, differing per eye.
+	auto block = calibration();
+	const float angle = 0.35f;
+	for (int eye = 0; eye < 2; ++eye) {
+		auto &c = block.cameras[CAM_IDX_TO_ID[eye]];
+		c.distortion.k[0] = eye == 0 ? 0.1f : 0.15f;
+		c.distortion.p1 = 0.01f;
+		c.device_from_camera = {};
+		c.device_from_camera.v[1] = std::cos(angle);
+		c.device_from_camera.v[2] = -std::sin(angle);
+		c.device_from_camera.v[4] = 1;
+		c.device_from_camera.v[9] = -std::sin(angle);
+		c.device_from_camera.v[10] = -std::cos(angle);
+		c.device_from_camera.v[15] = 1;
+	}
+	for (uint32_t pad : {0u, 32u}) {
+		auto *camera = rift_s_passthrough_create(&block);
+		REQUIRE(camera);
+		camera->set_active(camera, true);
+		xrt_frame *src[2] = {nullptr, nullptr};
+		const uint64_t ts = os_monotonic_get_ns();
+		for (int eye = 0; eye < 2; ++eye) {
+			// Widen the allocation, then narrow the image: same pixels,
+			// larger row stride, padding left as sentinel.
+			u_frame_create_one_off(XRT_FORMAT_L8, 640 + pad, 480, &src[eye]);
+			src[eye]->width = 640;
+			REQUIRE(src[eye]->stride == 640 + pad);
+			for (uint32_t y = 0; y < src[eye]->height; ++y) {
+				uint8_t *row = src[eye]->data + y * src[eye]->stride;
+				for (uint32_t x = 0; x < src[eye]->width; ++x)
+					row[x] = (uint8_t)((x * 3 + y * 5 + eye * 11 + 1) & 0xff);
+				std::fill_n(row + src[eye]->width, pad, 0xa5);
+			}
+			src[eye]->timestamp = ts;
+			src[eye]->source_sequence = 42;
+		}
+		rift_s_passthrough_push(camera, src[0], src[1]);
+		xrt_frame *out = nullptr;
+		REQUIRE(camera->get_frame(camera, &out));
+		REQUIRE(out->width == 640);
+		REQUIRE(out->height == 320);
+		REQUIRE(out->format == XRT_FORMAT_R8G8B8);
+		CHECK(out->stereo_format == XRT_STEREO_FORMAT_SBS);
+		CHECK(out->timestamp == src[0]->timestamp);
+		// Frames stay immutable while the scalar reference reads them.
+		size_t mismatches = 0, zeros = 0, nonzeros = 0;
+		uint32_t first_x = 0, first_y = 0;
+		int first_eye = 0;
+		uint8_t first_got = 0, first_want = 0;
+		for (int eye = 0; eye < 2; ++eye) {
+			const auto &c = block.cameras[CAM_IDX_TO_ID[eye]];
+			for (uint32_t y = 0; y < 320; ++y) {
+				for (uint32_t x = 0; x < 320; ++x) {
+					float rx = (x - camera->center.x) / camera->focal_length.x;
+					float ry = (y - camera->center.y) / camera->focal_length.y;
+					xrt_vec2 uv{};
+					uint8_t want = 0;
+					// Original per-pixel scalar path, verbatim.
+					if (rift_s_passthrough_project(&c, rx, ry, &uv) && uv.x >= 0 &&
+					    uv.y >= 0 && uv.x < src[eye]->width - 1 &&
+					    uv.y < src[eye]->height - 1) {
+						uint32_t ix = (uint32_t)uv.x, iy = (uint32_t)uv.y;
+						float dx = uv.x - ix, dy = uv.y - iy;
+						const uint8_t *a =
+						    src[eye]->data + iy * src[eye]->stride + ix;
+						want = (uint8_t)((a[0] * (1 - dx) + a[1] * dx) * (1 - dy) +
+						                 (a[src[eye]->stride] * (1 - dx) +
+						                  a[src[eye]->stride + 1] * dx) *
+						                     dy);
+					}
+					want == 0 ? ++zeros : ++nonzeros;
+					const uint8_t *dst = out->data + (size_t)y * out->stride +
+					                     (size_t)(eye * 320 + x) * 3;
+					if (dst[0] != want || dst[1] != want || dst[2] != want) {
+						if (mismatches == 0) {
+							first_eye = eye;
+							first_x = x;
+							first_y = y;
+							first_got = dst[0];
+							first_want = want;
+						}
+						++mismatches;
+					}
+				}
+			}
+		}
+		INFO("pad=" << pad << " zeros=" << zeros << " nonzeros=" << nonzeros << " first mismatch eye="
+		            << first_eye << " x=" << first_x << " y=" << first_y << " got=" << (int)first_got
+		            << " want=" << (int)first_want);
+		CHECK(mismatches == 0);
+		// Both in-bounds interpolation and out-of-bounds edges are covered.
+		CHECK(zeros > 0);
+		CHECK(nonzeros > 0);
+		xrt_frame_reference(&out, nullptr);
+		rift_s_passthrough_destroy(camera);
+		xrt_frame_reference(&src[0], nullptr);
+		xrt_frame_reference(&src[1], nullptr);
+	}
+}

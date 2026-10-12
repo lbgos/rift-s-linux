@@ -15,6 +15,21 @@
 
 DEBUG_GET_ONCE_LOG_OPTION(passthrough_log, "RIFT_S_LOG", U_LOGGING_INFO)
 
+/* Fixed resampling sample baked at camera-create time. The native source
+ * geometry never changes, so the integer base pixel and the fractional
+ * weights are invariant; only the per-frame bounds against the live source
+ * size and the row stride vary. An ix < 0 entry failed projection or fell
+ * outside the finite non-negative native image plane. */
+struct rift_s_resample
+{
+	int32_t ix;
+	int32_t iy;
+	float dx;
+	float dy;
+	float omdx; /* 1 - dx */
+	float omdy; /* 1 - dy */
+};
+
 struct rift_s_passthrough
 {
 	struct xrt_camera base;
@@ -25,7 +40,7 @@ struct rift_s_passthrough
 	struct xrt_frame *converted;
 	uint64_t rejected_pairs;
 	uint64_t last_diag_ns;
-	struct xrt_vec2 map[2][VIEW_SIZE * VIEW_SIZE];
+	struct rift_s_resample map[2][VIEW_SIZE * VIEW_SIZE];
 };
 
 static bool
@@ -188,22 +203,32 @@ get_frame(struct xrt_camera *camera, struct xrt_frame **out)
 		frame->stereo_format = XRT_STEREO_FORMAT_SBS;
 		for (int eye = 0; eye < 2; ++eye) {
 			struct xrt_frame *src = raw[eye];
-			for (uint32_t y = 0; y < VIEW_SIZE; ++y)
+			/* Per-frame live geometry: baked indices/weights stay valid,
+			 * but the source size and row stride come from this capture. */
+			int32_t w_limit = (int32_t)(src->width - 1);
+			int32_t h_limit = (int32_t)(src->height - 1);
+			size_t stride = src->stride;
+			const uint8_t *base = src->data;
+			const struct rift_s_resample *map = p->map[eye];
+			for (uint32_t y = 0; y < VIEW_SIZE; ++y) {
+				uint8_t *dst_row = frame->data + y * frame->stride + (size_t)eye * VIEW_SIZE * 3;
 				for (uint32_t x = 0; x < VIEW_SIZE; ++x) {
-					struct xrt_vec2 uv = p->map[eye][y * VIEW_SIZE + x];
+					const struct rift_s_resample *s = &map[y * VIEW_SIZE + x];
 					uint8_t value = 0;
-					if (uv.x >= 0 && uv.y >= 0 && uv.x < src->width - 1 && uv.y < src->height - 1) {
-						uint32_t ix = (uint32_t)uv.x, iy = (uint32_t)uv.y;
-						float dx = uv.x - ix, dy = uv.y - iy;
-						const uint8_t *a = src->data + iy * src->stride + ix;
+					if (s->ix >= 0 && s->ix < w_limit && s->iy >= 0 && s->iy < h_limit) {
+						const uint8_t *a =
+						    base + (size_t)s->iy * stride + (uint32_t)s->ix;
+						/* Same float expression ordering as the
+						 * original per-pixel bilinear interpolation. */
 						value =
-						    (uint8_t)((a[0] * (1 - dx) + a[1] * dx) * (1 - dy) +
-						              (a[src->stride] * (1 - dx) + a[src->stride + 1] * dx) *
-						                  dy);
+						    (uint8_t)((a[0] * s->omdx + a[1] * s->dx) * s->omdy +
+						              (a[stride] * s->omdx + a[stride + 1] * s->dx) *
+						                  s->dy);
 					}
-					uint8_t *dst = frame->data + y * frame->stride + (eye * VIEW_SIZE + x) * 3;
+					uint8_t *dst = dst_row + (size_t)x * 3;
 					dst[0] = dst[1] = dst[2] = value;
 				}
+			}
 		}
 		xrt_frame_reference(&p->converted, frame);
 		xrt_frame_reference(&frame, NULL);
@@ -245,11 +270,29 @@ rift_s_passthrough_create(const struct rift_s_camera_calibration_block *calibrat
 		    c->device_from_camera.v[12], c->device_from_camera.v[13], c->device_from_camera.v[14]};
 		for (uint32_t y = 0; y < VIEW_SIZE; ++y)
 			for (uint32_t x = 0; x < VIEW_SIZE; ++x) {
-				struct xrt_vec2 *uv = &p->map[eye][y * VIEW_SIZE + x];
+				struct rift_s_resample *s = &p->map[eye][y * VIEW_SIZE + x];
+				struct xrt_vec2 uv;
 				float rx = (x - p->base.center.x) / p->base.focal_length.x;
 				float ry = (y - p->base.center.y) / p->base.focal_length.y;
-				if (!rift_s_passthrough_project(c, rx, ry, uv))
-					*uv = (struct xrt_vec2){-1, -1};
+				/* Negated comparisons also reject NaN, and the upper
+				 * bound keeps the uint32 truncation below defined. */
+				if (!rift_s_passthrough_project(c, rx, ry, &uv) || !(uv.x >= 0) ||
+				    !(uv.y >= 0) || !(uv.x < 4294967296.f) || !(uv.y < 4294967296.f)) {
+					*s = (struct rift_s_resample){.ix = -1, .iy = -1};
+					continue;
+				}
+				/* Match the original per-pixel casts exactly: truncate
+				 * the float UV to uint32, then subtract back in float. */
+				uint32_t ux = (uint32_t)uv.x, uy = (uint32_t)uv.y;
+				float dx = uv.x - ux, dy = uv.y - uy;
+				*s = (struct rift_s_resample){
+				    .ix = (int32_t)ux,
+				    .iy = (int32_t)uy,
+				    .dx = dx,
+				    .dy = dy,
+				    .omdx = 1 - dx,
+				    .omdy = 1 - dy,
+				};
 			}
 	}
 	return &p->base;
