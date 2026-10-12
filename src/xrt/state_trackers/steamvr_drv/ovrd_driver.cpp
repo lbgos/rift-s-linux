@@ -2026,14 +2026,19 @@ CServerDriver_Monado::HandleHapticEvent(vr::VREvent_t *event)
 		return;
 	}
 
-	struct xrt_output_value out;
-	out.vibration.amplitude = amp;
-	if (duration > 0.00001) {
-		out.vibration.duration_ns = (time_duration_ns)(duration * 1000.f * 1000.f * 1000.f);
+	if (controller->m_xdev == NULL || controller->m_xdev->set_output == NULL) {
+		ovrd_log("Haptic vibration dropped: device has no output path\n");
+		return;
+	}
+
+	struct xrt_output_value out{};
+	out.vibration.amplitude = std::isfinite(amp) ? std::clamp(amp, 0.0f, 1.0f) : 0.0f;
+	if (std::isfinite(duration) && duration > 0.00001f) {
+		out.vibration.duration_ns = (time_duration_ns)(std::min(duration, 60.0f) * 1000000000.0);
 	} else {
 		out.vibration.duration_ns = XRT_MIN_HAPTIC_DURATION;
 	}
-	out.vibration.frequency = freq;
+	out.vibration.frequency = std::isfinite(freq) && freq >= 0.0f ? freq : 0.0f;
 
 	if (controller->m_output_controls.empty()) {
 		ovrd_log("Controller %s has no outputs\n", controller->m_xdev->str);
