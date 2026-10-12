@@ -102,9 +102,10 @@ class DirectoryEvents:
             directory = directory.resolve()
             while not directory.is_dir() and directory != directory.parent:
                 directory = directory.parent
-            if directory in self.watches:
-                continue
-            # Creation, replacement and completed writes cover library installs and registry updates.
+            # Re-add every pass: the kernel drops watches on moved or deleted
+            # directories (IN_IGNORED), which wait() drains unread. Skipping
+            # known paths here would leave watch mode deaf after a Steam
+            # reinstall until the service restarts.
             mask = 0x100 | 0x80 | 0x8 | 0x400 | 0x800
             if self.libc.inotify_add_watch(self.fd, os.fsencode(directory), mask) >= 0:
                 self.watches.add(directory)
