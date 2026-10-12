@@ -149,7 +149,7 @@ rift_s_controller_write_succeeded(const uint8_t *response, size_t size, uint32_t
 bool
 rift_s_parse_hmd_report(rift_s_hmd_report_t *report, const unsigned char *buf, int size)
 {
-	if (buf[0] != 0x65)
+	if (report == NULL || buf == NULL || size < 1 || buf[0] != 0x65)
 		return false;
 
 	if (size != 64 || size != sizeof(rift_s_hmd_report_t))
@@ -165,7 +165,7 @@ rift_s_parse_controller_report(rift_s_controller_report_t *report, const unsigne
 {
 	uint8_t avail;
 
-	if (buf[0] != 0x67)
+	if (report == NULL || buf == NULL || size < 1 || buf[0] != 0x67)
 		return false;
 
 	if (size < 62) {
