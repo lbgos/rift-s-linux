@@ -1005,6 +1005,7 @@ public:
 		// clang-format on
 
 		m_input_controls.clear();
+		m_output_controls.clear();
 		if (m_emulate_index_controller) {
 			AddEmulatedIndexControls();
 		} else {
@@ -1013,6 +1014,7 @@ public:
 
 		ovrd_log("Controller %d activated\n", m_unObjectId);
 
+		m_poseUpdating = true;
 		m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado_Controller::PoseUpdateThreadFunction, this);
 		if (!m_poseUpdateThread) {
 			ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
@@ -1027,7 +1029,11 @@ public:
 	{
 		ovrd_log("deactivate controller\n");
 		m_poseUpdating = false;
-		m_poseUpdateThread->join();
+		if (m_poseUpdateThread != NULL) {
+			m_poseUpdateThread->join();
+			delete m_poseUpdateThread;
+			m_poseUpdateThread = NULL;
+		}
 		m_unObjectId = vr::k_unTrackedDeviceIndexInvalid;
 	}
 
@@ -1605,6 +1611,7 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRServerDriverHost()->SetDisplayEyeToHead(m_trackedDeviceIndex, left, right);
 
 
+	m_poseUpdating = true;
 	m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado::PoseUpdateThreadFunction, this);
 	if (!m_poseUpdateThread) {
 		ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
@@ -1620,7 +1627,11 @@ CDeviceDriver_Monado::Deactivate()
 	if (m_camera)
 		m_camera->StopVideoStream();
 	m_poseUpdating = false;
-	m_poseUpdateThread->join();
+	if (m_poseUpdateThread != NULL) {
+		m_poseUpdateThread->join();
+		delete m_poseUpdateThread;
+		m_poseUpdateThread = NULL;
+	}
 	ovrd_log("Deactivate\n");
 }
 
