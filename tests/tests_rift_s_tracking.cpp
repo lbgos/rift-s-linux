@@ -5,6 +5,7 @@
 #include "rift_s_util.h"
 #include "rift_s_controller.h"
 #include "rift_s_hmd.h"
+#include "rift_s_usb.h"
 #include "math/m_clock_tracking.h"
 #ifdef TEST_RIFT_S_STEAMVR_POSE
 #include "ovrd_pose.hpp"
@@ -56,6 +57,84 @@ TEST_CASE("Rift S tracker stop joins the world consumer and drains borrowed came
 	// Teardown calls stop again after frame nodes have been destroyed.
 	rift_s_tracker_stop(&tracker);
 	os_thread_helper_destroy(&tracker.world_thread);
+	os_mutex_destroy(&tracker.slam_mutex);
+	os_mutex_destroy(&tracker.mutex);
+}
+
+TEST_CASE("Rift S read errors distinguish interruptions from lost handles with bounded retry delay")
+{
+	for (int error : {EINTR, EAGAIN, EINPROGRESS, ETIMEDOUT}) {
+		CHECK(rift_s_usb_read_error(error, 1) == RIFT_S_USB_RETRY);
+		CHECK(rift_s_usb_read_error(error, 100) == RIFT_S_USB_RETRY);
+	}
+	for (int error : {ENODEV, ENXIO, EBADF, EIO})
+		CHECK(rift_s_usb_read_error(error, 1) == RIFT_S_USB_LOST);
+	CHECK(rift_s_usb_read_error(EPIPE, 1) == RIFT_S_USB_RETRY);
+	CHECK(rift_s_usb_read_error(EPIPE, 8) == RIFT_S_USB_LOST);
+	CHECK(rift_s_usb_backoff_ns(1) == 2000000);
+	CHECK(rift_s_usb_backoff_ns(8) == 128000000);
+	CHECK(rift_s_usb_backoff_ns(100) == 128000000);
+}
+
+TEST_CASE("Rift S device loss invalidates old hardware epochs and joins the world consumer")
+{
+	rift_s_tracker tracker{};
+	os_mutex_init(&tracker.mutex);
+	os_mutex_init(&tracker.slam_mutex);
+	os_thread_helper_init(&tracker.world_thread);
+	tracker.world_thread_initialized = true;
+	tracker.ready_for_data = true;
+	tracker.have_hw2mono = true;
+	tracker.hw2mono = 123;
+	tracker.valid_clock_observations = 600;
+	tracker.camera_ts_offset = 456;
+	tracker.last_frame_time = 789;
+	tracker.last_camera_arrival_ns = 1000;
+	tracker.fusion.last_imu_timestamp_ns = 1234;
+	tracker.tracking.slam_enabled = true;
+	tracker.slam_generation = 7;
+	tracker.world_confirmations = 2;
+	tracker.world_map_available = true;
+	tracker.slam_guard.require_relocalization = true;
+	m_imu_3dof_init(&tracker.fusion.i3dof, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
+	m_relation_history_create(&tracker.fusion.history);
+	std::atomic<bool> exited{false};
+	struct Worker { os_thread_helper *thread; std::atomic<bool> *exited; } worker{&tracker.world_thread, &exited};
+	auto consume = [](void *ptr) -> void * {
+		auto &worker = *static_cast<Worker *>(ptr);
+		os_thread_helper_lock(worker.thread);
+		while (os_thread_helper_is_running_locked(worker.thread))
+			os_thread_helper_wait_locked(worker.thread);
+		os_thread_helper_unlock(worker.thread);
+		*worker.exited = true;
+		return nullptr;
+	};
+	REQUIRE(os_thread_helper_start(&tracker.world_thread, consume, &worker) == 0);
+	xrt_frame frame{};
+	frame.reference.count = 1;
+	frame.destroy = [](xrt_frame *) { FAIL("The camera still owns the frame"); };
+	xrt_frame_reference(&tracker.world_frames[0], &frame);
+	rift_s_tracker_device_lost(&tracker);
+	CHECK(exited.load());
+	CHECK_FALSE(tracker.ready_for_data);
+	CHECK_FALSE(tracker.have_hw2mono);
+	CHECK(tracker.hw2mono == 0);
+	CHECK(tracker.valid_clock_observations == 0);
+	CHECK(tracker.camera_ts_offset == 0);
+	CHECK(tracker.last_frame_time == 0);
+	CHECK(tracker.fusion.last_imu_timestamp_ns == 0);
+	CHECK(tracker.slam_restart_pending);
+	CHECK(tracker.slam_generation == 8);
+	CHECK(tracker.world_confirmations == 0);
+	CHECK(tracker.world_map_available);
+	CHECK(tracker.slam_guard.require_relocalization);
+	CHECK(frame.reference.count == 1);
+	CHECK(tracker.world_frames[0] == nullptr);
+	rift_s_tracker_device_lost(&tracker);
+	CHECK(tracker.slam_generation == 9);
+	os_thread_helper_destroy(&tracker.world_thread);
+	m_relation_history_destroy(&tracker.fusion.history);
+	m_imu_3dof_close(&tracker.fusion.i3dof);
 	os_mutex_destroy(&tracker.slam_mutex);
 	os_mutex_destroy(&tracker.mutex);
 }
