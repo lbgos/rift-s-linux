@@ -20,6 +20,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include "util/u_file.h"
 
 #include "math/m_api.h"
 #include "math/m_clock_tracking.h"
@@ -52,6 +56,80 @@ DEBUG_GET_ONCE_NUM_OPTION(rift_s_controller_led_period_us, "RIFT_S_CONTROLLER_LE
 
 /* Set to 1 to print controller states continuously */
 #define DUMP_CONTROLLER_STATE 0
+
+// Each file belongs to one physical controller and factory accelerometer calibration.
+// Learned bias is a hint until the first stationary window verifies it again.
+static uint64_t
+controller_bias_key(const struct rift_s_controller *ctrl)
+{
+	uint64_t hash = UINT64_C(14695981039346656037);
+	const unsigned char *data = (const unsigned char *)&ctrl->calibration.accel_calibration;
+	for (size_t i = 0; i < sizeof(ctrl->calibration.accel_calibration); ++i)
+		hash = (hash ^ data[i]) * UINT64_C(1099511628211);
+	return hash;
+}
+static bool
+controller_bias_path(const struct rift_s_controller *ctrl, char *path, size_t size)
+{
+	char suffix[96];
+	snprintf(suffix, sizeof(suffix), "rift-s-controller-bias-%016" PRIx64 ".txt", ctrl->device_id);
+	return ctrl->device_id && u_file_get_path_in_config_dir(suffix, path, size) > 0;
+}
+bool
+rift_s_controller_restore_bias(struct rift_s_controller *ctrl, const char *path)
+{
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return false;
+	uint64_t id = 0, key = 0;
+	struct xrt_vec3 bias = {0};
+	int fields = fscanf(file, "rifts-bias-v1 %" SCNx64 " %" SCNx64 " %f %f %f", &id, &key,
+	                    &bias.x, &bias.y, &bias.z);
+	fclose(file);
+	float norm = m_vec3_len(bias);
+	if (fields != 5 || id != ctrl->device_id || key != controller_bias_key(ctrl) ||
+	    !isfinite(norm) || norm >= 3)
+		return false;
+	ctrl->accel_bias.bias = bias;
+	ctrl->accel_bias.valid = true;
+	ctrl->stored_accel_bias = bias;
+	ctrl->have_stored_accel_bias = true;
+	ctrl->stored_accel_bias_pending = true;
+	return true;
+}
+bool
+rift_s_controller_store_bias(const struct rift_s_controller *ctrl, const char *path)
+{
+	// A loaded hint alone cannot overwrite the durable estimate.
+	if (!ctrl->accel_bias.valid || ctrl->stored_accel_bias_pending || ctrl->accel_bias.count < 3 ||
+	    !isfinite(m_vec3_len(ctrl->accel_bias.bias)) || m_vec3_len(ctrl->accel_bias.bias) >= 3 ||
+	    (ctrl->have_stored_accel_bias &&
+	     m_vec3_len(m_vec3_sub(ctrl->stored_accel_bias, ctrl->accel_bias.bias)) < 0.05f))
+		return false;
+	char temporary[1100];
+	if (snprintf(temporary, sizeof(temporary), "%s.XXXXXX", path) >= (int)sizeof(temporary))
+		return false;
+	int fd = mkstemp(temporary);
+	if (fd < 0)
+		return false;
+	FILE *file = fdopen(fd, "wb");
+	if (!file) {
+		close(fd);
+		unlink(temporary);
+		return false;
+	}
+	bool written = fprintf(file, "rifts-bias-v1 %016" PRIx64 " %016" PRIx64 " %.9g %.9g %.9g\n",
+	                       ctrl->device_id, controller_bias_key(ctrl), ctrl->accel_bias.bias.x,
+	                       ctrl->accel_bias.bias.y, ctrl->accel_bias.bias.z) > 0;
+	written = fflush(file) == 0 && written;
+	written = fsync(fd) == 0 && written;
+	written = fclose(file) == 0 && written;
+	if (!written || rename(temporary, path) != 0) {
+		unlink(temporary);
+		return false;
+	}
+	return true;
+}
 
 static struct xrt_binding_input_pair simple_inputs_rift_s[4] = {
     {XRT_INPUT_SIMPLE_SELECT_CLICK, XRT_INPUT_TOUCH_TRIGGER_VALUE},
@@ -697,7 +775,10 @@ rift_s_controller_update_fusion(struct rift_s_controller *ctrl, timepoint_ns tim
 		/* Average specific force in the gyro-integrated frame. Averaging sensor axes
 		 * while the hand rotates cancels gravity; requiring 250 ms without motion
 		 * prevents acquisition altogether. Outliers have bounded influence. */
-		float length = m_vec3_len(ctrl->accel);
+		struct xrt_vec3 startup_accel = ctrl->accel_bias.valid
+		                                    ? m_vec3_sub(ctrl->accel, ctrl->accel_bias.bias)
+		                                    : ctrl->accel;
+		float length = m_vec3_len(startup_accel);
 		if (timestamp_ns - ctrl->fusion.last.timestamp_ns > 50 * U_TIME_1MS_IN_NS) {
 			ctrl->gravity_samples = 0;
 			ctrl->gravity_accel_sum = ctrl->gravity_gyro_sum = (struct xrt_vec3){0};
@@ -705,7 +786,7 @@ rift_s_controller_update_fusion(struct rift_s_controller *ctrl, timepoint_ns tim
 		}
 		if (length > 7.5f && length < 12.0f) {
 			struct xrt_vec3 world;
-			math_quat_rotate_vec3(&ctrl->fusion.rot, &ctrl->accel, &world);
+			math_quat_rotate_vec3(&ctrl->fusion.rot, &startup_accel, &world);
 			if (ctrl->gravity_samples == 0) {
 				ctrl->gravity_start_ns = timestamp_ns;
 			} else {
@@ -750,8 +831,26 @@ rift_s_controller_update_fusion(struct rift_s_controller *ctrl, timepoint_ns tim
 		}
 	}
 	if (rift_s_rest_stats_push(&ctrl->rest, timestamp_ns, &ctrl->accel, &ctrl->gyro)) {
+		if (ctrl->stored_accel_bias_pending) {
+			ctrl->stored_accel_bias_pending = false;
+			if (fabsf(m_vec3_len(m_vec3_sub(ctrl->rest.last_mean, ctrl->stored_accel_bias)) -
+			          (float)MATH_GRAVITY_M_S2) > 0.15f) {
+				ctrl->accel_bias = (struct rift_s_accel_bias){0};
+				ctrl->have_stored_accel_bias = false;
+				ctrl->gravity_initialized = false;
+				ctrl->gravity_samples = 0;
+				ctrl->attitude_history_count = ctrl->attitude_history_start = 0;
+				RIFT_S_WARN("Stored controller accel bias failed stationary verification hand=%s", hand_alias(ctrl));
+			}
+		}
 		bool was_valid = ctrl->accel_bias.valid;
 		rift_s_accel_bias_add_window(&ctrl->accel_bias, &ctrl->rest.last_mean);
+		if (!ctrl->accel_bias.valid && ctrl->have_stored_accel_bias && !ctrl->stored_accel_bias_pending &&
+		    fabsf(m_vec3_len(m_vec3_sub(ctrl->rest.last_mean, ctrl->stored_accel_bias)) -
+		          (float)MATH_GRAVITY_M_S2) <= 0.15f) {
+			ctrl->accel_bias.bias = ctrl->stored_accel_bias;
+			ctrl->accel_bias.valid = true;
+		}
 		// With the attitude levelled by optical tilt, each window gives the whole offset.
 		bool settled = ctrl->accel_offset &&
 		               ctrl->optical_tilt_updates >= RIFT_S_OPTICAL_TILT_SETTLED_UPDATES &&
@@ -1467,6 +1566,9 @@ ctrl_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, stru
 		ctrl->P_device_imu.position = ctrl->calibration.imu_position;
 		math_pose_invert(&ctrl->P_device_imu, &ctrl->P_imu_device);
 		ctrl->have_calibration = true;
+		char path[1024];
+		if (controller_bias_path(ctrl, path, sizeof(path)) && rift_s_controller_restore_bias(ctrl, path))
+			RIFT_S_INFO("Restored controller accel bias hand=%s; stationary verification pending", hand_alias(ctrl));
 		log_model_check(ctrl);
 	} else {
 		// A parse failure (including an unexpected FlsVersion) retries after a delay and is
@@ -1803,6 +1905,11 @@ rift_s_controller_destroy(struct xrt_device *xdev)
 	/* Tell the system this controller is going away */
 	rift_s_system_remove_controller(ctrl->sys, ctrl);
 
+	// Save outside the IMU/USB path, after callbacks and device reports have stopped.
+	char path[1024];
+	if (controller_bias_path(ctrl, path, sizeof(path)))
+		rift_s_controller_store_bias(ctrl, path);
+
 	/* Release the HMD reference */
 	rift_s_system_reference(&ctrl->sys, NULL);
 
@@ -2001,7 +2108,7 @@ fuse_optical_position(struct rift_s_controller *ctrl,
  * the world-frame correction is applied to the current
  * fusion state and the retained capture attitudes. Caller holds the mutex. */
 static void
-apply_optical_tilt(struct rift_s_controller *ctrl, timepoint_ns capture_ns, const struct xrt_quat *optical)
+apply_optical_tilt(struct rift_s_controller *ctrl, timepoint_ns capture_ns, const struct xrt_quat *optical, bool capture_initial_tilt)
 {
 	struct rift_s_attitude_sample at_capture;
 	if (!rift_s_controller_get_attitude(ctrl, capture_ns, &at_capture)) {
@@ -2009,7 +2116,8 @@ apply_optical_tilt(struct rift_s_controller *ctrl, timepoint_ns capture_ns, cons
 	}
 	struct xrt_quat correction;
 	float tilt =
-	    rift_s_optical_tilt_correction(&at_capture.orientation, optical, RIFT_S_OPTICAL_TILT_FRACTION, &correction);
+	    rift_s_optical_tilt_correction(&at_capture.orientation, optical,
+	                                  capture_initial_tilt ? 1.0f : RIFT_S_OPTICAL_TILT_FRACTION, &correction);
 	math_quat_rotate(&correction, &ctrl->fusion.rot, &ctrl->fusion.rot);
 	math_quat_normalize(&ctrl->fusion.rot);
 	for (unsigned int i = 0; i < ctrl->attitude_history_count; i++) {
@@ -2090,7 +2198,8 @@ rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_
 	if (obs->orientation_observed && obs->distinct_leds >= 3) {
 		ctrl->diagnostics.optical_reliable++;
 		if (historical.tilt_valid) {
-			apply_optical_tilt(ctrl, frame_mono_ns, &optical);
+			apply_optical_tilt(ctrl, frame_mono_ns, &optical,
+			                   ctrl->accel_offset && ctrl->optical_tilt_updates == 0 && obs->distinct_leds >= 5);
 		}
 	}
 	ctrl->last_tracked_pose_ts = frame_mono_ns;
@@ -2322,6 +2431,7 @@ rift_s_controller_update_configuration(struct rift_s_controller *ctrl, uint64_t 
 		// A bias belongs to one physical accelerometer.
 		ctrl->accel_bias = (struct rift_s_accel_bias){0};
 		ctrl->attitude_bias = (struct rift_s_attitude_bias){0};
+		ctrl->have_stored_accel_bias = ctrl->stored_accel_bias_pending = false;
 		ctrl->accel_offset = false;
 		ctrl->optical_tilt_updates = 0;
 		ctrl->optical_tilt_residual_deg = 0;

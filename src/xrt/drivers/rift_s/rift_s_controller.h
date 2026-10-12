@@ -247,6 +247,8 @@ struct rift_s_controller
 	bool gravity_moving;
 	struct rift_s_rest_stats rest;
 	struct rift_s_accel_bias accel_bias;
+	struct xrt_vec3 stored_accel_bias;
+	bool have_stored_accel_bias, stored_accel_bias_pending;
 	timepoint_ns last_bias_log_ns;
 	/*!
 	 * The stationary startup reading was not gravity's magnitude: the accelerometer carries an
@@ -423,6 +425,12 @@ bool
 rift_s_controller_handle_report(struct rift_s_controller *ctrl,
                                 timepoint_ns local_ts,
                                 rift_s_controller_report_t *report);
+
+// Bias persistence uses a caller-selected path for isolated tests and the per-device config file at runtime.
+bool
+rift_s_controller_restore_bias(struct rift_s_controller *ctrl, const char *path);
+bool
+rift_s_controller_store_bias(const struct rift_s_controller *ctrl, const char *path);
 
 #ifdef __cplusplus
 }

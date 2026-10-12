@@ -17,6 +17,8 @@
 #include <limits>
 #include <random>
 #include <atomic>
+#include <unistd.h>
+#include <fstream>
 
 TEST_CASE("Rift S tracker stop joins the world consumer and drains borrowed camera frames")
 {
@@ -2240,4 +2242,58 @@ TEST_CASE("Rift S Touch native frames reproduce Oculus controller constants")
 		CHECK(published.pose.orientation.w == Catch::Approx(0.94147 / norm).margin(2e-7));
 #endif
 	}
+}
+
+TEST_CASE("Rift S verified optical acquisition captures offset tilt immediately")
+{
+	FusionRig rig({-0.08f, -1.98f, -0.02f});
+	rig.truth = quat_from_axis_deg({1, 0, 0}, 55);
+	rig.run(180, {0, 0, 0}, false);
+	REQUIRE(rig.ctrl.accel_offset);
+	REQUIRE(rig.tilt_error() > 5);
+	rig.run(64, {0, 0, 0}, true);
+	REQUIRE(rig.ctrl.diagnostics.optical_accepted > 0);
+	CHECK(rig.tilt_error() < 0.1);
+}
+
+TEST_CASE("Rift S durable accelerometer bias is device bound and verified at rest")
+{
+	char directory[] = "/tmp/rifts-bias-XXXXXX";
+	REQUIRE(mkdtemp(directory));
+	std::string path = std::string(directory) + "/bias";
+	FusionRig learned({-0.08f, -1.98f, -0.02f});
+	learned.ctrl.device_id = 26012;
+	learned.ctrl.accel_bias.bias = learned.bias;
+	learned.ctrl.accel_bias.valid = true;
+	learned.ctrl.accel_bias.count = 7;
+	REQUIRE(rift_s_controller_store_bias(&learned.ctrl, path.c_str()));
+	FusionRig fresh(learned.bias);
+	fresh.ctrl.device_id = learned.ctrl.device_id;
+	REQUIRE(rift_s_controller_restore_bias(&fresh.ctrl, path.c_str()));
+	fresh.truth = quat_from_axis_deg({1, 0, 0}, 55);
+	fresh.run(350, {0, 0, 0}, false);
+	CHECK(fresh.ctrl.gravity_initialized);
+	CHECK_FALSE(fresh.ctrl.accel_offset);
+	CHECK_FALSE(fresh.ctrl.stored_accel_bias_pending);
+	CHECK(fresh.ctrl.accel_bias.valid);
+	CHECK(fresh.tilt_error() < 0.1);
+	CHECK_FALSE(rift_s_controller_store_bias(&fresh.ctrl, path.c_str()));
+	SECTION("Different factory calibration rejects the cache") {
+		fresh.ctrl.calibration.accel_calibration.offset.x = 0.1f;
+		CHECK_FALSE(rift_s_controller_restore_bias(&fresh.ctrl, path.c_str()));
+	}
+	SECTION("Different controller rejects the cache") {
+		fresh.ctrl.device_id++;
+		CHECK_FALSE(rift_s_controller_restore_bias(&fresh.ctrl, path.c_str()));
+	}
+	SECTION("Changed bias discards the hint on the first rest window") {
+		FusionRig changed({0, 0, 0});
+		changed.ctrl.device_id = learned.ctrl.device_id;
+		REQUIRE(rift_s_controller_restore_bias(&changed.ctrl, path.c_str()));
+		changed.run(180, {0, 0, 0}, false);
+		CHECK_FALSE(changed.ctrl.have_stored_accel_bias);
+		CHECK_FALSE(changed.ctrl.accel_bias.valid);
+	}
+	unlink(path.c_str());
+	rmdir(directory);
 }
