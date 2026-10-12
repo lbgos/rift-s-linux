@@ -273,6 +273,222 @@ refine_gravity(const rift_s_world_anchor_config &c,
 	cam_from_world = camera_pose(parameters);
 	return std::isfinite(cv::norm(cam_from_world.t));
 }
+// A gravity prior leaves yaw and translation unknown. Two calibrated rays give
+// n dot (Ry(-yaw) * (P1-P2) - (C1-C2)) = 0, with n = ray1 cross ray2.
+// Solve both yaw roots and positive ray depths, then score the whole camera rig.
+struct RigObservation
+{
+	unsigned camera;
+	cv::Vec3d world, origin, ray;
+	cv::Point2d pixel;
+};
+cv::Matx33d
+yaw_rotation(double yaw)
+{
+	double co = std::cos(yaw), si = std::sin(yaw);
+	return {co, 0, si, 0, 1, 0, -si, 0, co};
+}
+std::vector<size_t>
+rig_support(const rift_s_world_anchor_config &c,
+            const std::vector<RigObservation> &obs,
+            const Transform &world_from_imu,
+            double threshold,
+            float *max_error = nullptr)
+{
+	std::array<Transform, RIFT_S_WORLD_MAX_CAMERAS> cameras;
+	for (unsigned eye = 0; eye < camera_count(c); ++eye)
+		cameras[eye] = (world_from_imu * transform(c.imu_from_camera[eye])).inverse();
+	std::vector<size_t> support;
+	if (max_error)
+		*max_error = 0;
+	for (size_t i = 0; i < obs.size(); ++i) {
+		const auto &o = obs[i];
+		cv::Point2d projected;
+		if (!project(c.camera[o.camera], cameras[o.camera].apply(o.world), projected))
+			continue;
+		double error = cv::norm(projected - o.pixel);
+		if (error <= threshold) {
+			support.push_back(i);
+			if (max_error)
+				*max_error = std::max(*max_error, float(error));
+		}
+	}
+	return support;
+}
+bool
+rig_coverage(const rift_s_world_anchor_config &c,
+             const std::vector<RigObservation> &obs,
+             const std::vector<size_t> &support,
+             rift_s_world_anchor_result *result = nullptr)
+{
+	std::array<unsigned, RIFT_S_WORLD_MAX_CAMERAS> counts{};
+	std::vector<cv::Point2d> pixels;
+	for (size_t i : support) {
+		const auto &o = obs[i];
+		++counts[o.camera];
+		pixels.emplace_back(o.pixel.x * 640 / c.camera[o.camera].roi.extent.w,
+		                    o.pixel.y * 480 / c.camera[o.camera].roi.extent.h);
+	}
+	unsigned cameras = 0;
+	for (unsigned eye = 0; eye < camera_count(c); ++eye) {
+		cameras += counts[eye] >= 3;
+		if (result)
+			result->inliers[eye] = counts[eye];
+	}
+	if (result)
+		result->supporting_cameras = cameras;
+	auto normalized = c.camera[0];
+	normalized.roi.extent = {640, 480};
+	return support.size() >= 10 && cameras >= 2 && spread(pixels, normalized);
+}
+bool
+refine_rig(const rift_s_world_anchor_config &c,
+           const std::vector<RigObservation> &obs,
+           const std::vector<size_t> &support,
+           const cv::Matx33d &attitude,
+           Transform &estimate)
+{
+	cv::Matx33d delta = estimate.r * attitude.t();
+	cv::Vec4d parameters{std::atan2(delta(0, 2) - delta(2, 0), delta(0, 0) + delta(2, 2)),
+	                    estimate.t[0], estimate.t[1], estimate.t[2]};
+	auto head = [&](const cv::Vec4d &p) {
+		return Transform{yaw_rotation(p[0]) * attitude, {p[1], p[2], p[3]}};
+	};
+	for (unsigned iteration = 0; iteration < 15; ++iteration) {
+		cv::Matx44d normal = cv::Matx44d::zeros();
+		cv::Vec4d gradient = cv::Vec4d::all(0);
+		unsigned used = 0;
+		for (size_t i : support) {
+			const auto &o = obs[i];
+			auto camera_pose = [&](const cv::Vec4d &p) {
+				return (head(p) * transform(c.imu_from_camera[o.camera])).inverse();
+			};
+			cv::Point2d projected;
+			if (!project(c.camera[o.camera], camera_pose(parameters).apply(o.world), projected))
+				continue;
+			cv::Vec2d residual{projected.x - o.pixel.x, projected.y - o.pixel.y};
+			cv::Matx<double, 2, 4> jacobian;
+			for (unsigned axis = 0; axis < 4; ++axis) {
+				auto perturbed = parameters;
+				perturbed[axis] += 1e-5;
+				cv::Point2d next;
+				if (!project(c.camera[o.camera], camera_pose(perturbed).apply(o.world), next))
+					return false;
+				jacobian(0, axis) = (next.x - projected.x) / 1e-5;
+				jacobian(1, axis) = (next.y - projected.y) / 1e-5;
+			}
+			double weight = std::min(1.0, MAX_ERROR_PX / std::max(cv::norm(residual), 1e-9));
+			normal += weight * jacobian.t() * jacobian;
+			gradient += weight * jacobian.t() * residual;
+			++used;
+		}
+		cv::Vec4d step;
+		if (used < 10 || !cv::solve(normal, gradient, step, cv::DECOMP_CHOLESKY) ||
+		    !std::isfinite(cv::norm(step)))
+			return false;
+		double scale = std::max({1.0, std::abs(step[0]) / 0.05,
+		                         cv::norm(cv::Vec3d{step[1], step[2], step[3]}) / 0.2});
+		parameters -= step / scale;
+		if (cv::norm(step) < 1e-7)
+			break;
+	}
+	estimate = head(parameters);
+	return std::isfinite(cv::norm(estimate.t));
+}
+bool
+solve_gravity_rig(const rift_s_world_anchor_config &c,
+                  const rift_s_world_anchor_observation *const input[],
+                  const uint32_t counts[], unsigned count, const xrt_quat &attitude,
+                  rift_s_world_anchor_result &result)
+{
+	std::vector<RigObservation> obs;
+	cv::Matx33d raw = transform({attitude, {0, 0, 0}}).r;
+	result.rejection = "matches";
+	for (unsigned eye = 0; eye < count; ++eye) {
+		result.matches[eye] = counts[eye];
+		if (counts[eye] > 4096 || (counts[eye] && !input[eye]))
+			return false;
+		Transform camera = transform(c.imu_from_camera[eye]);
+		for (uint32_t i = 0; i < counts[eye]; ++i) {
+			const auto &o = input[eye][i];
+			cv::Vec3d ray, world{o.world_point.x, o.world_point.y, o.world_point.z};
+			if (!std::isfinite(cv::norm(world)) || !unproject(c.camera[eye], {o.pixel.x, o.pixel.y}, ray))
+				return false;
+			obs.push_back({eye, world, raw * camera.t, raw * camera.r * ray, {o.pixel.x, o.pixel.y}});
+		}
+	}
+	if (obs.size() < 10)
+		return false;
+	Transform best, alternative;
+	std::vector<size_t> best_support, alternative_support;
+	cv::RNG random(0x72696674);
+	for (unsigned iteration = 0; iteration < 1500; ++iteration) {
+		const auto &a = obs[random.uniform(0, int(obs.size()))];
+		const auto &b = obs[random.uniform(0, int(obs.size()))];
+		cv::Vec3d difference = a.world - b.world, origin = a.origin - b.origin;
+		cv::Vec3d normal = a.ray.cross(b.ray);
+		if (cv::norm(normal) < 0.04 || cv::norm(difference) < 0.15)
+			continue;
+		double cosine = normal[0] * difference[0] + normal[2] * difference[2];
+		double sine = normal[2] * difference[0] - normal[0] * difference[2];
+		double constant = normal[1] * difference[1] - normal.dot(origin);
+		double magnitude = std::hypot(cosine, sine);
+		if (magnitude < 1e-8 || std::abs(constant) > magnitude)
+			continue;
+		double phase = std::atan2(sine, cosine), offset = std::acos(-constant / magnitude);
+		for (double yaw : {phase + offset, phase - offset}) {
+			auto r = yaw_rotation(yaw);
+			cv::Vec3d d = r.t() * difference - origin;
+			double dot = a.ray.dot(b.ray), determinant = 1 - dot * dot;
+			double depth_a = (a.ray.dot(d) - dot * b.ray.dot(d)) / determinant;
+			double depth_b = (dot * a.ray.dot(d) - b.ray.dot(d)) / determinant;
+			if (depth_a < 0.1 || depth_b < 0.1 || depth_a > 30 || depth_b > 30)
+				continue;
+			Transform estimate{r * raw,
+			                   0.5 * (a.world - r * (a.origin + depth_a * a.ray) +
+			                          b.world - r * (b.origin + depth_b * b.ray))};
+			auto support = rig_support(c, obs, estimate, MAX_ERROR_PX);
+			if (support.size() < 10 || !rig_coverage(c, obs, support))
+				continue;
+			bool distinct = !best_support.empty() &&
+			                (cv::norm(estimate.t - best.t) > 0.12 || angle_between(estimate, best) > 6 * M_PI / 180);
+			if (support.size() > best_support.size()) {
+				if (distinct) {
+					alternative = best;
+					alternative_support = best_support;
+				}
+				best = estimate;
+				best_support = std::move(support);
+			} else if (distinct && support.size() > alternative_support.size()) {
+				alternative = estimate;
+				alternative_support = std::move(support);
+			}
+		}
+	}
+	result.rejection = "pooled_inliers";
+	if (best_support.empty())
+		return false;
+	for (unsigned pass = 0; pass < 3; ++pass) {
+		if (!refine_rig(c, obs, best_support, raw, best))
+			return false;
+		best_support = rig_support(c, obs, best, MAX_ERROR_PX, &result.max_reprojection_px);
+		if (!rig_coverage(c, obs, best_support, &result))
+			return false;
+	}
+	if (alternative_support.size() >= 0.8 * best_support.size() &&
+	    refine_rig(c, obs, alternative_support, raw, alternative)) {
+		alternative_support = rig_support(c, obs, alternative, MAX_ERROR_PX);
+		if (alternative_support.size() >= 0.8 * best_support.size() && rig_coverage(c, obs, alternative_support) &&
+		    (cv::norm(alternative.t - best.t) > 0.12 || angle_between(alternative, best) > 6 * M_PI / 180)) {
+			result.rejection = "camera_disagreement";
+			return false;
+		}
+	}
+	result.world_from_imu = pose(best);
+	result.relocalized = finite_pose(result.world_from_imu);
+	result.rejection = result.relocalized ? nullptr : "pose";
+	return result.relocalized;
+}
 struct Point
 {
 	cv::Vec3d world;
@@ -710,6 +926,8 @@ rift_s_world_anchor_solve_rig_gravity(const rift_s_world_anchor_config *config,
 	if (attitude && !finite_pose({*attitude, {0, 0, 0}}))
 		return false;
 	try {
+		if (attitude)
+			return solve_gravity_rig(*config, obs, counts, count, *attitude, *result);
 		Transform estimates[RIFT_S_WORLD_MAX_CAMERAS];
 		bool usable[RIFT_S_WORLD_MAX_CAMERAS]{};
 		result->rejection = "matches";

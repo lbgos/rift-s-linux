@@ -881,3 +881,43 @@ TEST_CASE("Automatic room updates reject VIO drift in an overlapping view")
 	                                               &trusted.orientation, &result));
 	CHECK(cv::norm(translation(result.world_from_imu)) < 0.03);
 }
+
+TEST_CASE("Room recovery pools sparse cross-session matches across cameras")
+{
+	auto c = calibration();
+	xrt_quat tilt{0.14943813f, 0, 0, 0.98877108f};
+	xrt_quat yaw{0, 0.24740396f, 0, 0.96891242f};
+	xrt_pose expected{tilt, {0.4f, -0.2f, 0.6f}};
+	math_quat_rotate(&yaw, &tilt, &expected.orientation);
+	auto o = observations(c, expected);
+	cv::RNG random(26012);
+	for (auto &eye : o)
+		for (size_t i = 0; i < eye.size(); ++i) {
+			if (i % 5 != 0) {
+				eye[i].world_point = {random.uniform(-4.f, 4.f), random.uniform(-3.f, 3.f), random.uniform(-4.f, 4.f)};
+			} else {
+				eye[i].pixel.x += random.uniform(-0.3f, 0.3f);
+				eye[i].pixel.y += random.uniform(-0.3f, 0.3f);
+			}
+		}
+	const rift_s_world_anchor_observation *obs[2] = {o[0].data(), o[1].data()};
+	uint32_t counts[2] = {uint32_t(o[0].size()), uint32_t(o[1].size())};
+	rift_s_world_anchor_result result{};
+	REQUIRE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+	CHECK(result.supporting_cameras == 2);
+	CHECK(result.inliers[0] >= 15);
+	CHECK(result.inliers[0] < 30);
+	CHECK(result.inliers[1] >= 15);
+	CHECK(cv::norm(translation(result.world_from_imu) - translation(expected)) < 0.01);
+	CHECK(result.max_reprojection_px <= 2.5);
+	SECTION("One camera cannot identify the room") {
+		counts[1] = 0;
+		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+	}
+	SECTION("Random correspondences cannot identify the room") {
+		for (auto &eye : o)
+			for (auto &v : eye)
+				v.world_point = {random.uniform(-4.f, 4.f), random.uniform(-3.f, 3.f), random.uniform(-4.f, 4.f)};
+		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+	}
+}
