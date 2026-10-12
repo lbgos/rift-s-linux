@@ -22,6 +22,7 @@
 
 #include "math/m_vec3.h"
 #include "os/os_time.h"
+#include "util/u_logging.h"
 
 #include "lambdatwist/lambdatwist_p3p.h"
 #include "correspondence_search.h"
@@ -531,12 +532,11 @@ check_led_against_model_subset(struct correspondence_search *cs,
 			tmp = m_vec3_sub(checkpos, tmpblob);
 			l = m_vec3_len(tmp);
 			if (!(l <= 0.0025)) {
-				printf(
-				    "Error pose candidate orient %f %f %f %f pos %f %f %f "
-				    "LED %d @ %f %f %f projected to %f %f %f (err %f)\n",
-				    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
-				    pose.position.x, pose.position.y, pose.position.z, p, tmpblob.x, tmpblob.y,
-				    tmpblob.z, checkpos.x, checkpos.y, checkpos.z, l);
+				U_LOG_D("Error pose candidate orient %f %f %f %f pos %f %f %f "
+				        "LED %d @ %f %f %f projected to %f %f %f (err %f)",
+				        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+				        pose.position.x, pose.position.y, pose.position.z, p, tmpblob.x, tmpblob.y,
+				        tmpblob.z, checkpos.x, checkpos.y, checkpos.z, l);
 				checks_failed = true;
 				break; /* FIXME: Figure out why this happened */
 			}
