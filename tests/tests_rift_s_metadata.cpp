@@ -5,6 +5,7 @@
 extern "C" {
 #include "rift_s_firmware.h"
 #include "rift_s_protocol.h"
+#include "rift_s_radio.h"
 #include "util/u_logging.h"
 }
 #include <array>
@@ -265,4 +266,97 @@ TEST_CASE("Rift S controller IR LED register matches the Windows radio requests"
 	CHECK_FALSE(rift_s_controller_write_succeeded(bad.data(), bad.size(), &status));
 	CHECK(status == 5);
 	CHECK_FALSE(rift_s_controller_write_succeeded(ok.data(), 3, &status));
+}
+
+namespace {
+struct RadioFixture {
+	os_hid_device hid{};
+	bool send_fail = false;
+	int response_size = 8;
+	uint8_t seq = 1;
+	unsigned sends = 0;
+	bool called = false, success = true;
+	RadioFixture() {
+		hid.set_feature = [](os_hid_device *h, const uint8_t *, size_t size) {
+			auto &f = *reinterpret_cast<RadioFixture *>(h);
+			++f.sends;
+			return f.send_fail ? -1 : int(size);
+		};
+		hid.get_feature = [](os_hid_device *h, uint8_t, uint8_t *data, size_t size) {
+			auto &f = *reinterpret_cast<RadioFixture *>(h);
+			std::memset(data, 0, size);
+			data[0] = 0x0b;
+			data[1] = f.seq;
+			data[7] = 255; // Impossible JSON length for this short response.
+			return f.response_size;
+		};
+	}
+	static void complete(bool ok, uint8_t *, int, void *data) {
+		auto &f = *static_cast<RadioFixture *>(data);
+		f.called = true;
+		f.success = ok;
+	}
+};
+}
+
+TEST_CASE("Rift S radio retries failed sends and waits for a complete response")
+{
+	RadioFixture f;
+	rift_s_radio_state state{};
+	rift_s_radio_state_init(&state);
+	const uint8_t command[] = {0x32, 0, 0xe8, 3};
+	rift_s_radio_queue_command(&state, 1, command, sizeof(command), RadioFixture::complete, &f);
+	f.send_fail = true;
+	rift_s_radio_update(&state, &f.hid);
+	CHECK_FALSE(state.command_result_pending);
+	CHECK_FALSE(f.called);
+	f.send_fail = false;
+	f.response_size = 2;
+	rift_s_radio_update(&state, &f.hid);
+	CHECK(state.command_result_pending);
+	CHECK_FALSE(f.called);
+	f.response_size = 7;
+	rift_s_radio_update(&state, &f.hid);
+	CHECK(f.called);
+	CHECK(f.success);
+	CHECK(f.sends == 2);
+	CHECK(state.pending_commands == nullptr);
+	rift_s_radio_state_clear(&state);
+}
+
+TEST_CASE("Rift S radio rejects malformed JSON replies and invalid queued payloads")
+{
+	RadioFixture f;
+	rift_s_radio_state state{};
+	rift_s_radio_state_init(&state);
+	rift_s_radio_get_json_block(&state, 1, RadioFixture::complete, &f);
+	rift_s_radio_update(&state, &f.hid);
+	CHECK(f.called);
+	CHECK_FALSE(f.success);
+	CHECK(state.pending_commands == nullptr);
+	for (int length : {-1, 53, 1}) {
+		f.called = false;
+		rift_s_radio_queue_command(&state, 1, nullptr, length, RadioFixture::complete, &f);
+		CHECK(f.called);
+		CHECK_FALSE(f.success);
+		CHECK(state.pending_commands == nullptr);
+	}
+	rift_s_radio_state_clear(&state);
+}
+
+TEST_CASE("Rift S parser bounds unknown controller blocks and rejects empty inputs")
+{
+	rift_s_controller_report_t report{};
+	rift_s_hmd_report_t head{};
+	CHECK_FALSE(rift_s_parse_controller_report(&report, nullptr, 0));
+	CHECK_FALSE(rift_s_parse_hmd_report(&head, nullptr, 0));
+	std::array<uint8_t, 262> packet{};
+	packet[0] = 0x67;
+	packet[9] = 252;
+	packet[14] = 0xff;
+	REQUIRE(rift_s_parse_controller_report(&report, packet.data(), packet.size()));
+	CHECK(report.extra_bytes_len == sizeof(report.extra_bytes));
+	packet[9] = 52; // An exactly fitting spill is legal.
+	REQUIRE(rift_s_parse_controller_report(&report, packet.data(), packet.size()));
+	CHECK(report.extra_bytes_len == sizeof(report.extra_bytes));
 }
