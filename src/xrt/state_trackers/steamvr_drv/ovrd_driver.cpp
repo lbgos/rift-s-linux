@@ -1289,14 +1289,14 @@ public:
 	BenchInput m_bench;
 	vr::DriverPose_t m_pose;
 	vr::TrackedDeviceIndex_t m_unObjectId;
-	vr::PropertyContainerHandle_t m_ulPropertyContainer;
+	vr::PropertyContainerHandle_t m_ulPropertyContainer = vr::k_ulInvalidPropertyContainer;
 	uint64_t m_worldUniverse = 3;
 	int64_t m_worldPoll = 0;
 
 	bool m_emulate_index_controller = false;
 
 	std::vector<struct SteamVRDriverControlInput> m_input_controls;
-	struct SteamVRDriverControlInput m_skeletal_input_control;
+	struct SteamVRDriverControlInput m_skeletal_input_control{};
 
 	std::vector<struct SteamVRDriverControlOutput> m_output_controls;
 
