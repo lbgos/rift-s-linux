@@ -412,8 +412,10 @@ solve_gravity_rig(const rift_s_world_anchor_config &c,
 		for (uint32_t i = 0; i < counts[eye]; ++i) {
 			const auto &o = input[eye][i];
 			cv::Vec3d ray, world{o.world_point.x, o.world_point.y, o.world_point.z};
+			// A single unprojectable edge pixel or non-finite landmark must not
+			// reject the whole rig: mismatches happen, the inlier gates decide.
 			if (!std::isfinite(cv::norm(world)) || !unproject(c.camera[eye], {o.pixel.x, o.pixel.y}, ray))
-				return false;
+				continue;
 			obs.push_back({eye, world, raw * camera.t, raw * camera.r * ray, {o.pixel.x, o.pixel.y}});
 		}
 	}
