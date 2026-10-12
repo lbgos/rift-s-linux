@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <array>
+#include <opencv2/flann/lsh_table.h>
+#include <opencv2/flann/result_set.h>
 
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 // Same Hamming metric as OpenCV's byte lookup table. Only this function requires
@@ -31,8 +34,80 @@ struct RiftSOrbHamming : cvflann::HammingLUT
 };
 #endif
 
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
+// OpenCV builds the same randomized tables. Direct bucket pointers remove hash
+// lookups during the 211 probes per table without changing candidate order.
+class RiftSOrbIndex
+{
+public:
+	explicit RiftSOrbIndex(const cv::Mat &descriptors) : train(descriptors)
+	{
+		cvflann::Matrix<unsigned char> dataset(train.data, train.rows, train.cols, train.step);
+		masks.push_back(0);
+		for (int high = 19; high >= 0; --high) {
+			masks.push_back(uint32_t(1) << high);
+			for (int low = high - 1; low >= 0; --low)
+				masks.push_back((uint32_t(1) << high) | (uint32_t(1) << low));
+		}
+		for (auto &table : tables) {
+			table.hash = cvflann::lsh::LshTable<unsigned char>(32, 20);
+			table.hash.add(dataset);
+			table.buckets.resize(size_t(1) << 20, nullptr);
+			for (int row = 0; row < train.rows; ++row) {
+				auto key = table.hash.getKey(train.ptr<unsigned char>(row));
+				table.buckets[key] = table.hash.getBucketFromKey(key);
+			}
+		}
+	}
+
+	void
+	knnMatch(const cv::Mat &queries, std::vector<std::vector<cv::DMatch>> &nearest, int count) const
+	{
+		CV_Assert(queries.type() == CV_8U && queries.cols == 32 && count > 0 && count <= train.rows);
+		nearest.clear();
+		nearest.resize(queries.rows);
+		cvflann::KNNUniqueResultSet<int> result(count);
+		std::vector<int> indices(count), distances(count);
+		RiftSOrbHamming distance;
+		for (int row = 0; row < queries.rows; ++row) {
+			result.clear();
+			const auto *query = queries.ptr<unsigned char>(row);
+			for (const auto &table : tables) {
+				auto key = table.hash.getKey(query);
+				for (auto mask : masks) {
+					const auto *bucket = table.buckets[key ^ mask];
+					if (bucket == nullptr)
+						continue;
+					for (auto candidate : *bucket)
+						result.addPoint(
+						    distance(query, train.ptr<unsigned char>(candidate), 32),
+						    candidate);
+				}
+			}
+			std::fill(indices.begin(), indices.end(), -1);
+			result.sortAndCopy(indices.data(), distances.data(), count);
+			nearest[row].reserve(count);
+			for (int neighbor = 0; neighbor < count; ++neighbor)
+				if (indices[neighbor] >= 0)
+					nearest[row].emplace_back(row, indices[neighbor], 0,
+					                          float(distances[neighbor]));
+		}
+	}
+
+private:
+	struct Table
+	{
+		cvflann::lsh::LshTable<unsigned char> hash;
+		std::vector<const cvflann::lsh::Bucket *> buckets;
+	};
+	cv::Mat train;
+	std::array<Table, 12> tables;
+	std::vector<uint32_t> masks;
+};
+#endif
+
 // Keeps the original BF/LSH policy, search parameters and result order. The
-// templated public FLANN API lets the native driver supply a faster distance.
+// public FLANN tables retain the original randomized candidate selection.
 class RiftSWorldMatcher
 {
 public:
@@ -40,13 +115,13 @@ public:
 	{
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 		if (descriptors.rows > 2000 && __builtin_cpu_supports("popcnt")) {
-			fast = std::make_unique<cv::flann::GenericIndex<RiftSOrbHamming>>(
-			    descriptors, cvflann::LshIndexParams(12, 20, 2));
+			fast = std::make_unique<RiftSOrbIndex>(descriptors);
 			return;
 		}
 #endif
 		if (descriptors.rows > 2000)
-			fallback = cv::makePtr<cv::FlannBasedMatcher>(cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
+			fallback =
+			    cv::makePtr<cv::FlannBasedMatcher>(cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
 		else
 			fallback = cv::makePtr<cv::BFMatcher>(cv::NORM_HAMMING);
 		fallback->add(std::vector<cv::Mat>{descriptors});
@@ -58,21 +133,7 @@ public:
 	{
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 		if (fast) {
-			// GenericIndex requires continuous query storage. ORB is normally
-			// continuous, but a sliced query must keep the same search behavior.
-			cv::Mat queries = descriptors.isContinuous() ? descriptors : descriptors.clone();
-			cv::Mat indices(queries.rows, count, CV_32S), distances(queries.rows, count, CV_32S);
-			fast->knnSearch(queries, indices, distances, count, cvflann::SearchParams(32, 0, true));
-			nearest.clear();
-			nearest.resize(queries.rows);
-			for (int row = 0; row < queries.rows; ++row) {
-				nearest[row].reserve(count);
-				for (int neighbor = 0; neighbor < count; ++neighbor) {
-					int index = indices.at<int>(row, neighbor);
-					if (index >= 0)
-						nearest[row].emplace_back(row, index, 0, float(distances.at<int>(row, neighbor)));
-				}
-			}
+			fast->knnMatch(descriptors, nearest, count);
 			return;
 		}
 #endif
@@ -81,7 +142,7 @@ public:
 
 private:
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
-	std::unique_ptr<cv::flann::GenericIndex<RiftSOrbHamming>> fast;
+	std::unique_ptr<RiftSOrbIndex> fast;
 #endif
 	cv::Ptr<cv::DescriptorMatcher> fallback;
 };

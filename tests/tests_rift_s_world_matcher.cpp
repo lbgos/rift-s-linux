@@ -6,7 +6,7 @@
 
 TEST_CASE("Native room descriptor distance preserves BF and LSH neighbor identities")
 {
-	for (int rows : {64, 2000, 2400}) {
+	for (int rows : {64, 2000, 2400, 12000}) {
 		cv::Mat train(rows, 32, CV_8U), queries(128, 32, CV_8U);
 		cv::RNG random(19);
 		random.fill(train, cv::RNG::UNIFORM, 0, 256);
@@ -21,7 +21,8 @@ TEST_CASE("Native room descriptor distance preserves BF and LSH neighbor identit
 			cvflann::seed_random(seed);
 			cv::Ptr<cv::DescriptorMatcher> reference;
 			if (rows > 2000)
-				reference = cv::makePtr<cv::FlannBasedMatcher>(cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
+				reference = cv::makePtr<cv::FlannBasedMatcher>(
+				    cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
 			else
 				reference = cv::makePtr<cv::BFMatcher>(cv::NORM_HAMMING);
 			reference->add(std::vector<cv::Mat>{train});
@@ -32,22 +33,24 @@ TEST_CASE("Native room descriptor distance preserves BF and LSH neighbor identit
 			cv::Mat padded(queries.rows, 35, CV_8U);
 			cv::Mat sliced = padded.colRange(1, 33);
 			queries.copyTo(sliced);
-			for (const cv::Mat &query : {queries, sliced}) {
-				std::vector<std::vector<cv::DMatch>> expected, actual;
-				reference->knnMatch(query.clone(), expected, 4);
-				native.knnMatch(query, actual, 4);
-				REQUIRE(actual.size() == expected.size());
-				for (size_t row = 0; row < expected.size(); ++row) {
-					REQUIRE(actual[row].size() == expected[row].size());
-					for (size_t neighbor = 0; neighbor < expected[row].size(); ++neighbor) {
-						const auto &a = actual[row][neighbor], &b = expected[row][neighbor];
-						CHECK(a.queryIdx == b.queryIdx);
-						CHECK(a.trainIdx == b.trainIdx);
-						CHECK(a.imgIdx == b.imgIdx);
-						CHECK(a.distance == b.distance);
+			for (const cv::Mat &query : {queries, sliced})
+				for (int count : {1, 4, 8}) {
+					std::vector<std::vector<cv::DMatch>> expected, actual;
+					reference->knnMatch(query.clone(), expected, count);
+					native.knnMatch(query, actual, count);
+					REQUIRE(actual.size() == expected.size());
+					for (size_t row = 0; row < expected.size(); ++row) {
+						REQUIRE(actual[row].size() == expected[row].size());
+						for (size_t neighbor = 0; neighbor < expected[row].size(); ++neighbor) {
+							const auto &a = actual[row][neighbor],
+							           &b = expected[row][neighbor];
+							CHECK(a.queryIdx == b.queryIdx);
+							CHECK(a.trainIdx == b.trainIdx);
+							CHECK(a.imgIdx == b.imgIdx);
+							CHECK(a.distance == b.distance);
+						}
 					}
 				}
-			}
 		}
 	}
 }
