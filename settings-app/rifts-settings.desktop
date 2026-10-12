@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rift S settings
+Comment=Rift S devices, playspace and SteamVR settings
+Exec=/usr/local/bin/rifts-settings
+Icon=/usr/local/share/icons/hicolor/128x128/apps/rifts-settings.png
+Terminal=false
+Categories=Settings;HardwareSettings;
+StartupWMClass=rifts-settings
