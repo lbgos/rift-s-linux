@@ -528,6 +528,10 @@ rift_s_read_imu_config_info(struct os_hid_device *hid, struct rift_s_imu_config_
 
 	*imu_config = *(struct rift_s_imu_config_info_t *)buf;
 
+	/* A zero rate would divide by zero in the HMD IMU timestamp math. */
+	if (imu_config->imu_hz == 0)
+		return -1;
+
 	return 0;
 }
 
