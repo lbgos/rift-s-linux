@@ -241,10 +241,26 @@ fn journal_size() -> Option<u64> {
     total
 }
 fn driver_version() -> Option<String> {
-    cached_version(&DRIVER_VERSION, driver_version_uncached)
-}
-fn driver_version_uncached() -> Option<String> {
+    // Key on vrserver PID: a runtime restart must never serve the previous
+    // driver's hash for up to 60 s. Failures are cached per PID so a missing
+    // mapping does not re-spawn sha256sum every snapshot poll.
     let pid = server_pid()?;
+    if let Ok(guard) = DRIVER_VERSION.lock() {
+        if guard.0.as_ref() == Some(&pid) {
+            if let Some((value, when)) = &guard.1 {
+                if when.elapsed() < Duration::from_secs(60) {
+                    return value.clone();
+                }
+            }
+        }
+    }
+    let value = driver_version_uncached(&pid);
+    if let Ok(mut guard) = DRIVER_VERSION.lock() {
+        *guard = (Some(pid), Some((value.clone(), std::time::Instant::now())));
+    }
+    value
+}
+fn driver_version_uncached(pid: &str) -> Option<String> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
     let path = maps
         .lines()
@@ -263,27 +279,12 @@ fn driver_version_uncached() -> Option<String> {
 // that rate spawns processes and re-reads megabytes of logs, so version
 // strings are cached for a minute. A poisoned cache must never break status
 // reporting; recompute instead.
-fn cached_version(
-    cache: &Mutex<(Option<String>, Option<std::time::Instant>)>,
-    compute: impl FnOnce() -> Option<String>,
-) -> Option<String> {
-    if let Ok(guard) = cache.lock() {
-        if let (Some(value), Some(when)) = (&guard.0, &guard.1) {
-            if when.elapsed() < Duration::from_secs(60) {
-                return Some(value.clone());
-            }
-        }
-    }
-    let value = compute();
-    if let Ok(mut guard) = cache.lock() {
-        *guard = (value.clone(), Some(std::time::Instant::now()));
-    }
-    value
-}
-static DRIVER_VERSION: Mutex<(Option<String>, Option<std::time::Instant>)> =
+static DRIVER_VERSION: Mutex<(Option<String>, Option<(Option<String>, std::time::Instant)>)> =
     Mutex::new((None, None));
-static STEAM_VERSION: Mutex<(Option<PathBuf>, Option<(Option<String>, std::time::Instant)>)> =
-    Mutex::new((None, None));
+static STEAM_VERSION: Mutex<(
+    Option<PathBuf>,
+    Option<(Option<String>, std::time::Instant)>,
+)> = Mutex::new((None, None));
 fn steam_version(steam: &Path) -> Option<String> {
     let key = steam.to_path_buf();
     if let Ok(guard) = STEAM_VERSION.lock() {
@@ -779,11 +780,9 @@ mod tests {
     }
     #[test]
     fn lighthouse_version_prefers_latest_startup() {
-        let log = "Tue Oct 13 lighthouse: version 2.9.3\nnoise\nWed Oct 14 lighthouse: version 2.10.1 \n";
-        assert_eq!(
-            lighthouse_version(log),
-            Some("2.10.1".to_owned())
-        );
+        let log =
+            "Tue Oct 13 lighthouse: version 2.9.3\nnoise\nWed Oct 14 lighthouse: version 2.10.1 \n";
+        assert_eq!(lighthouse_version(log), Some("2.10.1".to_owned()));
         assert_eq!(lighthouse_version("no versions here\n"), None);
         assert_eq!(lighthouse_version(""), None);
     }
