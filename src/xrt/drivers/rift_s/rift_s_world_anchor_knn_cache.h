@@ -2,20 +2,9 @@
 // SPDX-License-Identifier: BSL-1.0
 #pragma once
 
-// Bounded EXACT memoization for the room relocalization knnMatch path.
-//
-// Soundness: knnMatch over a fixed, trained matcher is a deterministic function of the
-// 32-byte query descriptor bytes plus the unchanged index state (same train data, same
-// LSH/BF params, same k=4, no masks). Each cached entry stores the full k-neighbor list in
-// returned order, including empty lists, and re-stamps queryIdx to the caller's row on hits.
-// Batched misses go through one knnMatch call so per-row tie ordering and distances are
-// identical to an uncached call; hits only skip redundant searches.
-//
-// Invalidation: the owner clears both bank caches on every index rebuild and whenever the
-// map is replaced/cleared/reloaded (anything that sets index_dirty). Entries are keyed by
-// exact 32-byte equality, never by hash approximation.
-//
-// Bounds: 8192 entries per bank, FIFO eviction. Each entry holds at most 4 neighbors.
+// Exact descriptor queries against one unchanged index. Cached lists retain
+// neighbor order; queryIdx is restored for the current row. The owner clears
+// the cache before replacing the index. FIFO bounds each bank to 8192 entries.
 
 #include <opencv2/features2d.hpp>
 
