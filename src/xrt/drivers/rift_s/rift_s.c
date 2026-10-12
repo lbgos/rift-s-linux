@@ -787,12 +787,12 @@ close_transport(struct rift_s_system *sys)
 	// Do not hold dev_mutex across a frameserver join or a SLAM restart.
 	rift_s_camera_stop(sys->cam);
 	xrt_frame_context_destroy_nodes(&sys->camera_context);
+	rift_s_radio_state_clear(&sys->radio_state);
 	os_mutex_lock(&sys->dev_mutex);
 	if (sys->cam != NULL) {
 		rift_s_camera_destroy(sys->cam);
 		sys->cam = NULL;
 	}
-	rift_s_radio_state_clear(&sys->radio_state);
 	for (unsigned i = 0; i < MAX_TRACKED_DEVICES; i++) {
 		if (sys->controllers[i] != NULL)
 			rift_s_controller_device_lost(sys->controllers[i]);
@@ -905,9 +905,11 @@ rift_s_run_thread(void *ptr)
 		if (!rift_s_system_is_online(sys)) {
 			if (!open_transport(sys))
 				os_nanosleep(U_TIME_1S_IN_NS);
-		} else if (handle_packets(sys) == RIFT_S_USB_LOST || !rift_s_camera_is_running(sys->cam)) {
-			close_transport(sys);
 		} else {
+			enum rift_s_usb_result result = handle_packets(sys);
+			if (result == RIFT_S_USB_LOST || !rift_s_camera_is_running(sys->cam)) {
+				close_transport(sys);
+			} else if (result == RIFT_S_USB_OK) {
 			update_haptics(sys);
 			rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
 
@@ -916,6 +918,7 @@ rift_s_run_thread(void *ptr)
 				rift_s_camera_update(sys->cam, sys->handles[HMD_HID]);
 			}
 			os_mutex_unlock(&sys->dev_mutex);
+			}
 		}
 
 		os_thread_helper_lock(&sys->oth);
