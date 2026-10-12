@@ -35,8 +35,8 @@ struct RiftSOrbHamming : cvflann::HammingLUT
 #endif
 
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
-// OpenCV builds the same randomized tables. Direct bucket pointers remove hash
-// lookups during the 211 probes per table without changing candidate order.
+// OpenCV builds the same randomized tables. A presence bitset and direct ranges
+// avoid hash lookups and bucket pointer chasing during each table's 211 probes.
 class RiftSOrbIndex
 {
 public:
@@ -52,10 +52,18 @@ public:
 		for (auto &table : tables) {
 			table.hash = cvflann::lsh::LshTable<unsigned char>(32, 20);
 			table.hash.add(dataset);
-			table.buckets.resize(size_t(1) << 20, nullptr);
+			table.buckets.resize(size_t(1) << 20);
+			table.present.resize(size_t(1) << 14);
+			table.candidates.reserve(train.rows);
 			for (int row = 0; row < train.rows; ++row) {
 				auto key = table.hash.getKey(train.ptr<unsigned char>(row));
-				table.buckets[key] = table.hash.getBucketFromKey(key);
+				auto bit = uint64_t(1) << (key & 63);
+				if (table.present[key >> 6] & bit)
+					continue;
+				table.present[key >> 6] |= bit;
+				const auto &bucket = *table.hash.getBucketFromKey(key);
+				table.buckets[key] = {uint32_t(table.candidates.size()), uint32_t(bucket.size())};
+				table.candidates.insert(table.candidates.end(), bucket.begin(), bucket.end());
 			}
 		}
 	}
@@ -75,13 +83,16 @@ public:
 			for (const auto &table : tables) {
 				auto key = table.hash.getKey(query);
 				for (auto mask : masks) {
-					const auto *bucket = table.buckets[key ^ mask];
-					if (bucket == nullptr)
+					auto probe = key ^ mask;
+					if (!(table.present[probe >> 6] & (uint64_t(1) << (probe & 63))))
 						continue;
-					for (auto candidate : *bucket)
+					const auto range = table.buckets[probe];
+					for (uint32_t at = range.start; at < range.start + range.count; ++at) {
+						auto candidate = table.candidates[at];
 						result.addPoint(
 						    distance(query, train.ptr<unsigned char>(candidate), 32),
 						    candidate);
+					}
 				}
 			}
 			std::fill(indices.begin(), indices.end(), -1);
@@ -98,7 +109,13 @@ private:
 	struct Table
 	{
 		cvflann::lsh::LshTable<unsigned char> hash;
-		std::vector<const cvflann::lsh::Bucket *> buckets;
+		struct Range
+		{
+			uint32_t start = 0, count = 0;
+		};
+		std::vector<Range> buckets;
+		std::vector<uint64_t> present;
+		std::vector<uint32_t> candidates;
 	};
 	cv::Mat train;
 	std::array<Table, 12> tables;
