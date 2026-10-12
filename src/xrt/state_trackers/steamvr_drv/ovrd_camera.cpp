@@ -96,6 +96,8 @@ MonadoCamera::NotifyButton(enum xrt_input_name name, bool pressed)
 	MonadoCamera *self = s_instance.load();
 	if (!self || !self->shm || (name != XRT_INPUT_TOUCH_SYSTEM_CLICK && name != XRT_INPUT_TOUCH_MENU_CLICK))
 		return;
+	// Called from every controller's RunFrame; edge state is shared.
+	std::lock_guard<std::mutex> lock(self->mutex);
 	// RunFrame reports the held state repeatedly. Toggle only on rising edges.
 	bool &previous = name == XRT_INPUT_TOUCH_SYSTEM_CLICK ? self->system_pressed : self->menu_pressed;
 	if (pressed == previous)
