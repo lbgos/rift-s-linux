@@ -22,6 +22,8 @@
 #include <assert.h>
 
 #include "util/u_misc.h"
+#include "util/u_time.h"
+#include "os/os_time.h"
 #include "rift_s.h"
 #include "rift_s_radio.h"
 #include "rift_s_protocol.h"
@@ -39,7 +41,49 @@ struct rift_s_radio_command
 	/* Completion callback */
 	rift_s_radio_completion_fn cb;
 	void *cb_data;
+
+	/* Monotonic deadline from first update (0 = not yet armed). Bounds total
+	 * queued send + response wait so a missing reply cannot wedge the queue. */
+	timepoint_ns deadline_ns;
+	/* Earliest monotonic time for the next HID op after a transport error.
+	 * Valid busy polls retry every update; only short/error backs off. */
+	timepoint_ns next_attempt_ns;
+	/* Bounded retry counters. Send retries reuse the same payload. */
+	int send_attempts;
+	int poll_errors;
+	/* Set once os_hid_set_feature succeeds for this head. */
+	bool sent;
 };
+
+static time_duration_ns
+radio_retry_delay_ns(int failures)
+{
+	/* 5, 10, 20, 40, 80, 100, 100, ... ms. failures is 1-based. */
+	time_duration_ns delay =
+	    (time_duration_ns)RIFT_S_RADIO_RETRY_BASE_MS * U_TIME_1MS_IN_NS << (failures - 1);
+	time_duration_ns cap = (time_duration_ns)RIFT_S_RADIO_RETRY_MAX_MS * U_TIME_1MS_IN_NS;
+	if (delay > cap || delay <= 0)
+		delay = cap;
+	return delay;
+}
+
+/* Pop the head, report failure once, and leave the next command unsent.
+ * Keeps last_radio_seqnum so a late duplicate with the old seq stays ignored. */
+static void
+radio_fail_head(rift_s_radio_state *state, rift_s_radio_command *cmd)
+{
+	state->pending_commands = cmd->next;
+	if (state->pending_commands == NULL)
+		state->pending_commands_tail = NULL;
+	else
+		state->pending_commands->prev = NULL;
+
+	state->command_result_pending = false;
+
+	if (cmd->cb)
+		cmd->cb(false, NULL, 0, cmd->cb_data);
+	free(cmd);
+}
 
 static int
 get_radio_response_report(struct os_hid_device *hid, rift_s_hmd_radio_response_t *radio_response)
@@ -54,29 +98,72 @@ get_radio_response_report(struct os_hid_device *hid, rift_s_hmd_radio_response_t
 }
 
 void
-rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
+rift_s_radio_update_at(rift_s_radio_state *state, struct os_hid_device *hid, int64_t now_ns)
 {
+	if (state == NULL)
+		return;
+
 	bool read_another = false;
+	timepoint_ns timeout_ns = (timepoint_ns)RIFT_S_RADIO_CMD_TIMEOUT_MS * U_TIME_1MS_IN_NS;
 
 	do {
-		/* Send a radio command if there is none active and some pending */
-		if (state->command_result_pending == false && state->pending_commands) {
-			rift_s_radio_command *cmd = state->pending_commands;
+		read_another = false;
+
+		rift_s_radio_command *cmd = state->pending_commands;
+		if (cmd == NULL) {
+			state->command_result_pending = false;
+			break; /* Nothing to do right now */
+		}
+
+		/* Arm the monotonic deadline on first update so queue + send + response
+		 * are bounded even if HID never succeeds. */
+		if (cmd->deadline_ns == 0)
+			cmd->deadline_ns = now_ns + timeout_ns;
+
+		if (now_ns >= cmd->deadline_ns) {
+			RIFT_S_WARN("Controller radio command timed out, failing head");
+			radio_fail_head(state, cmd);
+			read_another = state->pending_commands != NULL;
+			continue;
+		}
+
+		if (hid == NULL)
+			break; /* No device: keep queued until the deadline above expires. */
+
+		/* Send a radio command if there is none active and some pending.
+		 * Retries resend the same unsent head with identical bytes, so a late
+		 * reply stays a reply to the same payload. Once sent, the head is only
+		 * polled, never resent: the response carries no command echo (only
+		 * seqnum/busy), so failing to the next command can misattribute a late
+		 * reply and callers must validate payload status/length. */
+		if (state->command_result_pending == false) {
+			if (now_ns < cmd->next_attempt_ns)
+				break; /* Send backoff after a transport error. */
+
 			rift_s_hmd_radio_command_t *pkt = &cmd->read_command;
 
+			/* Any negative HID return is a transport failure; errno semantics unchanged. */
 			if (os_hid_set_feature(hid, (uint8_t *)pkt, sizeof(*pkt)) < 0) {
-				/* Leave the command queued so a transient failure retries
-				 * next update instead of wedging the queue on a reply
-				 * that will never arrive. */
-				RIFT_S_DEBUG("Failed to send controller radio command");
+				cmd->send_attempts++;
+				if (cmd->send_attempts >= RIFT_S_RADIO_MAX_SEND_ATTEMPTS) {
+					RIFT_S_WARN("Controller radio send failed %d times, failing head",
+					            cmd->send_attempts);
+					radio_fail_head(state, cmd);
+					break; /* One HID write per tick; next head runs next update. */
+				}
+				cmd->next_attempt_ns = now_ns + radio_retry_delay_ns(cmd->send_attempts);
+				RIFT_S_DEBUG("Failed to send controller radio command, retrying");
 				break;
 			}
 			// rift_s_hexdump_buffer ("ControllerFWSend", (unsigned char *)(pkt), sizeof(*pkt));
+			cmd->sent = true;
+			cmd->poll_errors = 0;
+			cmd->next_attempt_ns = 0;
 			state->command_result_pending = true;
 		}
 
-		if (!state->command_result_pending)
-			break; /* Nothing to do right now */
+		if (now_ns < cmd->next_attempt_ns)
+			break; /* Poll backoff after a short/error read. */
 
 		/* There's a command result pending, poll the radio response until it's complete */
 		rift_s_hmd_radio_response_t radio_response;
@@ -88,13 +175,28 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 		/* The busy flag and seqnum occupy the first three bytes; a shorter
 		 * read carries no usable fields (busy_flag would be uninitialised stack). */
 		if (ret < 4) {
-			break; /* HID read failed or short - bail */
+			/* Transport error or short read: back off so a persistent STALL
+			 * (EPIPE) cannot spin the queue, and bound consecutive failures
+			 * so the head still fails instead of wedging. */
+			cmd->poll_errors++;
+			if (cmd->poll_errors >= RIFT_S_RADIO_MAX_POLL_ERRORS) {
+				RIFT_S_WARN("Controller radio response failed %d times, failing head",
+				            cmd->poll_errors);
+				radio_fail_head(state, cmd);
+				break; /* Next head runs next update. */
+			}
+			cmd->next_attempt_ns = now_ns + radio_retry_delay_ns(cmd->poll_errors);
+			RIFT_S_DEBUG("Failed to read controller radio response, retrying");
+			break;
 		}
+
+		cmd->poll_errors = 0;
+		cmd->next_attempt_ns = 0;
 
 		if (radio_response.busy_flag != 0x00 || radio_response.seqnum == state->last_radio_seqnum) {
 			if (radio_response.busy_flag)
 				state->last_radio_seqnum = radio_response.seqnum;
-			return;
+			break; /* Valid busy/not-ready: retry next update with no backoff. */
 		}
 		state->last_radio_seqnum = radio_response.seqnum;
 
@@ -105,8 +207,7 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 		// rift_s_hexdump_buffer ("ControllerFWReply", (unsigned char *)(&radio_response), ret);
 
 		assert(state->pending_commands != NULL);
-
-		rift_s_radio_command *cmd = state->pending_commands;
+		assert(cmd == state->pending_commands);
 
 		/* Pop the head off the cmds queue, because it's complete now */
 		state->pending_commands = cmd->next;
@@ -122,6 +223,12 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 		read_another = true;
 
 	} while (read_another);
+}
+
+void
+rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
+{
+	rift_s_radio_update_at(state, hid, os_monotonic_get_ns());
 }
 
 void
