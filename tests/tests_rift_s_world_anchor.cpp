@@ -852,6 +852,20 @@ TEST_CASE("Room recovery solves yaw and translation with exposure gravity")
 	CHECK(std::abs(alignment.x) < 1e-5);
 	CHECK(std::abs(alignment.z) < 1e-5);
 	CHECK(std::abs(std::abs(alignment.y) - yaw.y) < 0.002);
+	SECTION("One unusable landmark does not veto the remaining rig support") {
+		o[0][1].world_point.x = std::numeric_limits<float>::quiet_NaN();
+		REQUIRE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+		CHECK(cv::norm(translation(result.world_from_imu) - translation(expected)) < 0.01);
+	}
+	SECTION("Missing observation storage and oversized counts fail closed") {
+		obs[0] = nullptr;
+		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+		CHECK_FALSE(rift_s_world_anchor_solve_rig(&c, obs, counts, 2, &result));
+		obs[0] = o[0].data();
+		counts[0] = 4097;
+		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
+		CHECK_FALSE(rift_s_world_anchor_solve_rig(&c, obs, counts, 2, &result));
+	}
 	SECTION("Invalid gravity cannot produce a localized pose") {
 		tilt.x = std::numeric_limits<float>::quiet_NaN();
 		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
