@@ -1197,25 +1197,21 @@ joint_p3p_candidate(void *userdata, const struct xrt_pose *camera_pose, const st
 		if (ctx->state->reliable_heading && 2 * acosf(dot) > ctx->config->maximum_prior_rotation_rad)
 			return;
 	}
-	struct constellation_constrained_result *result = malloc(sizeof(*result));
-	if (result == NULL) {
-		return;
-	}
+	struct constellation_constrained_result result;
 	if (!constellation_constrained_verify_pose(ctx->model, ctx->views, ctx->num_views, &world_pose,
-	                                          CONSTELLATION_CONSTRAINED_P3P, ctx->config, result)) {
-		free(result);
+	                                          CONSTELLATION_CONSTRAINED_P3P, ctx->config, &result)) {
 		return;
 	}
 	/* Do not fill the bounded competitor set with the same P3P root generated
 	 * from many quadruples. Matching the same support/identities and pose is evidence once. */
 	for (unsigned c = 0; c < ctx->count; c++) {
 		struct constellation_constrained_result *old = &ctx->candidates[c];
-		if (old->num_assignments != result->num_assignments) {
+		if (old->num_assignments != result.num_assignments) {
 			continue;
 		}
 		bool identical = true;
-		for (unsigned a = 0; a < result->num_assignments && identical; a++) {
-			struct constellation_constrained_assignment *claim = &result->assignments[a];
+		for (unsigned a = 0; a < result.num_assignments && identical; a++) {
+			struct constellation_constrained_assignment *claim = &result.assignments[a];
 			bool found = false;
 			for (unsigned b = 0; b < old->num_assignments; b++) {
 				struct constellation_constrained_assignment *other = &old->assignments[b];
@@ -1227,22 +1223,20 @@ joint_p3p_candidate(void *userdata, const struct xrt_pose *camera_pose, const st
 			}
 			identical = found;
 		}
-		struct xrt_vec3 delta = m_vec3_sub(old->P_world_model.position, result->P_world_model.position);
-		float dot = fabsf(math_quat_dot(&old->P_world_model.orientation, &result->P_world_model.orientation));
+		struct xrt_vec3 delta = m_vec3_sub(old->P_world_model.position, result.P_world_model.position);
+		float dot = fabsf(math_quat_dot(&old->P_world_model.orientation, &result.P_world_model.orientation));
 		if (identical && m_vec3_len(delta) < 0.0001f && dot > cosf(0.001f / 2)) {
-			if (result->cost_m < old->cost_m) {
-				*old = *result;
+			if (result.cost_m < old->cost_m) {
+				*old = result;
 			}
-			free(result);
 			return;
 		}
 	}
 	if (ctx->count == MAX_P3P_JOINT_CANDIDATES) {
 		ctx->overflow = true;
 	} else {
-		ctx->candidates[ctx->count++] = *result;
+		ctx->candidates[ctx->count++] = result;
 	}
-	free(result);
 }
 
 /* Unconstrained P3P fallback within a bounded budget. Every geometry-verified per-view root is
