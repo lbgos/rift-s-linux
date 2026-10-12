@@ -28,7 +28,10 @@ TEST_CASE("Native room descriptor distance preserves BF and LSH neighbor identit
 			reference->add(std::vector<cv::Mat>{train});
 			reference->train();
 			cvflann::seed_random(seed);
-			RiftSWorldMatcher native(train);
+			cv::Mat padded_train(train.rows, 35, CV_8U);
+			cv::Mat sliced_train = padded_train.colRange(1, 33);
+			train.copyTo(sliced_train);
+			RiftSWorldMatcher native(sliced_train);
 			// Non-contiguous rows must retain query indices and neighbor order.
 			cv::Mat padded(queries.rows, 35, CV_8U);
 			cv::Mat sliced = padded.colRange(1, 33);

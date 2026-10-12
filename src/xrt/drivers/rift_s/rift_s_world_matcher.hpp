@@ -40,7 +40,7 @@ struct RiftSOrbHamming : cvflann::HammingLUT
 class RiftSOrbIndex
 {
 public:
-	explicit RiftSOrbIndex(const cv::Mat &descriptors) : train(descriptors)
+	explicit RiftSOrbIndex(const cv::Mat &descriptors) : train(descriptors.clone())
 	{
 		cvflann::Matrix<unsigned char> dataset(train.data, train.rows, train.cols, train.step);
 		masks.push_back(0);
@@ -54,7 +54,7 @@ public:
 			table.hash.add(dataset);
 			table.buckets.resize(size_t(1) << 20);
 			table.present.resize(size_t(1) << 14);
-			table.candidates.reserve(train.rows);
+			table.candidates.reserve(size_t(train.rows) * 2);
 			for (int row = 0; row < train.rows; ++row) {
 				auto key = table.hash.getKey(train.ptr<unsigned char>(row));
 				auto bit = uint64_t(1) << (key & 63);
@@ -62,7 +62,8 @@ public:
 					continue;
 				table.present[key >> 6] |= bit;
 				const auto &bucket = *table.hash.getBucketFromKey(key);
-				table.buckets[key] = {uint32_t(table.candidates.size()), uint32_t(bucket.size())};
+				table.buckets[key] = uint32_t(table.candidates.size());
+				table.candidates.push_back(uint32_t(bucket.size()));
 				table.candidates.insert(table.candidates.end(), bucket.begin(), bucket.end());
 			}
 		}
@@ -86,8 +87,9 @@ public:
 					auto probe = key ^ mask;
 					if (!(table.present[probe >> 6] & (uint64_t(1) << (probe & 63))))
 						continue;
-					const auto range = table.buckets[probe];
-					for (uint32_t at = range.start; at < range.start + range.count; ++at) {
+					auto start = table.buckets[probe];
+					auto end = start + 1 + table.candidates[start];
+					for (uint32_t at = start + 1; at < end; ++at) {
 						auto candidate = table.candidates[at];
 						result.addPoint(
 						    distance(query, train.ptr<unsigned char>(candidate), 32),
@@ -109,11 +111,7 @@ private:
 	struct Table
 	{
 		cvflann::lsh::LshTable<unsigned char> hash;
-		struct Range
-		{
-			uint32_t start = 0, count = 0;
-		};
-		std::vector<Range> buckets;
+		std::vector<uint32_t> buckets;
 		std::vector<uint64_t> present;
 		std::vector<uint32_t> candidates;
 	};
@@ -150,7 +148,12 @@ public:
 	{
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 		if (fast) {
-			fast->knnMatch(descriptors, nearest, count);
+			// OpenCV hashes rows through size_t loads. A packed aligned copy
+			// keeps sliced or unaligned callers out of that loader.
+			cv::Mat queries = descriptors;
+			if (!queries.isContinuous() || reinterpret_cast<uintptr_t>(queries.data) % alignof(size_t))
+				queries = descriptors.clone();
+			fast->knnMatch(queries, nearest, count);
 			return;
 		}
 #endif
