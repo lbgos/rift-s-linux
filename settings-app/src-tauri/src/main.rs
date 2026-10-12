@@ -241,6 +241,9 @@ fn journal_size() -> Option<u64> {
     total
 }
 fn driver_version() -> Option<String> {
+    cached_version(&DRIVER_VERSION, driver_version_uncached)
+}
+fn driver_version_uncached() -> Option<String> {
     let pid = server_pid()?;
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
     let path = maps
@@ -256,7 +259,56 @@ fn driver_version() -> Option<String> {
     // Short hash of the driver SteamVR actually loaded.
     Some(sum.chars().take(12).collect())
 }
+// Snapshot polls every second. Probing the runtime and hashing the driver at
+// that rate spawns processes and re-reads megabytes of logs, so version
+// strings are cached for a minute. A poisoned cache must never break status
+// reporting; recompute instead.
+fn cached_version(
+    cache: &Mutex<(Option<String>, Option<std::time::Instant>)>,
+    compute: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if let Ok(guard) = cache.lock() {
+        if let (Some(value), Some(when)) = (&guard.0, &guard.1) {
+            if when.elapsed() < Duration::from_secs(60) {
+                return Some(value.clone());
+            }
+        }
+    }
+    let value = compute();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (value.clone(), Some(std::time::Instant::now()));
+    }
+    value
+}
+static DRIVER_VERSION: Mutex<(Option<String>, Option<std::time::Instant>)> =
+    Mutex::new((None, None));
+static STEAM_VERSION: Mutex<(Option<PathBuf>, Option<(Option<String>, std::time::Instant)>)> =
+    Mutex::new((None, None));
 fn steam_version(steam: &Path) -> Option<String> {
+    let key = steam.to_path_buf();
+    if let Ok(guard) = STEAM_VERSION.lock() {
+        if guard.0.as_ref() == Some(&key) {
+            if let Some((value, when)) = &guard.1 {
+                if when.elapsed() < Duration::from_secs(60) {
+                    return value.clone();
+                }
+            }
+        }
+    }
+    let value = steam_version_uncached(steam);
+    if let Ok(mut guard) = STEAM_VERSION.lock() {
+        *guard = (Some(key), Some((value.clone(), std::time::Instant::now())));
+    }
+    value
+}
+fn lighthouse_version(text: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        line.split("lighthouse: version ")
+            .nth(1)
+            .map(|v| v.trim().to_owned())
+    })
+}
+fn steam_version_uncached(steam: &Path) -> Option<String> {
     let output = Command::new(steam.join("steamapps/common/SteamVR/bin/linux64/vrcmd"))
         .arg("--version")
         .output()
@@ -276,11 +328,7 @@ fn steam_version(steam: &Path) -> Option<String> {
     // Version is reported by the installed lighthouse driver at every startup.
     let bytes = fs::read(steam.join("logs/vrserver.txt")).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    text.lines().rev().find_map(|line| {
-        line.split("lighthouse: version ")
-            .nth(1)
-            .map(|v| v.trim().to_owned())
-    })
+    lighthouse_version(&text)
 }
 fn physical_proximity() -> Option<bool> {
     let out = Command::new("journalctl")
@@ -709,6 +757,16 @@ mod tests {
         assert_eq!(dimensions(&rect, &reversed), Some(d));
         assert!(dimensions(&[], &walls).is_none());
         assert!(dimensions(&[[f64::NAN; 3]; 4], &[]).is_none());
+    }
+    #[test]
+    fn lighthouse_version_prefers_latest_startup() {
+        let log = "Tue Oct 13 lighthouse: version 2.9.3\nnoise\nWed Oct 14 lighthouse: version 2.10.1 \n";
+        assert_eq!(
+            lighthouse_version(log),
+            Some("2.10.1".to_owned())
+        );
+        assert_eq!(lighthouse_version("no versions here\n"), None);
+        assert_eq!(lighthouse_version(""), None);
     }
     #[test]
     fn logs_report_actual_bytes_and_missing_files() {
