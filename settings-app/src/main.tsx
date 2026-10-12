@@ -78,6 +78,43 @@ function KeyValues({ rows }: { rows: [string, string][] }) {
   return <div className="t kv">{rows.map(([label, value]) => <div key={label}><span>{label}</span><span>{value}</span></div>)}</div>;
 }
 
+function HeadsetPreview({ enabled }: { enabled: boolean }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      if (!document.hidden) {
+        try {
+          const frame = await invoke<ArrayBuffer>('preview');
+          if (cancelled) return;
+          const header = new DataView(frame);
+          const width = header.getUint32(0, true), height = header.getUint32(4, true);
+          if (!width || !height || width > 512 || height > 512 || frame.byteLength !== 8 + width * height * 4)
+            throw new Error('Headset preview frame invalid');
+          const target = canvas.current;
+          if (target) {
+            target.width = width; target.height = height;
+            target.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(frame, 8), width, height), 0, 0);
+          }
+          setError('');
+        } catch (failure) {
+          if (cancelled) return;
+          const target = canvas.current;
+          target?.getContext('2d')?.clearRect(0, 0, target.width, target.height);
+          setError(String(failure));
+        }
+      }
+      if (!cancelled) timer = setTimeout(poll, 200);
+    }
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [enabled]);
+  return <div className="well preview"><canvas ref={canvas} aria-label="Live headset view"/>{error && <output role="status">{error}</output>}</div>;
+}
+
 function App() {
   const [view, setView] = useState<View>(currentView);
   const [data, setData] = useState<Snapshot>({});
@@ -133,6 +170,7 @@ function App() {
             ['Dropped frames', data.dropped == null ? missing : String(data.dropped)],
           ]}/>
           {feedback.mirror && fb('mirror')}
+          <HeadsetPreview enabled={view === 'headset'}/>
         </div>
         <div className="col">
           <div className="sec"><h2>Devices</h2><div className="t dev">

@@ -20,6 +20,13 @@ use tungstenite::{client::IntoClientRequest, Message};
 unsafe extern "C" {
     fn rifts_snapshot(path: *const std::ffi::c_char) -> *const std::ffi::c_char;
     fn rifts_action(action: i32) -> i32;
+    fn rifts_preview(
+        path: *const std::ffi::c_char,
+        data: *mut *const u8,
+        bytes: *mut usize,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> *const std::ffi::c_char;
     fn rifts_shutdown();
 }
 static VR: Mutex<()> = Mutex::new(());
@@ -58,7 +65,8 @@ unsafe fn libc_uid() -> u32 {
     }
     unsafe { getuid() }
 }
-fn vr_snapshot() -> Result<Value, String> {
+// The caller holds VR for the complete native call and any borrowed pixel copy.
+fn vr_path() -> Result<Option<CString>, String> {
     let pid = server_pid()
         .and_then(|p| p.parse::<u32>().ok())
         .unwrap_or(0);
@@ -67,12 +75,60 @@ fn vr_snapshot() -> Result<Value, String> {
     }
     if pid == 0 {
         unsafe { rifts_shutdown() };
-        return Ok(json!({}));
+        return Ok(None);
     }
     let path = steam_home()?.join("steamapps/common/SteamVR/bin/linux64/libopenvr_api.so");
-    let path = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+    CString::new(path.to_string_lossy().as_bytes())
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+fn vr_snapshot() -> Result<Value, String> {
+    let Some(path) = vr_path()? else {
+        return Ok(json!({}));
+    };
     let value = unsafe { CStr::from_ptr(rifts_snapshot(path.as_ptr())) };
     serde_json::from_slice(value.to_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn preview() -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _lock = VR.lock().map_err(|e| e.to_string())?;
+        let path = vr_path()?.ok_or("SteamVR is not running")?;
+        let mut data = std::ptr::null();
+        let mut bytes = 0;
+        let (mut width, mut height) = (0, 0);
+        let error = unsafe {
+            rifts_preview(
+                path.as_ptr(),
+                &mut data,
+                &mut bytes,
+                &mut width,
+                &mut height,
+            )
+        };
+        if !error.is_null() {
+            return Err(unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned());
+        }
+        if data.is_null()
+            || width == 0
+            || height == 0
+            || width > 512
+            || height > 512
+            || bytes != width as usize * height as usize * 4
+        {
+            return Err("Headset preview frame invalid".into());
+        }
+        let mut frame = Vec::with_capacity(8 + bytes);
+        frame.extend_from_slice(&width.to_le_bytes());
+        frame.extend_from_slice(&height.to_le_bytes());
+        frame.extend_from_slice(unsafe { std::slice::from_raw_parts(data, bytes) });
+        Ok(tauri::ipc::Response::new(frame))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn bench_mode() -> bool {
@@ -560,7 +616,9 @@ fn main() {
                     if let Some(settings) = webview.inner().settings() {
                         // This control panel needs no accelerated WebKit layers. Avoid GBM
                         // buffer failures on NVIDIA.
-                        settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::Never);
+                        settings.set_hardware_acceleration_policy(
+                            webkit2gtk::HardwareAccelerationPolicy::Never,
+                        );
                     }
                 })?;
             }
@@ -568,6 +626,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            preview,
             set_ipd,
             vr_action,
             export_logs,

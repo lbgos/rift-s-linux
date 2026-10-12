@@ -1,4 +1,5 @@
 #include "openvr.h"
+#include "overlay_preview.hpp"
 #include <dlfcn.h>
 #include <chrono>
 #include <cmath>
@@ -15,6 +16,7 @@ vr::IVRSettings *settings = nullptr;
 vr::IVRChaperone *chaperone = nullptr;
 vr::IVRChaperoneSetup *setup = nullptr;
 vr::IVROverlay *overlay = nullptr;
+vr::IVROverlayView *overlay_view = nullptr;
 vr::IVRTrackedCamera *camera = nullptr;
 vr::IVRExtendedDisplay *display = nullptr;
 vr::TrackedCameraHandle_t camera_handle = 0;
@@ -44,6 +46,7 @@ bool connect(const char *path) {
     chaperone = get<vr::IVRChaperone>(generic, vr::IVRChaperone_Version);
     setup = get<vr::IVRChaperoneSetup>(generic, vr::IVRChaperoneSetup_Version);
     overlay = get<vr::IVROverlay>(generic, vr::IVROverlay_Version);
+    overlay_view = get<vr::IVROverlayView>(generic, vr::IVROverlayView_Version);
     camera = get<vr::IVRTrackedCamera>(generic, vr::IVRTrackedCamera_Version);
     display = get<vr::IVRExtendedDisplay>(generic, vr::IVRExtendedDisplay_Version);
     return vr_system;
@@ -169,8 +172,15 @@ extern "C" int rifts_action(int action) {
     return 0;
 }
 extern "C" void rifts_shutdown() {
+    rifts_overlay_shutdown();
+    overlay_view = nullptr;
     if(camera_handle && camera) camera->ReleaseVideoStreamingService(camera_handle);
     camera_handle=0; camera=nullptr; previous_frame=false;
     if(library) { auto shutdown=reinterpret_cast<void (*)()>(dlsym(library,"VR_ShutdownInternal")); if(shutdown) shutdown(); dlclose(library); }
     library=nullptr; vr_system=nullptr; compositor=nullptr; settings=nullptr; chaperone=nullptr; setup=nullptr; overlay=nullptr; display=nullptr;
+}
+
+extern "C" const char *rifts_preview(const char *path, const uint8_t **data, size_t *bytes, uint32_t *width, uint32_t *height) {
+    if (!connect(path)) return "SteamVR is not running";
+    return rifts_overlay_frame(vr_system, compositor, overlay, overlay_view, data, bytes, width, height);
 }

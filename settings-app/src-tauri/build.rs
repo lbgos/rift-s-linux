@@ -2,9 +2,13 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .file("native/bridge.cpp")
+        .file("native/overlay_preview.cpp")
         .flag("-std=c++17")
         .compile("openvr_bridge");
     println!("cargo:rustc-link-lib=dl");
+    println!("cargo:rustc-link-lib=vulkan");
+    println!("cargo:rerun-if-changed=native/overlay_preview.cpp");
+    println!("cargo:rerun-if-changed=native/overlay_preview.hpp");
     println!("cargo:rerun-if-changed=native/bridge.cpp");
     tauri_build::build();
 }
