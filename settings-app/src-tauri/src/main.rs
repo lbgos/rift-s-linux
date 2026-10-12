@@ -592,6 +592,11 @@ fn main() {
             .map(|a| a[1].as_str())
     };
     let window = &mut context.config_mut().app.windows[0];
+    #[cfg(target_os = "linux")]
+    {
+        // Configure WebKit before GTK maps a surface and starts rendering.
+        window.visible = false;
+    }
     if let Some(view @ ("headset" | "room" | "settings")) = arg("--view") {
         window.url = tauri::WebviewUrl::App(format!("index.html#{view}").into());
     }
@@ -607,11 +612,33 @@ fn main() {
     {
         window.height = height;
     }
+    #[cfg(target_os = "linux")]
+    let page = {
+        let requested = context.config().app.windows[0].url.clone();
+        let base = if tauri::is_dev() {
+            context.config().build.dev_url.clone()
+        } else {
+            Some(tauri::Url::parse("tauri://localhost/").expect("Invalid app URL"))
+        };
+        let page = match requested {
+            tauri::WebviewUrl::App(path) => base
+                .expect("Missing frontend URL")
+                .join(&path.to_string_lossy())
+                .expect("Invalid frontend path"),
+            tauri::WebviewUrl::External(url) => url,
+            _ => panic!("Unsupported frontend URL"),
+        };
+        // A page can start its WebProcess during window construction, before setup.
+        context.config_mut().app.windows[0].url =
+            tauri::WebviewUrl::External(tauri::Url::parse("about:blank").unwrap());
+        page
+    };
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
-                window.with_webview(|webview| {
+                let ready = window.clone();
+                window.with_webview(move |webview| {
                     use webkit2gtk::{SettingsExt, WebViewExt};
                     if let Some(settings) = webview.inner().settings() {
                         // This control panel needs no accelerated WebKit layers. Avoid GBM
@@ -619,7 +646,10 @@ fn main() {
                         settings.set_hardware_acceleration_policy(
                             webkit2gtk::HardwareAccelerationPolicy::Never,
                         );
+                        settings.set_enable_webgl(false);
                     }
+                    webview.inner().load_uri(page.as_str());
+                    let _ = ready.show();
                 })?;
             }
             Ok(())
