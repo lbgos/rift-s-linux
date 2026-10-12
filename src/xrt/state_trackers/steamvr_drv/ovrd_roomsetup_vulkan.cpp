@@ -469,6 +469,27 @@ vkBindImageMemory(VkDevice handle, VkImage image, VkDeviceMemory memory, VkDevic
 }
 
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL
+vkBindImageMemory2(VkDevice handle, uint32_t count, const VkBindImageMemoryInfo *infos)
+{
+	auto device = device_for(handle);
+	auto result = next<PFN_vkBindImageMemory2>(device, "vkBindImageMemory2")(handle, count, infos);
+	if (result == VK_SUCCESS) {
+		std::lock_guard guard(mutex);
+		auto layout = next<PFN_vkGetImageSubresourceLayout>(device, "vkGetImageSubresourceLayout");
+		for (uint32_t i = 0; i < count; ++i) {
+			auto found = device->images.find(infos[i].image);
+			if (found == device->images.end() || !found->second.linear) continue;
+			auto &state = found->second;
+			state.memory = infos[i].memory;
+			state.offset = infos[i].memoryOffset;
+			VkImageSubresource subresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+			layout(handle, infos[i].image, &subresource, &state.layout);
+		}
+	}
+	return result;
+}
+
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL
 vkMapMemory(VkDevice handle, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
             VkMemoryMapFlags flags, void **out)
 {
@@ -1043,7 +1064,7 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice
 	if (device->enabled) {
 		if (strcmp(name, "vkWaitForPresentKHR") == 0 && device->gdpa(handle, name))
 			return reinterpret_cast<PFN_vkVoidFunction>(vkWaitForPresentKHR);
-		MATCH(vkCreateImage); MATCH(vkDestroyImage); MATCH(vkBindImageMemory); MATCH(vkMapMemory); MATCH(vkCmdCopyImage);
+		MATCH(vkCreateImage); MATCH(vkDestroyImage); MATCH(vkBindImageMemory); MATCH(vkBindImageMemory2); MATCH(vkMapMemory); MATCH(vkCmdCopyImage);
 		MATCH(vkQueueSubmit); MATCH(vkEndCommandBuffer); MATCH(vkCmdCopyBufferToImage);
 		MATCH(vkCreateBuffer); MATCH(vkDestroyBuffer); MATCH(vkBindBufferMemory); MATCH(vkBindBufferMemory2);
 		MATCH(vkCmdUpdateBuffer); MATCH(vkCmdCopyBuffer); MATCH(vkCmdFillBuffer); MATCH(vkUnmapMemory); MATCH(vkFreeMemory);
@@ -1068,7 +1089,7 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInst
 			return reinterpret_cast<PFN_vkVoidFunction>(vkWaitForPresentKHR);
 		if (strcmp(name, "vkGetDisplayModePropertiesKHR") == 0 && instance.gipa(handle, name))
 			return reinterpret_cast<PFN_vkVoidFunction>(vkGetDisplayModePropertiesKHR);
-		MATCH(vkCreateImage); MATCH(vkDestroyImage); MATCH(vkBindImageMemory); MATCH(vkMapMemory); MATCH(vkCmdCopyImage);
+		MATCH(vkCreateImage); MATCH(vkDestroyImage); MATCH(vkBindImageMemory); MATCH(vkBindImageMemory2); MATCH(vkMapMemory); MATCH(vkCmdCopyImage);
 		MATCH(vkQueueSubmit); MATCH(vkEndCommandBuffer); MATCH(vkCmdCopyBufferToImage);
 		MATCH(vkCreateBuffer); MATCH(vkDestroyBuffer); MATCH(vkBindBufferMemory); MATCH(vkBindBufferMemory2);
 		MATCH(vkCmdUpdateBuffer); MATCH(vkCmdCopyBuffer); MATCH(vkCmdFillBuffer); MATCH(vkUnmapMemory); MATCH(vkFreeMemory);
