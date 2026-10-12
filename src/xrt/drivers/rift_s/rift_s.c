@@ -54,6 +54,9 @@
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
+static void
+stop_haptics(struct rift_s_system *sys);
+
 static void *
 rift_s_run_thread(void *ptr);
 static void
@@ -303,6 +306,7 @@ rift_s_system_free(struct rift_s_system *sys)
 	xrt_frame_context_destroy_nodes(&sys->xfctx);
 
 	rift_s_radio_state_clear(&sys->radio_state);
+	stop_haptics(sys);
 
 	if (sys->handles[HMD_HID]) {
 		if (rift_s_hmd_enable(sys->handles[HMD_HID], false) < 0) {
@@ -459,6 +463,7 @@ haptic_complete(bool success, uint8_t *response, int size, void *data)
 	h->in_flight = false;
 	if (ok) {
 		h->applied_amplitude = h->sent_amplitude;
+		h->applied_device_id = h->sent_device_id;
 		h->refresh_ns = os_monotonic_get_ns() + 500 * U_TIME_1MS_IN_NS;
 	} else {
 		h->retry_ns = os_monotonic_get_ns() + 20 * U_TIME_1MS_IN_NS;
@@ -483,7 +488,8 @@ update_haptics(struct rift_s_system *sys)
 		os_mutex_lock(&sys->dev_mutex);
 		uint8_t desired = now < h->end_ns ? h->amplitude : 0;
 		bool needed = !h->in_flight && now >= h->retry_ns &&
-		              (desired != h->applied_amplitude || (desired != 0 && now >= h->refresh_ns));
+		              (desired != h->applied_amplitude ||
+		               (desired != 0 && (h->device_id != h->applied_device_id || now >= h->refresh_ns)));
 		uint64_t id = h->device_id;
 		os_mutex_unlock(&sys->dev_mutex);
 		if (!needed)
@@ -501,10 +507,18 @@ update_haptics(struct rift_s_system *sys)
 			}
 		}
 		os_mutex_lock(&sys->dev_mutex);
-		h->device_id = id;
+		// The request may have changed while the pairing list was read.
+		if (h->device_id == 0)
+			h->device_id = id;
+		id = h->device_id;
 		desired = os_monotonic_get_ns() < h->end_ns ? h->amplitude : 0;
+		// Stop the previous physical controller before driving a replacement.
+		if (h->applied_amplitude != 0 && h->applied_device_id != id) {
+			id = h->applied_device_id;
+			desired = 0;
+		}
 		if (id == 0 || (desired == 0 && h->applied_amplitude == 0)) {
-			h->retry_ns = now + 100 * U_TIME_1MS_IN_NS;
+			h->retry_ns = os_monotonic_get_ns() + 100 * U_TIME_1MS_IN_NS;
 			os_mutex_unlock(&sys->dev_mutex);
 			continue;
 		}
@@ -518,6 +532,42 @@ update_haptics(struct rift_s_system *sys)
 		                          haptic_complete, h);
 		return; // One feature transaction this tick; the other hand runs next.
 	}
+}
+
+// The raw register latches amplitude. After joining the USB worker, send zero
+// to every identity that could have received a request, including an unacked one.
+// This is best effort on USB/radio failure and never waits indefinitely at exit.
+static void
+stop_haptics(struct rift_s_system *sys)
+{
+	if (sys->handles[HMD_HID] == NULL)
+		return;
+	uint8_t packet[5];
+	rift_s_encode_haptic_raw(0, packet);
+	uint64_t ids[MAX_TRACKED_DEVICES * 3] = {0};
+	unsigned count = 0;
+	for (unsigned hand = 0; hand < MAX_TRACKED_DEVICES; ++hand) {
+		struct rift_s_haptic_radio *h = &sys->haptics[hand];
+		uint64_t candidates[] = {h->device_id, h->sent_device_id, h->applied_device_id};
+		for (unsigned i = 0; i < 3; ++i) {
+			bool duplicate = candidates[i] == 0;
+			for (unsigned j = 0; j < count; ++j)
+				duplicate |= ids[j] == candidates[i];
+			if (!duplicate)
+				ids[count++] = candidates[i];
+		}
+	}
+	for (unsigned i = 0; i < count; ++i)
+		rift_s_radio_queue_report(&sys->radio_state, RIFT_S_RADIO_REPORT_WRITE, ids[i], packet, sizeof(packet),
+		                          NULL, NULL);
+	timepoint_ns deadline = os_monotonic_get_ns() + 100 * U_TIME_1MS_IN_NS;
+	while (sys->radio_state.pending_commands != NULL && os_monotonic_get_ns() < deadline) {
+		rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
+		os_nanosleep(U_TIME_1MS_IN_NS / 2);
+	}
+	if (sys->radio_state.pending_commands != NULL)
+		RIFT_S_WARN("Controller haptics stop did not complete before shutdown");
+	rift_s_radio_state_clear(&sys->radio_state);
 }
 
 /* Packet reading / handling */

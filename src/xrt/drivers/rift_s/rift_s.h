@@ -81,7 +81,7 @@ struct rift_s_haptic_radio
 {
 	struct rift_s_system *sys;
 	unsigned hand;
-	uint64_t device_id, sent_device_id;
+	uint64_t device_id, sent_device_id, applied_device_id;
 	timepoint_ns end_ns, refresh_ns, retry_ns;
 	uint8_t amplitude, sent_amplitude, applied_amplitude;
 	bool in_flight;
