@@ -1,0 +1,23 @@
+// Copyright 2026, lbgos
+// SPDX-License-Identifier: BSL-1.0
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D source;
+layout(binding = 1, std430) writeonly buffer Pixels { uint rgba[]; };
+layout(push_constant) uniform Frame {
+    vec4 bounds;
+    uvec2 size;
+    uint srgb;
+} frame;
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(pixel, frame.size))) return;
+    vec2 position = (vec2(pixel) + 0.5) / vec2(frame.size);
+    vec2 uv = mix(frame.bounds.xy, frame.bounds.zw, position);
+    vec3 rgb = textureLod(source, uv, 0.0).rgb;
+    // A sampled sRGB image is decoded by Vulkan. Canvas expects sRGB bytes.
+    if (frame.srgb != 0)
+        rgb = mix(12.92 * rgb, 1.055 * pow(max(rgb, vec3(0)), vec3(1.0 / 2.4)) - 0.055,
+                  greaterThan(rgb, vec3(0.0031308)));
+    rgba[pixel.y * frame.size.x + pixel.x] = packUnorm4x8(vec4(rgb, 1));
+}

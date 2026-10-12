@@ -4,7 +4,10 @@
 #include "openvr.h"
 #include <cstddef>
 #include <cstdint>
-// Calls are serialized with the background OpenVR client. Success returns owned RGBA bytes.
-const char *rifts_overlay_frame(vr::IVRSystem *, vr::IVRCompositor *, vr::IVROverlay *, vr::IVROverlayView *,
-                               const uint8_t **, size_t *, uint32_t *, uint32_t *);
+// Calls are serialized with the background OpenVR client. Success returns owned
+// RGBA bytes.
+const char *rifts_overlay_frame(vr::IVRSystem *, vr::IVRCompositor *,
+                                vr::IVROverlay *, vr::IVROverlayView *,
+                                const uint8_t **, size_t *, uint32_t *,
+                                uint32_t *);
 void rifts_overlay_shutdown();
