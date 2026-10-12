@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cassert>
 #include <array>
+#include <atomic>
 #include <thread>
 #include <mutex>
 #include <cstdio>
@@ -1323,7 +1324,7 @@ private:
 
 	std::string m_input_profile;
 
-	bool m_poseUpdating = true;
+	std::atomic<bool> m_poseUpdating{true};
 	std::thread *m_poseUpdateThread = NULL;
 };
 
@@ -1419,7 +1420,7 @@ private:
 	struct xrt_fov m_fovs[2];
 	struct xrt_pose m_view_pose[2];
 
-	bool m_poseUpdating = true;
+	std::atomic<bool> m_poseUpdating{true};
 	std::thread *m_poseUpdateThread = NULL;
 	virtual void PoseUpdateThreadFunction();
 
@@ -2117,7 +2118,7 @@ private:
 };
 
 CWatchdogDriver_Monado g_watchdogDriverMonado;
-bool g_bExiting = false;
+std::atomic<bool> g_bExiting{false};
 
 void
 WatchdogThreadFunction()
