@@ -234,7 +234,7 @@ rift_s_config_parse_camera_config(struct rift_s_camera_calibration *cam_config, 
 	const char *projection_model = cJSON_GetStringValue(item);
 	if (projection_model == NULL || strcmp(projection_model, "PinholeSymmetric") != 0) {
 		RIFT_S_ERROR("Missing/invalid camera projection model type %s in camera %d",
-		             item != NULL ? cJSON_GetStringValue(item) : "NULL", camera_id);
+		             projection_model != NULL ? projection_model : "NULL", camera_id);
 		return false;
 	}
 
@@ -257,7 +257,7 @@ rift_s_config_parse_camera_config(struct rift_s_camera_calibration *cam_config, 
 	const char *distortion_model = cJSON_GetStringValue(item);
 	if (distortion_model == NULL || strcmp(distortion_model, "Fisheye62") != 0) {
 		RIFT_S_ERROR("Missing/invalid camera distortion model type %s in camera %d",
-		             item != NULL ? cJSON_GetStringValue(item) : "NULL", camera_id);
+		             distortion_model != NULL ? distortion_model : "NULL", camera_id);
 		return false;
 	}
 

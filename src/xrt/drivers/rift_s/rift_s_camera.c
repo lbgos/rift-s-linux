@@ -211,6 +211,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 
 	if (!xrt_fs_enumerate_modes(finder.xfs, &modes, &count) || modes == NULL) {
 		RIFT_S_ERROR("Couldn't enumerate camera input formats.");
+		free(modes);
 		goto cleanup;
 	}
 

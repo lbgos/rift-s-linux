@@ -148,6 +148,7 @@ rift_s_radio_state_clear(rift_s_radio_state *state)
 	}
 
 	state->pending_commands = state->pending_commands_tail = NULL;
+	state->command_result_pending = false;
 }
 
 void
@@ -171,17 +172,24 @@ rift_s_radio_queue_report(rift_s_radio_state *state,
                           void *cb_data)
 {
 	rift_s_radio_command *cmd = U_TYPED_CALLOC(rift_s_radio_command);
-	if (cmd == NULL)
+	if (cmd == NULL) {
+		if (cb)
+			cb(false, NULL, 0, cb_data);
 		return;
+	}
 
-	if (cmd_bytes_len < 0 || cmd_bytes_len > (int)sizeof(cmd->read_command.cmd_bytes)) {
+	if (cmd_bytes_len < 0 || cmd_bytes_len > (int)sizeof(cmd->read_command.cmd_bytes) ||
+	    (cmd_bytes_len > 0 && cmd_bytes == NULL)) {
 		free(cmd);
+		if (cb)
+			cb(false, NULL, 0, cb_data);
 		return;
 	}
 
 	cmd->read_command.cmd = report_id;
 	cmd->read_command.device_id = device_id;
-	memcpy(cmd->read_command.cmd_bytes, cmd_bytes, cmd_bytes_len);
+	if (cmd_bytes_len > 0)
+		memcpy(cmd->read_command.cmd_bytes, cmd_bytes, cmd_bytes_len);
 	cmd->cb = cb;
 	cmd->cb_data = cb_data;
 
@@ -305,7 +313,7 @@ read_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, rift
 
 fail:
 	if (json_read->cb)
-		json_read->cb(success, json_read->data, json_read->data_len, json_read->cb_data);
+		json_read->cb(false, json_read->data, json_read->data_len, json_read->cb_data);
 	free(json_read);
 	return;
 }
@@ -318,6 +326,11 @@ rift_s_radio_get_json_block(rift_s_radio_state *state,
 {
 	/* Configuration JSON block reading */
 	rift_s_radio_json_read_state *json_read = U_TYPED_CALLOC(rift_s_radio_json_read_state);
+	if (json_read == NULL) {
+		if (cb)
+			cb(false, NULL, 0, cb_data);
+		return;
+	}
 	/* cmd  = 0x2b  reply_buffer_len = 0x20  timeout(?) = 0x3e8 (=1000) offset = 0u32   len = 0x20 */
 	const uint8_t read_cmd[] = {0x2b, 0x20, 0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00};
 
