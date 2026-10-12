@@ -937,10 +937,10 @@ rift_s_world_anchor_solve_rig_gravity(const rift_s_world_anchor_config *config,
 		result->matches[1] = counts[1];
 		for (unsigned eye = 0; eye < count; ++eye) {
 			result->matches[eye] = counts[eye];
+			if (counts[eye] > 4096 || (counts[eye] && !obs[eye]))
+				return false;
 			if (!obs[eye] || counts[eye] < MIN_POINTS)
 				continue;
-			if (counts[eye] > 4096)
-				return false;
 			usable[eye] = [&]() -> bool {
 				const auto &c = config->camera[eye];
 				std::vector<cv::Point3d> world;
