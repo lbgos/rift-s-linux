@@ -1097,7 +1097,9 @@ public:
 		} else if (m_xdev->name == XRT_DEVICE_SIMPLE_CONTROLLER) {
 			grip_name = XRT_INPUT_SIMPLE_GRIP_POSE;
 		} else {
-			ovrd_log("Unhandled device name %u\n", m_xdev->name);
+			if (!m_unknownDeviceLogged.exchange(true)) {
+				ovrd_log("Unhandled device name %u\n", m_xdev->name);
+			}
 			grip_name = XRT_INPUT_GENERIC_HEAD_POSE; // ???
 		}
 
@@ -1325,6 +1327,7 @@ private:
 
 	std::string m_input_profile;
 
+	std::atomic<bool> m_unknownDeviceLogged{false};
 	std::atomic<bool> m_poseUpdating{true};
 	std::thread *m_poseUpdateThread = NULL;
 };
