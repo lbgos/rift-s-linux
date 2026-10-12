@@ -381,25 +381,29 @@ fn set_ipd(mm: f64) -> Result<(), String> {
 
 #[tauri::command]
 fn vr_action(action: &str) -> Result<String, String> {
-    let _lock = VR.lock().map_err(|e| e.to_string())?;
-    vr_snapshot()?;
-    if bench_mode() && matches!(action, "room" | "recenter") {
-        return Err("Unavailable while SteamVR is in bench mode".into());
-    }
-    let (id, response) = match action {
-        "mirror" => (1, "SteamVR VR View opened."),
-        "room" => (2, "Room setup is running in the headset."),
-        "recenter" => (3, "Recentered."),
-        _ => return Err("Unknown action".into()),
-    };
-    if unsafe { rifts_action(id) } == 0 {
-        Err("SteamVR interface unavailable".into())
-    } else {
-        if action == "room" {
-            start_native_room_setup()?;
+    let (start_room, response) = {
+        let _lock = VR.lock().map_err(|e| e.to_string())?;
+        vr_snapshot()?;
+        if bench_mode() && matches!(action, "room" | "recenter") {
+            return Err("Unavailable while SteamVR is in bench mode".into());
         }
-        Ok(response.into())
+        let (id, response) = match action {
+            "mirror" => (1, "SteamVR VR View opened."),
+            "room" => (2, "Room setup is running in the headset."),
+            "recenter" => (3, "Recentered."),
+            _ => return Err("Unknown action".into()),
+        };
+        if unsafe { rifts_action(id) } == 0 {
+            return Err("SteamVR interface unavailable".into());
+        }
+        (action == "room", String::from(response))
+    };
+    // The dashboard websocket exchange blocks for seconds. Never hold the
+    // OpenVR client lock across it; snapshot and preview poll every second.
+    if start_room {
+        start_native_room_setup()?;
     }
+    Ok(response)
 }
 
 fn start_native_room_setup() -> Result<(), String> {
