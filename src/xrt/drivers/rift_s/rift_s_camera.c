@@ -151,6 +151,8 @@ rift_s_camera_create(struct xrt_prober *xp,
 	/* Re-probe devices. The v4l2 camera device should have appeared by now */
 	int retry_count = 5;
 	do {
+		// Display/camera enumeration can outlast the firmware's three-second lease.
+		rift_s_send_keepalive(hid);
 		xrt_result_t xret = xrt_prober_probe(xp);
 
 		if (xret != XRT_SUCCESS) {

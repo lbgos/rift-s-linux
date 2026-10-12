@@ -246,6 +246,7 @@ rift_s_system_create(struct xrt_prober *xp,
 		RIFT_S_ERROR("Failed to enable Rift S");
 		goto cleanup;
 	}
+	rift_s_send_keepalive(sys->handles[HMD_HID]);
 
 	// Bench sessions must power the panel even if no new proximity packet arrives.
 	if (debug_get_bool_option_steamvr_bench()) {
@@ -860,6 +861,7 @@ open_transport(struct rift_s_system *sys)
 	    rift_s_hmd_enable(handles[HMD_HID], true) < 0 ||
 	    rift_s_set_screen_enable(handles[HMD_HID], true) < 0)
 		goto fail;
+	rift_s_send_keepalive(handles[HMD_HID]);
 	// Power the panel during enumeration even off-head. Proximity packets restore
 	// ordinary standby after the DP link and camera input have returned.
 	os_nanosleep(2ULL * U_TIME_1S_IN_NS);
