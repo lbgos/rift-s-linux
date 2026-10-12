@@ -12,7 +12,10 @@
 #include "util/u_logging.h"
 #include "util/u_sink.h"
 #include "xrt/xrt_frameserver.h"
+#include "xrt/xrt_compiler.h"
 #include <linux/videodev2.h>
+#include <pthread.h>
+#include <stddef.h>
 
 
 /*
@@ -102,7 +105,23 @@ struct v4l2_fs
 	} quirks;
 
 	struct v4l2_frame frames[NUM_V4L2_BUFFERS];
-	uint32_t used_frames;
+	size_t mmap_len[NUM_V4L2_BUFFERS]; //!< munmap size per buffer (mmap path only).
+
+	/*!
+	 * Outstanding frames handed to consumers.
+	 * Incremented (atomic) before each push, decremented in frame destroy
+	 * which may run on any consumer thread.
+	 */
+	xrt_atomic_s32_t used_frames;
+
+	/*!
+	 * Storage lifetime: 1 for fs ownership plus 1 per outstanding frame.
+	 * The drop to zero (in destroy or in the last frame destroy) exclusively
+	 * owns final teardown (munmap/free/close/descriptors/vid). This keeps
+	 * mmap'd pixels and the v4l2_fs itself alive while ROI clones held by
+	 * downstream consumers (e.g. SLAM) still reference our frames.
+	 */
+	xrt_atomic_s32_t storage_ref;
 
 	struct
 	{
@@ -114,6 +133,13 @@ struct v4l2_fs
 
 	pthread_t stream_thread;
 
+	//! Guards @ref thread_joinable and @ref destroy_requested.
+	pthread_mutex_t life_lock;
+	//! A stream thread exists and must be joined (independent of running).
+	bool thread_joinable;
+	//! node.destroy ran; final teardown deferred to last frame destroy.
+	bool destroy_requested;
+
 	struct v4l2_source_descriptor *descriptors;
 	uint32_t num_descriptors;
 	uint32_t selected;
@@ -121,7 +147,9 @@ struct v4l2_fs
 	struct xrt_fs_capture_parameters capture_params;
 
 	bool is_configured;
-	bool is_running;
+	//! Nonzero while the streaming loop should run. Atomic: set from stream
+	//! start/stop, read from the streaming thread and frame destroy.
+	xrt_atomic_s32_t is_running;
 	enum u_logging_level log_level;
 };
 

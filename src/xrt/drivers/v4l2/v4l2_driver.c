@@ -22,8 +22,10 @@
 #include "v4l2_driver.h"
 
 #include <stdio.h>
+#include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <poll.h>
 
 #include <linux/videodev2.h>
 #include <linux/v4l2-common.h>
@@ -59,11 +61,31 @@
 DEBUG_GET_ONCE_LOG_OPTION(v4l2_log, "V4L2_LOG", U_LOGGING_WARN)
 DEBUG_GET_ONCE_NUM_OPTION(v4l2_exposure_absolute, "V4L2_EXPOSURE_ABSOLUTE", 10)
 
+// Upper bound for a stream_stop to wake a thread waiting for a frame.
+#define V4L2_DQBUF_POLL_TIMEOUT_MS 500
+
 /*!
  * Streaming thread entrypoint
  */
 static void *
 v4l2_fs_mainloop(void *ptr);
+
+/*!
+ * Final teardown: unmap/free buffers, release kernel buffers, close fd, free
+ * descriptors and the fs itself. Runs exactly once, when the storage
+ * reference drops to zero: either in destroy (no outstanding frames) or in
+ * the last outstanding frame's destroy. Exclusive access, thread joined.
+ */
+static void
+v4l2_fs_free_storage(struct v4l2_fs *vid);
+
+/*!
+ * Release any mapped/allocated streaming buffers plus kernel buffers.
+ * Only safe with no outstanding frames (storage single-owner or thread
+ * joined and used_frames observed zero).
+ */
+static void
+v4l2_release_buffers(struct v4l2_fs *vid);
 
 static void
 dump_controls(struct v4l2_fs *vid);
@@ -94,15 +116,29 @@ v4l2_free_frame(struct xrt_frame *xf)
 	struct v4l2_frame *vf = (struct v4l2_frame *)xf;
 	struct v4l2_fs *vid = (struct v4l2_fs *)xf->owner;
 
-	vid->used_frames--;
+	// Our outstanding frame keeps storage alive through the decisions below;
+	// the storage reference is dropped at the end.
+	pthread_mutex_lock(&vid->life_lock);
+	bool dead = vid->destroy_requested;
+	pthread_mutex_unlock(&vid->life_lock);
+	bool running = xrt_atomic_s32_load(&vid->is_running) != 0;
 
-	if (!vid->is_running) {
-		return;
+	if (!dead && running && vid->fd >= 0) {
+		if (ioctl(vid->fd, VIDIOC_QBUF, &vf->v_buf) < 0) {
+			V4L2_ERROR(vid, "error: Requeue failed!");
+			xrt_atomic_s32_store(&vid->is_running, 0);
+		}
+	} else {
+		// Stopped or destroyed: drop the buffer instead of requeueing.
+		// munmap/free/close stay deferred until all frames are back.
 	}
 
-	if (ioctl(vid->fd, VIDIOC_QBUF, &vf->v_buf) < 0) {
-		V4L2_ERROR(vid, "error: Requeue failed!");
-		vid->is_running = false;
+	xrt_atomic_s32_dec_return(&vid->used_frames);
+
+	// Last drop completes a deferred destroy. Exactly-once: the atomic drop
+	// to zero elects a single teardown owner.
+	if (xrt_atomic_s32_dec_return(&vid->storage_ref) == 0) {
+		v4l2_fs_free_storage(vid);
 	}
 }
 
@@ -289,6 +325,11 @@ v4l2_try_mmap(struct v4l2_fs *vid, struct v4l2_requestbuffers *v_bufrequest)
 static int
 v4l2_setup_mmap_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l2_buffer *v_buf)
 {
+	if (v_buf->index >= NUM_V4L2_BUFFERS) {
+		V4L2_ERROR(vid, "error: Buffer index out of range!");
+		return -1;
+	}
+
 	void *ptr = mmap(0, v_buf->length, PROT_READ, MAP_SHARED, vid->fd, v_buf->m.offset);
 	if (ptr == MAP_FAILED) {
 		V4L2_ERROR(vid, "error: Call to mmap failed!");
@@ -296,6 +337,7 @@ v4l2_setup_mmap_buffer(struct v4l2_fs *vid, struct v4l2_frame *vf, struct v4l2_b
 	}
 
 	vf->mem = ptr;
+	vid->mmap_len[v_buf->index] = v_buf->length;
 
 	return 0;
 }
@@ -574,22 +616,35 @@ v4l2_fs_stream_start(struct xrt_fs *xfs,
 		V4L2_ERROR(vid, "error Invalid descriptor_index (%i >= %i)", descriptor_index, vid->num_descriptors);
 		return false;
 	}
-	vid->selected = descriptor_index;
 
+	// Serialize against concurrent start/stop; sets joinable before publish.
+	pthread_mutex_lock(&vid->life_lock);
+	if (vid->thread_joinable || xrt_atomic_s32_load(&vid->is_running) != 0) {
+		pthread_mutex_unlock(&vid->life_lock);
+		V4L2_ERROR(vid, "error: Stream already running!");
+		return false;
+	}
+	if (xrt_atomic_s32_load(&vid->used_frames) != 0) {
+		V4L2_DEBUG(vid, "warning: Starting with outstanding frames!");
+	}
+	vid->selected = descriptor_index;
 	vid->sink = xs;
-	vid->is_running = true;
 	vid->capture_type = capture_type;
 
 	if (!v4l2_fs_setup_format(vid)) {
-		vid->is_running = false;
+		pthread_mutex_unlock(&vid->life_lock);
 		return false;
 	}
 
+	xrt_atomic_s32_store(&vid->is_running, 1);
 	if (pthread_create(&vid->stream_thread, NULL, v4l2_fs_mainloop, xfs)) {
-		vid->is_running = false;
+		xrt_atomic_s32_store(&vid->is_running, 0);
+		pthread_mutex_unlock(&vid->life_lock);
 		V4L2_ERROR(vid, "error: Could not create thread");
 		return false;
 	}
+	vid->thread_joinable = true;
+	pthread_mutex_unlock(&vid->life_lock);
 
 	V4L2_TRACE(vid, "info: Started!");
 
@@ -602,12 +657,30 @@ v4l2_fs_stream_stop(struct xrt_fs *xfs)
 {
 	struct v4l2_fs *vid = v4l2_fs(xfs);
 
-	if (!vid->is_running) {
-		return true;
+	// Ask the loop to exit first so in-flight frame returns stop requeueing.
+	xrt_atomic_s32_store(&vid->is_running, 0);
+
+	// Wake a thread blocked in poll/DQBUF on a live camera. Best effort:
+	// fails on dead devices (ENODEV) where the thread already exits.
+	// fd stays open until final storage teardown, so this is always safe here.
+	if (vid->fd >= 0) {
+		int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		(void)ioctl(vid->fd, VIDIOC_STREAMOFF, &type);
 	}
 
-	vid->is_running = false;
-	pthread_join(vid->stream_thread, NULL);
+	// Join whenever a thread exists, even if it already flagged itself
+	// stopped (e.g. ENODEV in the loop): otherwise it stays unjoined and
+	// leaks, and the next start would overwrite the pthread_t.
+	pthread_mutex_lock(&vid->life_lock);
+	bool joinable = vid->thread_joinable;
+	if (joinable) {
+		vid->thread_joinable = false; // claim the join
+	}
+	pthread_mutex_unlock(&vid->life_lock);
+
+	if (joinable) {
+		pthread_join(vid->stream_thread, NULL);
+	}
 
 	return true;
 }
@@ -617,26 +690,22 @@ v4l2_fs_is_running(struct xrt_fs *xfs)
 {
 	struct v4l2_fs *vid = v4l2_fs(xfs);
 
-	return vid->is_running;
+	return xrt_atomic_s32_load(&vid->is_running) != 0;
 }
 
 static void
-v4l2_fs_destroy(struct v4l2_fs *vid)
+v4l2_release_buffers(struct v4l2_fs *vid)
 {
-	// Make sure that the stream is stopped.
-	v4l2_fs_stream_stop(&vid->base);
-
-	// Stop the variable tracking.
-	u_var_remove_root(vid);
-	u_sink_debug_destroy(&vid->usd);
-
-	if (vid->descriptors != NULL) {
-		free(vid->descriptors);
-		vid->descriptors = NULL;
-		vid->num_descriptors = 0;
+	if (vid->capture.mmap) {
+		vid->capture.mmap = false;
+		for (uint32_t i = 0; i < NUM_V4L2_BUFFERS; i++) {
+			if (vid->frames[i].mem != NULL && vid->mmap_len[i] != 0) {
+				munmap(vid->frames[i].mem, vid->mmap_len[i]);
+				vid->frames[i].mem = NULL;
+				vid->mmap_len[i] = 0;
+			}
+		}
 	}
-
-	vid->capture.mmap = false;
 	if (vid->capture.userptr) {
 		vid->capture.userptr = false;
 		for (uint32_t i = 0; i < NUM_V4L2_BUFFERS; i++) {
@@ -645,12 +714,59 @@ v4l2_fs_destroy(struct v4l2_fs *vid)
 		}
 	}
 
+	// Release kernel-side buffers, best effort (device may be gone).
+	if (vid->fd >= 0) {
+		struct v4l2_requestbuffers req = {0};
+		req.count = 0;
+		req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		req.memory = V4L2_MEMORY_MMAP;
+		(void)ioctl(vid->fd, VIDIOC_REQBUFS, &req);
+		req.memory = V4L2_MEMORY_USERPTR;
+		(void)ioctl(vid->fd, VIDIOC_REQBUFS, &req);
+	}
+}
+
+static void
+v4l2_fs_free_storage(struct v4l2_fs *vid)
+{
+	// Exclusive access: storage reference hit zero, thread already joined.
+	v4l2_release_buffers(vid);
+
+	if (vid->descriptors != NULL) {
+		free(vid->descriptors);
+		vid->descriptors = NULL;
+		vid->num_descriptors = 0;
+	}
+
 	if (vid->fd >= 0) {
 		close(vid->fd);
 		vid->fd = -1;
 	}
 
+	pthread_mutex_destroy(&vid->life_lock);
 	free(vid);
+}
+
+static void
+v4l2_fs_destroy(struct v4l2_fs *vid)
+{
+	// Make sure that the stream is stopped (joins the thread if joinable).
+	v4l2_fs_stream_stop(&vid->base);
+
+	// Stop the variable tracking.
+	u_var_remove_root(vid);
+	u_sink_debug_destroy(&vid->usd);
+
+	pthread_mutex_lock(&vid->life_lock);
+	vid->destroy_requested = true;
+	pthread_mutex_unlock(&vid->life_lock);
+
+	// Drop fs ownership. If frames are still outstanding (e.g. ROI clones
+	// held by SLAM after a camera-only context teardown), teardown is
+	// deferred: the last returning frame runs v4l2_fs_free_storage.
+	if (xrt_atomic_s32_dec_return(&vid->storage_ref) == 0) {
+		v4l2_fs_free_storage(vid);
+	}
 }
 
 static void
@@ -675,6 +791,8 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
                const char *serial)
 {
 	struct v4l2_fs *vid = U_TYPED_CALLOC(struct v4l2_fs);
+	pthread_mutex_init(&vid->life_lock, NULL);
+	xrt_atomic_s32_store(&vid->storage_ref, 1); // fs ownership
 	vid->base.enumerate_modes = v4l2_fs_enumerate_modes;
 	vid->base.configure_capture = v4l2_fs_configure_capture;
 	vid->base.stream_start = v4l2_fs_stream_start;
@@ -692,6 +810,7 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 	int fd = open(path, O_RDWR, 0);
 	if (fd < 0) {
 		V4L2_ERROR(vid, "Cannot open '%s'", path);
+		pthread_mutex_destroy(&vid->life_lock);
 		free(vid);
 		return NULL;
 	}
@@ -735,7 +854,20 @@ v4l2_fs_mainloop(void *ptr)
 
 	if (vid->fd == -1) {
 		V4L2_ERROR(vid, "error: Device not opened!");
+		xrt_atomic_s32_store(&vid->is_running, 0);
 		return NULL;
+	}
+
+	// A previous run leaves mappings behind until final teardown; release
+	// them here so a stop/start cycle does not leak. Only safe with no
+	// outstanding frames (their pixels point into the old mappings).
+	if (vid->capture.mmap || vid->capture.userptr) {
+		if (xrt_atomic_s32_load(&vid->used_frames) != 0) {
+			V4L2_ERROR(vid, "error: Restart with outstanding frames, aborting!");
+			xrt_atomic_s32_store(&vid->is_running, 0);
+			return NULL;
+		}
+		v4l2_release_buffers(vid);
 	}
 
 	struct v4l2_source_descriptor *desc = &vid->descriptors[vid->selected];
@@ -750,7 +882,8 @@ v4l2_fs_mainloop(void *ptr)
 
 	if (v4l2_try_userptr(vid, &v_bufrequest) != 0 && v4l2_try_mmap(vid, &v_bufrequest) != 0) {
 		V4L2_ERROR(vid, "error: Driver does not support mmap or userptr.");
-		return NULL;
+		xrt_atomic_s32_store(&vid->is_running, 0);
+		return NULL; // Mappings (if any) freed at final teardown.
 	}
 
 
@@ -767,13 +900,16 @@ v4l2_fs_mainloop(void *ptr)
 
 		if (ioctl(vid->fd, VIDIOC_QUERYBUF, v_buf) < 0) {
 			V4L2_ERROR(vid, "error: Could not query buffers!");
+			xrt_atomic_s32_store(&vid->is_running, 0);
 			return NULL;
 		}
 
 		if (vid->capture.userptr && v4l2_setup_userptr_buffer(vid, vf, v_buf) != 0) {
+			xrt_atomic_s32_store(&vid->is_running, 0);
 			return NULL;
 		}
 		if (vid->capture.mmap && v4l2_setup_mmap_buffer(vid, vf, v_buf) != 0) {
+			xrt_atomic_s32_store(&vid->is_running, 0);
 			return NULL;
 		}
 
@@ -783,6 +919,7 @@ v4l2_fs_mainloop(void *ptr)
 		// Queue this buffer
 		if (ioctl(vid->fd, VIDIOC_QBUF, v_buf) < 0) {
 			V4L2_ERROR(vid, "error: queueing buffer failed!");
+			xrt_atomic_s32_store(&vid->is_running, 0);
 			return NULL;
 		}
 	}
@@ -790,6 +927,7 @@ v4l2_fs_mainloop(void *ptr)
 	int start_capture = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (ioctl(vid->fd, VIDIOC_STREAMON, &start_capture) < 0) {
 		V4L2_ERROR(vid, "error: Could not start capture!");
+		xrt_atomic_s32_store(&vid->is_running, 0);
 		return NULL;
 	}
 
@@ -802,14 +940,41 @@ v4l2_fs_mainloop(void *ptr)
 	v_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	v_buf.memory = v_bufrequest.memory;
 
-	while (vid->is_running) {
-		if (vid->used_frames == NUM_V4L2_BUFFERS) {
+	while (xrt_atomic_s32_load(&vid->is_running) != 0) {
+		if (xrt_atomic_s32_load(&vid->used_frames) >= NUM_V4L2_BUFFERS) {
 			V4L2_ERROR(vid, "No frames left");
 		}
 
+		// Bounded wait: stream_stop wakes this via STREAMOFF, the timeout
+		// covers a missed wakeup so stop never hangs on a live camera.
+		struct pollfd pfd = {0};
+		pfd.fd = vid->fd;
+		pfd.events = POLLIN;
+		int pr = poll(&pfd, 1, V4L2_DQBUF_POLL_TIMEOUT_MS);
+		if (xrt_atomic_s32_load(&vid->is_running) == 0) {
+			break;
+		}
+		if (pr < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			V4L2_ERROR(vid, "error: Poll failed!");
+			break;
+		}
+		if (pr == 0) {
+			continue; // Timeout, recheck running.
+		}
+
 		if (ioctl(vid->fd, VIDIOC_DQBUF, &v_buf) < 0) {
+			if (errno == EAGAIN) {
+				continue;
+			}
 			V4L2_ERROR(vid, "error: Dequeue failed!");
-			vid->is_running = false;
+			break;
+		}
+
+		if (v_buf.index >= NUM_V4L2_BUFFERS) {
+			V4L2_ERROR(vid, "error: Buffer index out of range!");
 			break;
 		}
 
@@ -818,7 +983,7 @@ v4l2_fs_mainloop(void *ptr)
 		SINK_TRACE_IDENT(v4l2_fs_frame);
 
 		V4L2_TRACE(vid, "Got frame #%u, index %i. Used frames are %i", v_buf.sequence, v_buf.index,
-		           vid->used_frames);
+		           (int)xrt_atomic_s32_load(&vid->used_frames));
 
 		struct v4l2_frame *vf = &vid->frames[v_buf.index];
 		struct xrt_frame *xf = NULL;
@@ -843,17 +1008,28 @@ v4l2_fs_mainloop(void *ptr)
 			xf->source_timestamp = xf->timestamp;
 		}
 
+		// Take outstanding holds BEFORE publish: consumers may return (or
+		// ROI-clone) the frame on another thread immediately. No copies,
+		// the frame still points directly into the driver buffer.
+		xrt_atomic_s32_inc_return(&vid->used_frames);
+		xrt_atomic_s32_inc_return(&vid->storage_ref);
+
 		vid->sink->push_frame(vid->sink, xf);
 
 		// Checks if active.
 		u_sink_debug_push_frame(&vid->usd, xf);
 
-		vid->used_frames++;
-
 		// The frame is requeued as soon as the refcount reaches zero,
 		// this can be done safely from another thread.
 		xrt_frame_reference(&xf, NULL);
 	}
+
+	// Best effort stop (stream_stop already issues this to wake us).
+	if (vid->fd >= 0) {
+		int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		(void)ioctl(vid->fd, VIDIOC_STREAMOFF, &type);
+	}
+	xrt_atomic_s32_store(&vid->is_running, 0);
 
 	V4L2_DEBUG(vid, "info: Thread leave!");
 
