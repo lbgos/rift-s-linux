@@ -141,6 +141,10 @@ project_led_points(struct t_constellation_led_model *led_model,
                    struct xrt_vec3 *out_positions,
                    struct xrt_vec2 *out_points)
 {
+	/* Callers pass MAX_OBJECT_LEDS-sized stack arrays; fail closed. */
+	if (led_model->num_leds > MAX_OBJECT_LEDS) {
+		return false;
+	}
 	for (int i = 0; i < led_model->num_leds; i++) {
 		struct xrt_vec3 *tmp = out_positions + i;
 		math_pose_transform_point(pose, &led_model->leds[i].pos, tmp);
@@ -270,6 +274,10 @@ project_bounding_points(struct t_constellation_led_model *led_model,
                         struct xrt_vec3 *out_positions,
                         struct xrt_vec2 *out_points)
 {
+	/* Callers pass MAX_OBJECT_LEDS-sized stack arrays; fail closed. */
+	if (led_model->num_bounding_points > MAX_OBJECT_LEDS) {
+		return false;
+	}
 	for (int i = 0; i < led_model->num_bounding_points; i++) {
 		struct xrt_vec3 *tmp = out_positions + i;
 		math_pose_transform_point(P_cam_obj, &led_model->bounding_points[i].pos, tmp);
