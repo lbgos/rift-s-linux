@@ -199,7 +199,9 @@ rift_s_radio_update_at(rift_s_radio_state *state, struct os_hid_device *hid, int
 		if (radio_response.busy_flag != 0x00 || radio_response.seqnum == state->last_radio_seqnum) {
 			if (radio_response.busy_flag)
 				state->last_radio_seqnum = radio_response.seqnum;
-			break; /* Valid busy/not-ready: retry next update with no backoff. */
+			// EP0 control polling must not follow the 2 kHz interrupt-read loop.
+			cmd->next_attempt_ns = now_ns + 5 * U_TIME_1MS_IN_NS;
+			break;
 		}
 		state->last_radio_seqnum = radio_response.seqnum;
 
@@ -238,6 +240,7 @@ void
 rift_s_radio_state_init(rift_s_radio_state *state)
 {
 	state->command_result_pending = false;
+	state->recovery_required = false;
 	state->pending_commands = NULL;
 	state->pending_commands_tail = NULL;
 	state->last_radio_seqnum = -1;

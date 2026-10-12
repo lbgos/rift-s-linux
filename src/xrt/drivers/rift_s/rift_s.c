@@ -921,11 +921,11 @@ rift_s_run_thread(void *ptr)
 					close_transport(sys);
 				} else {
 
-			os_mutex_lock(&sys->dev_mutex);
-			if (sys->cam != NULL && sys->physical_proximity) {
-				rift_s_camera_update(sys->cam, sys->handles[HMD_HID]);
-			}
-			os_mutex_unlock(&sys->dev_mutex);
+					os_mutex_lock(&sys->dev_mutex);
+					if (sys->cam != NULL && sys->physical_proximity) {
+						rift_s_camera_update(sys->cam, sys->handles[HMD_HID]);
+					}
+					os_mutex_unlock(&sys->dev_mutex);
 				}
 			}
 		}

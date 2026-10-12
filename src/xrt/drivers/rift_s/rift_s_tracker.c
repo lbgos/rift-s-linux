@@ -655,13 +655,29 @@ rift_s_tracker_device_lost(struct rift_s_tracker *t)
 	// New device session: stale SLAM samples and in-flight worker results must not publish.
 	// The bump makes a worker that captured the old generation fail its generation match below.
 	t->slam_generation++;
-	t->slam_min_sample_ns = 0;
+	t->slam_min_sample_ns = os_monotonic_get_ns();
+	t->slam_guard.world_valid = false;
+	t->slam_guard.boundary_confirmed = false;
+	t->slam_guard.world_transition = false;
 	// Invalidate the world candidate; the saved map/anchor and setup flags are preserved for
 	// relocalization after the pending restart recreates the SLAM session.
 	t->world_confirmations = 0;
 	t->world_candidate_generation = t->slam_generation;
 	t->world_candidate_ns = 0;
 	os_mutex_unlock(&t->mutex);
+	// Release backend-owned camera buffers immediately even while off-head. The
+	// next fresh frame uses the existing restart path if recreation is unavailable.
+#ifdef XRT_FEATURE_SLAM
+	if (t->tracking.slam != NULL && t->tracking.slam->restart != NULL &&
+	    t->tracking.slam->restart(t->tracking.slam) == 0) {
+		os_mutex_lock(&t->mutex);
+		t->slam_restart_pending = false;
+		t->feature_gate = (struct rift_s_slam_feature_gate){0};
+		rift_s_slam_guard_backend_started(&t->slam_guard, os_monotonic_get_ns());
+		os_mutex_unlock(&t->mutex);
+		RIFT_S_INFO("SLAM session recreated after USB loss");
+	}
+#endif
 	os_mutex_unlock(&t->slam_mutex);
 
 	// Join without holding tracker locks: the worker blocks on mutex while draining, so holding it
@@ -1301,7 +1317,7 @@ world_write_status(struct rift_s_tracker *t)
 	if (state == last_state && now_ns - last_write_ns < 500 * U_TIME_1MS_IN_NS) return;
 	const struct rift_s_world_anchor_result *result = &diagnostics.result;
 	if (strcmp(state, "relocalizing") == 0 && !standby && !paused && !restarting &&
-	    now_ns - t->world_last_diagnostic_ns >= 10 * U_TIME_1S_IN_NS) {
+	    now_ns - t->world_last_diagnostic_ns >= 10ULL * U_TIME_1S_IN_NS) {
 		t->world_last_diagnostic_ns = now_ns;
 		RIFT_S_WARN("Room recognition pending attempts=%" PRIu64 " usable=%" PRIu64
 		            " capture_ns=%lld sample_ns=%lld valid=%d flags=%u history=%d generation=%" PRIu64

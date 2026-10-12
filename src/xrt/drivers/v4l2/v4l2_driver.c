@@ -618,9 +618,9 @@ v4l2_fs_stream_start(struct xrt_fs *xfs,
 	}
 
 	// Serialize against concurrent start/stop; sets joinable before publish.
-	pthread_mutex_lock(&vid->life_lock);
+	pthread_mutex_lock(&vid->stream_lock);
 	if (vid->thread_joinable || xrt_atomic_s32_load(&vid->is_running) != 0) {
-		pthread_mutex_unlock(&vid->life_lock);
+		pthread_mutex_unlock(&vid->stream_lock);
 		V4L2_ERROR(vid, "error: Stream already running!");
 		return false;
 	}
@@ -632,19 +632,19 @@ v4l2_fs_stream_start(struct xrt_fs *xfs,
 	vid->capture_type = capture_type;
 
 	if (!v4l2_fs_setup_format(vid)) {
-		pthread_mutex_unlock(&vid->life_lock);
+		pthread_mutex_unlock(&vid->stream_lock);
 		return false;
 	}
 
 	xrt_atomic_s32_store(&vid->is_running, 1);
 	if (pthread_create(&vid->stream_thread, NULL, v4l2_fs_mainloop, xfs)) {
 		xrt_atomic_s32_store(&vid->is_running, 0);
-		pthread_mutex_unlock(&vid->life_lock);
+		pthread_mutex_unlock(&vid->stream_lock);
 		V4L2_ERROR(vid, "error: Could not create thread");
 		return false;
 	}
 	vid->thread_joinable = true;
-	pthread_mutex_unlock(&vid->life_lock);
+	pthread_mutex_unlock(&vid->stream_lock);
 
 	V4L2_TRACE(vid, "info: Started!");
 
@@ -657,6 +657,7 @@ v4l2_fs_stream_stop(struct xrt_fs *xfs)
 {
 	struct v4l2_fs *vid = v4l2_fs(xfs);
 
+	pthread_mutex_lock(&vid->stream_lock);
 	// Ask the loop to exit first so in-flight frame returns stop requeueing.
 	xrt_atomic_s32_store(&vid->is_running, 0);
 
@@ -671,16 +672,15 @@ v4l2_fs_stream_stop(struct xrt_fs *xfs)
 	// Join whenever a thread exists, even if it already flagged itself
 	// stopped (e.g. ENODEV in the loop): otherwise it stays unjoined and
 	// leaks, and the next start would overwrite the pthread_t.
-	pthread_mutex_lock(&vid->life_lock);
 	bool joinable = vid->thread_joinable;
 	if (joinable) {
 		vid->thread_joinable = false; // claim the join
 	}
-	pthread_mutex_unlock(&vid->life_lock);
 
 	if (joinable) {
 		pthread_join(vid->stream_thread, NULL);
 	}
+	pthread_mutex_unlock(&vid->stream_lock);
 
 	return true;
 }
@@ -743,6 +743,7 @@ v4l2_fs_free_storage(struct v4l2_fs *vid)
 		vid->fd = -1;
 	}
 
+	pthread_mutex_destroy(&vid->stream_lock);
 	pthread_mutex_destroy(&vid->life_lock);
 	free(vid);
 }
@@ -791,7 +792,10 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
                const char *serial)
 {
 	struct v4l2_fs *vid = U_TYPED_CALLOC(struct v4l2_fs);
+	if (vid == NULL)
+		return NULL;
 	pthread_mutex_init(&vid->life_lock, NULL);
+	pthread_mutex_init(&vid->stream_lock, NULL);
 	xrt_atomic_s32_store(&vid->storage_ref, 1); // fs ownership
 	vid->base.enumerate_modes = v4l2_fs_enumerate_modes;
 	vid->base.configure_capture = v4l2_fs_configure_capture;
@@ -807,10 +811,11 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 	snprintf(vid->base.manufacturer, sizeof(vid->base.manufacturer), "%s", manufacturer);
 	snprintf(vid->base.serial, sizeof(vid->base.serial), "%s", serial);
 
-	int fd = open(path, O_RDWR, 0);
+	int fd = open(path, O_RDWR | O_NONBLOCK, 0);
 	if (fd < 0) {
 		V4L2_ERROR(vid, "Cannot open '%s'", path);
-		pthread_mutex_destroy(&vid->life_lock);
+		pthread_mutex_destroy(&vid->stream_lock);
+	pthread_mutex_destroy(&vid->life_lock);
 		free(vid);
 		return NULL;
 	}

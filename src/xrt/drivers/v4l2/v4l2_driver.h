@@ -135,6 +135,8 @@ struct v4l2_fs
 
 	//! Guards @ref thread_joinable and @ref destroy_requested.
 	pthread_mutex_t life_lock;
+	//! Serializes start/stop including joins, without blocking frame returns.
+	pthread_mutex_t stream_lock;
 	//! A stream thread exists and must be joined (independent of running).
 	bool thread_joinable;
 	//! node.destroy ran; final teardown deferred to last frame destroy.
