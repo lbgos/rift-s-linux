@@ -217,6 +217,11 @@ read_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, rift
 	}
 
 	uint8_t reply_len = response_bytes[4];
+	if (reply_len > response_bytes_len - 5) {
+		RIFT_S_WARN("Radio response claims %u bytes but carried %d\n", reply_len,
+		            response_bytes_len - 5);
+		goto fail;
+	}
 	response_bytes += 5;
 
 	if (json_read->cur_offset == 0) {
