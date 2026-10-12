@@ -79,8 +79,10 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 		 * has incremented */
 		int ret = get_radio_response_report(hid, &radio_response);
 
-		if (ret < 2) {
-			break; /* HID read failed - bail */
+		/* The busy flag and seqnum occupy the first three bytes; a shorter
+		 * read carries no usable fields (busy_flag would be uninitialised stack). */
+		if (ret < 4) {
+			break; /* HID read failed or short - bail */
 		}
 
 		if (radio_response.busy_flag != 0x00 || radio_response.seqnum == state->last_radio_seqnum) {
