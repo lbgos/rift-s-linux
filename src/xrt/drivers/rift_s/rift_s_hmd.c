@@ -292,7 +292,9 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 	if (hmd->ipd_m < 0.05f || hmd->ipd_m > 0.08f) {
 		hmd->ipd_m = 0.0635f;
 	}
-	snprintf(hmd->ipd_path, sizeof(hmd->ipd_path), "%s/rift-s-ipd.conf", getenv("HOME"));
+	const char *home = getenv("HOME");
+	if (home != NULL)
+		snprintf(hmd->ipd_path, sizeof(hmd->ipd_path), "%s/rift-s-ipd.conf", home);
 	rift_s_poll_ipd(hmd);
 	RIFT_S_INFO("Rift S IPD %.1f mm", hmd->ipd_m * 1000.0f);
 	hmd->base.destroy = rift_s_hmd_destroy;
