@@ -47,6 +47,17 @@
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
+static void
+rift_s_update_inputs(struct xrt_device *xdev)
+{
+	struct rift_s_hmd *hmd = (struct rift_s_hmd *)xdev;
+	os_mutex_lock(&hmd->sys->dev_mutex);
+	xdev->inputs[1].active = true;
+	xdev->inputs[1].timestamp = os_monotonic_get_ns();
+	xdev->inputs[1].value.boolean = rift_s_system_is_online(hmd->sys) && hmd->sys->physical_proximity;
+	os_mutex_unlock(&hmd->sys->dev_mutex);
+}
+
 static xrt_result_t
 rift_s_get_tracked_pose(struct xrt_device *xdev,
                         enum xrt_input_name name,
@@ -275,7 +286,7 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 	enum u_device_alloc_flags flags =
 	    (enum u_device_alloc_flags)(U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE);
 
-	struct rift_s_hmd *hmd = U_DEVICE_ALLOCATE(struct rift_s_hmd, flags, 1, 0);
+	struct rift_s_hmd *hmd = U_DEVICE_ALLOCATE(struct rift_s_hmd, flags, 2, 0);
 	if (hmd == NULL) {
 		return NULL;
 	}
@@ -287,7 +298,7 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 
 	hmd->base.tracking_origin = &sys->base;
 
-	hmd->base.update_inputs = u_device_noop_update_inputs;
+	hmd->base.update_inputs = rift_s_update_inputs;
 	hmd->base.get_tracked_pose = rift_s_get_tracked_pose;
 	hmd->base.get_view_poses = rift_s_get_view_poses;
 	hmd->ipd_m = debug_get_num_option_rift_s_ipd_mm() / 1000.0f;
@@ -314,6 +325,7 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 
 	// Setup input.
 	hmd->base.inputs[0].name = XRT_INPUT_GENERIC_HEAD_POSE;
+	hmd->base.inputs[1].name = XRT_INPUT_GENERIC_HEAD_DETECT;
 
 	hmd->last_imu_timestamp_ns = 0;
 

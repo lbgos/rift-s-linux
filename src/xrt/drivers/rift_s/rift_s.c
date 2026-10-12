@@ -763,10 +763,10 @@ handle_packets(struct rift_s_system *sys)
 				if (prox_sensor != sys->physical_proximity || now - sys->last_proximity_log_ns >= 5000000000ULL) {
 					RIFT_S_INFO("HMD physical proximity=%d bench=%d", prox_sensor,
 					            debug_get_bool_option_steamvr_bench());
-					sys->physical_proximity = prox_sensor;
 					sys->last_proximity_log_ns = now;
 				}
 				os_mutex_lock(&sys->dev_mutex);
+				sys->physical_proximity = prox_sensor;
 				if (sys->hmd != NULL) {
 					rift_s_hmd_set_proximity(sys->hmd, prox_sensor);
 				}

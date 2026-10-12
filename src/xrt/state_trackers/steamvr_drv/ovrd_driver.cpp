@@ -1412,7 +1412,8 @@ private:
 	struct xrt_device *m_xdev = NULL;
 	BenchInput m_bench;
 	std::unique_ptr<MonadoCamera> m_camera;
-	vr::VRInputComponentHandle_t m_benchProximity = 0;
+	vr::VRInputComponentHandle_t m_proximity = 0;
+	struct xrt_input *m_headDetect = nullptr;
 	RoomSetupGuardProcess m_roomSetupGuard;
 	bool m_nativeSetupRequested = false;
 	bool m_nativeSetupEnabled = false;
@@ -1499,8 +1500,12 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 	while (m_poseUpdating) {
 		//! @todo figure out the best pose update rate
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		if (m_benchProximity)
-			vr::VRDriverInput()->UpdateBooleanComponent(m_benchProximity, true, 0);
+		if (m_proximity) {
+			m_xdev->update_inputs(m_xdev);
+			bool detected = debug_get_bool_option_steamvr_bench() ||
+			                (m_headDetect && m_headDetect->active && m_headDetect->value.boolean);
+			vr::VRDriverInput()->UpdateBooleanComponent(m_proximity, detected, 0);
+		}
 		if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0)
 			update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll);
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, GetPose(),
@@ -1530,12 +1535,17 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
 	vr::VRProperties()->SetFloatProperty( m_ulPropertyContainer, vr::Prop_SecondsFromVsyncToPhotons_Float, m_flSecondsFromVsyncToPhotons);
 
-	if (debug_get_bool_option_steamvr_bench()) {
-		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_ContainsProximitySensor_Bool, true);
-		auto proximity_error = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, "/input/proximity", &m_benchProximity);
-		ovrd_log("Bench proximity component: error=%d\n", proximity_error);
-		ovrd_log("MONADO_STEAMVR_BENCH enabled: synthetic fallback and awake HMD\n");
+	for (uint32_t i = 0; i < m_xdev->input_count; i++) {
+		if (m_xdev->inputs[i].name == XRT_INPUT_GENERIC_HEAD_DETECT)
+			m_headDetect = &m_xdev->inputs[i];
 	}
+	if (m_headDetect || debug_get_bool_option_steamvr_bench()) {
+		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_ContainsProximitySensor_Bool, true);
+		auto proximity_error = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, "/input/proximity", &m_proximity);
+		ovrd_log("HMD proximity component: error=%d\n", proximity_error);
+	}
+	if (debug_get_bool_option_steamvr_bench())
+		ovrd_log("MONADO_STEAMVR_BENCH enabled: synthetic fallback and awake HMD\n");
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
 	if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 && !rift_s_prepare_session_origin())
 		ovrd_log("Could not prepare unbounded Rift S session origin\n");
