@@ -235,7 +235,7 @@ if(TARGET monado-roomsetup-guard)
 endif()
 
 if(XRT_BUILD_DRIVER_RIFT_S)
-	add_executable(tests_rift_s_world_anchor tests_rift_s_world_anchor.cpp)
+	add_executable(tests_rift_s_world_anchor tests_rift_s_world_anchor.cpp tests_rift_s_world_matcher.cpp)
 	target_include_directories(tests_rift_s_world_anchor PRIVATE ../src/xrt/drivers/rift_s ${OpenCV_INCLUDE_DIRS})
 	target_link_libraries(tests_rift_s_world_anchor PRIVATE xrt-external-catch2 drv_rift_s aux_math aux_util ${OpenCV_LIBRARIES})
 	add_test(NAME tests_rift_s_world_anchor COMMAND tests_rift_s_world_anchor)
