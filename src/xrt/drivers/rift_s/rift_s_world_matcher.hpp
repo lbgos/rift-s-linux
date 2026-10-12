@@ -69,7 +69,7 @@ public:
 		}
 	}
 
-	void
+	__attribute__((target("popcnt"))) void
 	knnMatch(const cv::Mat &queries, std::vector<std::vector<cv::DMatch>> &nearest, int count) const
 	{
 		CV_Assert(queries.type() == CV_8U && queries.cols == 32 && count > 0 && count <= train.rows);
