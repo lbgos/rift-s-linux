@@ -788,6 +788,7 @@ close_transport(struct rift_s_system *sys)
 	rift_s_camera_stop(sys->cam);
 	xrt_frame_context_destroy_nodes(&sys->camera_context);
 	rift_s_radio_state_clear(&sys->radio_state);
+	rift_s_radio_state_init(&sys->radio_state);
 	os_mutex_lock(&sys->dev_mutex);
 	if (sys->cam != NULL) {
 		rift_s_camera_destroy(sys->cam);
@@ -851,6 +852,10 @@ open_transport(struct rift_s_system *sys)
 	if (!found)
 		goto fail;
 	// Calibration belongs to the matched serial. Reapply volatile hardware state.
+	// Reset volatile radio state even after a live I/O failure, so a late response
+	// cannot enter the next command epoch.
+	if (rift_s_hmd_enable(handles[HMD_HID], false) < 0)
+		goto fail;
 	if (rift_s_protocol_set_proximity_threshold(handles[HMD_HID], sys->hmd_config.proximity_threshold) < 0 ||
 	    rift_s_hmd_enable(handles[HMD_HID], true) < 0 ||
 	    rift_s_set_screen_enable(handles[HMD_HID], true) < 0)
@@ -910,14 +915,18 @@ rift_s_run_thread(void *ptr)
 			if (result == RIFT_S_USB_LOST || !rift_s_camera_is_running(sys->cam)) {
 				close_transport(sys);
 			} else if (result == RIFT_S_USB_OK) {
-			update_haptics(sys);
-			rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
+				update_haptics(sys);
+				rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
+				if (sys->radio_state.recovery_required) {
+					close_transport(sys);
+				} else {
 
 			os_mutex_lock(&sys->dev_mutex);
 			if (sys->cam != NULL && sys->physical_proximity) {
 				rift_s_camera_update(sys->cam, sys->handles[HMD_HID]);
 			}
 			os_mutex_unlock(&sys->dev_mutex);
+				}
 			}
 		}
 

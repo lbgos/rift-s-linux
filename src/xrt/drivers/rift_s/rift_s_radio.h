@@ -54,6 +54,8 @@ typedef void (*rift_s_radio_completion_fn)(bool success,
 struct rift_s_radio_state
 {
 	bool command_result_pending;
+	//! An ambiguous completion requires a radio reset before any following command.
+	bool recovery_required;
 	int last_radio_seqnum;
 
 	rift_s_radio_command *pending_commands;

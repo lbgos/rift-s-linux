@@ -174,7 +174,7 @@ TEST_CASE("Radio success delivers once and pipelines the next command")
 	CHECK(b.calls == 1);
 }
 
-TEST_CASE("Radio busy forever times out and the queue advances")
+TEST_CASE("Radio timeout blocks later commands until transport recovery")
 {
 	rift_s_radio_state st;
 	rift_s_radio_state_init(&st);
@@ -205,15 +205,17 @@ TEST_CASE("Radio busy forever times out and the queue advances")
 	}
 	REQUIRE(a.calls == 1);
 	CHECK_FALSE(a.last_success);
-	// The next head pipelines in the same or next tick and succeeds.
+	// Later requests cannot consume an ambiguous late reply.
 	for (int i = 0; i < 100 && b.calls == 0; i++) {
 		rift_s_radio_update_at(&st, &hid.base, now);
 		now += TICK;
 	}
-	CHECK(b.calls == 1);
-	CHECK(b.last_success);
-	CHECK(st.pending_commands == nullptr);
+	CHECK(b.calls == 0);
+	CHECK(st.recovery_required);
+	CHECK(hid.set_calls == 1);
 	rift_s_radio_state_clear(&st);
+	CHECK(b.calls == 1);
+	CHECK_FALSE(b.last_success);
 }
 
 TEST_CASE("Radio persistent send STALL backs off and fails bounded")
@@ -316,46 +318,37 @@ TEST_CASE("Radio clear fails queued callbacks exactly once and is safe to repeat
 	CHECK(hid.get_calls <= 1);
 }
 
-TEST_CASE("Radio ignores a stale duplicate seq after a timeout")
+TEST_CASE("A late response with an advanced sequence never completes a later command")
 {
 	rift_s_radio_state st;
 	rift_s_radio_state_init(&st);
 	FakeHid hid = make_fake();
-	// Head A sees busy seq 10 forever, then times out with last==10.
 	hid.get_fn = [&](uint8_t *data, size_t size) {
-		static uint8_t pad10 = 0;
-		return fill_response(data, size, 10, 0x01, &pad10, 1);
+		uint8_t payload[] = {0};
+		return fill_response(data, size, 10, 1, payload, sizeof(payload));
 	};
-
-	Cb a;
+	Cb a, b;
 	queue_one(&st, &a);
-	int64_t now = T0;
-	for (int i = 0; i < 4000 && a.calls == 0; i++) {
-		rift_s_radio_update_at(&st, &hid.base, now);
-		now += TICK;
-	}
-	REQUIRE(a.calls == 1);
-	CHECK(st.last_radio_seqnum == 10);
-
-	// Head B: first poll is the stale A reply (seq 10, not busy), then fresh seq 11.
-	Cb b;
 	queue_one(&st, &b);
-	int polls = 0;
+	rift_s_radio_update_at(&st, &hid.base, T0);
+	rift_s_radio_update_at(&st, &hid.base, T0 + RIFT_S_RADIO_CMD_TIMEOUT_MS * MS);
+	REQUIRE(st.recovery_required);
+	int reads = hid.get_calls;
 	hid.get_fn = [&](uint8_t *data, size_t size) {
-		polls++;
-		if (polls == 1) {
-			uint8_t payload[] = {0x00};
-			return fill_response(data, size, 10, 0x00, payload, sizeof(payload));
-		}
-		uint8_t payload[] = {0x00, 0x00, 0x00, 0x00, 0x01, 0x00};
-		return fill_response(data, size, 11, 0x00, payload, sizeof(payload));
+		uint8_t payload[] = {0, 0, 0, 0, 1, 0};
+		return fill_response(data, size, 11, 0, payload, sizeof(payload));
 	};
-	rift_s_radio_update_at(&st, &hid.base, now);
-	CHECK(b.calls == 0); // stale seq ignored
-	rift_s_radio_update_at(&st, &hid.base, now + TICK);
-	CHECK(b.calls == 1);
-	CHECK(b.last_success);
+	rift_s_radio_update_at(&st, &hid.base, T0 + 2000 * MS);
+	CHECK(hid.get_calls == reads);
+	CHECK(hid.set_calls == 1);
+	CHECK(a.calls == 1);
+	CHECK_FALSE(a.last_success);
+	CHECK(b.calls == 0);
 	rift_s_radio_state_clear(&st);
+	CHECK(b.calls == 1);
+	CHECK_FALSE(b.last_success);
+	rift_s_radio_state_init(&st);
+	CHECK_FALSE(st.recovery_required);
 }
 
 TEST_CASE("Radio with no device keeps the queue until the deadline")

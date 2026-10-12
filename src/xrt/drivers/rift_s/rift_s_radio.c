@@ -72,6 +72,9 @@ radio_retry_delay_ns(int failures)
 static void
 radio_fail_head(rift_s_radio_state *state, rift_s_radio_command *cmd)
 {
+	// A late response has no command echo and must not satisfy a different request.
+	if (cmd->sent)
+		state->recovery_required = true;
 	state->pending_commands = cmd->next;
 	if (state->pending_commands == NULL)
 		state->pending_commands_tail = NULL;
@@ -100,7 +103,7 @@ get_radio_response_report(struct os_hid_device *hid, rift_s_hmd_radio_response_t
 void
 rift_s_radio_update_at(rift_s_radio_state *state, struct os_hid_device *hid, int64_t now_ns)
 {
-	if (state == NULL)
+	if (state == NULL || state->recovery_required)
 		return;
 
 	bool read_another = false;
@@ -123,7 +126,7 @@ rift_s_radio_update_at(rift_s_radio_state *state, struct os_hid_device *hid, int
 		if (now_ns >= cmd->deadline_ns) {
 			RIFT_S_WARN("Controller radio command timed out, failing head");
 			radio_fail_head(state, cmd);
-			read_another = state->pending_commands != NULL;
+			read_another = !state->recovery_required && state->pending_commands != NULL;
 			continue;
 		}
 
