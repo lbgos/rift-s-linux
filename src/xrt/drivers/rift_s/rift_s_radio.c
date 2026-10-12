@@ -171,8 +171,13 @@ rift_s_radio_queue_report(rift_s_radio_state *state,
                           void *cb_data)
 {
 	rift_s_radio_command *cmd = U_TYPED_CALLOC(rift_s_radio_command);
+	if (cmd == NULL)
+		return;
 
-	assert(cmd_bytes_len <= (int)sizeof(cmd->read_command.cmd_bytes));
+	if (cmd_bytes_len < 0 || cmd_bytes_len > (int)sizeof(cmd->read_command.cmd_bytes)) {
+		free(cmd);
+		return;
+	}
 
 	cmd->read_command.cmd = report_id;
 	cmd->read_command.device_id = device_id;
