@@ -47,7 +47,7 @@
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
-static void
+static xrt_result_t
 rift_s_update_inputs(struct xrt_device *xdev)
 {
 	struct rift_s_hmd *hmd = (struct rift_s_hmd *)xdev;
@@ -56,6 +56,7 @@ rift_s_update_inputs(struct xrt_device *xdev)
 	xdev->inputs[1].timestamp = os_monotonic_get_ns();
 	xdev->inputs[1].value.boolean = rift_s_system_is_online(hmd->sys) && hmd->sys->physical_proximity;
 	os_mutex_unlock(&hmd->sys->dev_mutex);
+	return XRT_SUCCESS;
 }
 
 static xrt_result_t
