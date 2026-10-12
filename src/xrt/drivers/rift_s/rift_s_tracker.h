@@ -197,6 +197,16 @@ rift_s_tracker_start(struct rift_s_tracker *t);
 //! Join consumers and release queued camera frames before destroying the frame context.
 void
 rift_s_tracker_stop(struct rift_s_tracker *t);
+//! USB device loss before the camera frameserver stops. Tracker and SLAM/constellation xfctx are retained.
+//!
+//! Marks ready_for_data=false, pauses tracking with a pending SLAM restart via the existing restart path,
+//! resets the hardware clock map and device-epoch state for the post-reconnect counter reset, invalidates the
+//! world candidate/generation so joined worker results cannot publish, and joins the world worker.
+//! Saved world map/anchor state is preserved. The passthrough pointer stays stable. Parent owns any
+//! camera-only xfctx teardown and calls @ref rift_s_tracker_start after reinit to resume.
+//! Must not be called with slam_mutex held.
+void
+rift_s_tracker_device_lost(struct rift_s_tracker *t);
 void
 rift_s_tracker_set_standby(struct rift_s_tracker *t, bool standby);
 void

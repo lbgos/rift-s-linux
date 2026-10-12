@@ -619,6 +619,71 @@ rift_s_tracker_stop(struct rift_s_tracker *t)
 }
 
 void
+rift_s_tracker_device_lost(struct rift_s_tracker *t)
+{
+	if (t == NULL) {
+		return;
+	}
+
+	// Drain an in-flight camera submission and prevent subsequent callbacks from queuing work.
+	// pause_slam_locked() is the existing standby/timeout restart path: it holds the last pose and
+	// marks a SLAM restart pending. Force the pending flag so a loss without a prior camera arrival
+	// still recreates the session on the first fresh frame after reconnect.
+	os_mutex_lock(&t->slam_mutex);
+	os_mutex_lock(&t->mutex);
+	t->ready_for_data = false;
+	pause_slam_locked(t);
+	t->slam_restart_pending = t->tracking.slam_enabled;
+	// The reconnected device restarts its counters: drop the clock map and all device-epoch state so
+	// the first post-reconnect IMU/frame is not rejected as backward or misaligned.
+	t->have_hw2mono = false;
+	t->valid_clock_observations = 0;
+	t->hw2mono = 0;
+	t->camera_ts_offset = 0;
+	t->last_frame_time = 0;
+	t->last_camera_arrival_ns = 0;
+	t->fusion.last_imu_timestamp_ns = 0;
+	t->fusion.last_imu_local_timestamp_ns = 0;
+	t->fusion.last_angular_velocity = (struct xrt_vec3){0, 0, 0};
+	m_imu_3dof_reset(&t->fusion.i3dof);
+	if (t->fusion.history != NULL) {
+		m_relation_history_clear(t->fusion.history);
+	}
+	// New device session: stale SLAM samples and in-flight worker results must not publish.
+	// The bump makes a worker that captured the old generation fail its generation match below.
+	t->slam_generation++;
+	t->slam_min_sample_ns = 0;
+	// Invalidate the world candidate; the saved map/anchor and setup flags are preserved for
+	// relocalization after the pending restart recreates the SLAM session.
+	t->world_confirmations = 0;
+	t->world_candidate_generation = t->slam_generation;
+	t->world_candidate_ns = 0;
+	os_mutex_unlock(&t->mutex);
+	os_mutex_unlock(&t->slam_mutex);
+
+	// Join without holding tracker locks: the worker blocks on mutex while draining, so holding it
+	// across the join would deadlock. stop_and_wait is idempotent, so a repeated loss is safe.
+	if (t->world_thread_initialized) {
+		os_thread_helper_stop_and_wait(&t->world_thread);
+	}
+
+	// Drop queued frames so reconnect starts from fresh captures. No new queues can appear: the
+	// ready_for_data=false above was set under slam_mutex, draining the in-flight camera submission,
+	// and every ingestion path (SLAM, IMU, controller) drops while !ready_for_data. The passthrough
+	// pointer stays stable and the SLAM/constellation xfctx nodes stay retained for the parent.
+	for (int eye = 0; eye < RIFT_S_CAMERA_COUNT; eye++) {
+		xrt_frame_reference(&t->world_frames[eye], NULL);
+	}
+	os_mutex_lock(&t->mutex);
+	t->world_last_queued_ns = 0;
+	t->world_confirmations = 0;
+	t->world_candidate_ns = 0;
+	os_mutex_unlock(&t->mutex);
+
+	RIFT_S_INFO("Tracking device lost; world worker joined, SLAM restart pending");
+}
+
+void
 rift_s_tracker_destroy(struct rift_s_tracker *t)
 {
 	rift_s_tracker_stop(t);
@@ -1503,6 +1568,16 @@ rift_s_tracker_start(struct rift_s_tracker *t)
 	os_mutex_lock(&t->mutex);
 	t->ready_for_data = true;
 	os_mutex_unlock(&t->mutex);
+
+	// Reconnect path: device_lost joined the worker without destroying its helper, so restart it for
+	// fresh captures. start() fails while already running, making normal startup a no-op here.
+	if (t->world_thread_initialized && !os_thread_helper_is_running(&t->world_thread)) {
+		if (os_thread_helper_start(&t->world_thread, rift_s_world_thread, t) != 0) {
+			RIFT_S_WARN("Failed to restart world worker after reconnect");
+		} else {
+			RIFT_S_INFO("World worker restarted");
+		}
+	}
 }
 
 void
