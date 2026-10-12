@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rustc-link-lib=vulkan");
     println!("cargo:rerun-if-changed=native/overlay_preview.cpp");
     println!("cargo:rerun-if-changed=native/overlay_preview.hpp");
+    println!("cargo:rerun-if-changed=native/openvr.h");
     println!("cargo:rerun-if-changed=native/overlay_preview.comp");
     println!("cargo:rerun-if-changed=native/bridge.cpp");
     tauri_build::build();
