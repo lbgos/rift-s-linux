@@ -383,7 +383,7 @@ rift_s_system_remove_hmd(struct rift_s_system *sys)
 struct xrt_device *
 rift_s_system_get_controller(struct rift_s_system *sys, int index)
 {
-	assert(index >= 0 || index < MAX_TRACKED_DEVICES);
+	assert(index >= 0 && index < MAX_TRACKED_DEVICES);
 	assert(sys->controllers[index] == NULL); // Ensure only called once per controller
 
 	os_mutex_lock(&sys->dev_mutex);
