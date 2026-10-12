@@ -299,7 +299,7 @@ rift_s_parse_camera_calibration_block(char *json_string, struct rift_s_camera_ca
 	cJSON *cameras = cJSON_GetObjectItemCaseSensitive(json_root, "CameraCalibration");
 	if (!cJSON_IsArray(cameras)) {
 		RIFT_S_ERROR("Cameras: not found or not an Array");
-		return false;
+		goto fail;
 	}
 
 	int camera_id = 0;
@@ -317,6 +317,10 @@ rift_s_parse_camera_calibration_block(char *json_string, struct rift_s_camera_ca
 		camera_id++;
 	}
 
+	if (camera_id != RIFT_S_CAMERA_COUNT) {
+		RIFT_S_ERROR("Expected %d camera calibration entries, got %d", RIFT_S_CAMERA_COUNT, camera_id);
+		goto fail;
+	}
 
 	cJSON_Delete(json_root);
 	return 0;
