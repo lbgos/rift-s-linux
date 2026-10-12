@@ -235,7 +235,12 @@ rift_s_parse_controller_report(rift_s_controller_report_t *report, const unsigne
 	}
 
 	if (avail > 0) {
-		assert(avail < sizeof(report->extra_bytes));
+		/* Trailing bytes from unknown or future block types must not overflow the spill buffer. */
+		if (avail > sizeof(report->extra_bytes)) {
+			RIFT_S_WARN("Controller report has %u trailing bytes, keeping %zu", avail,
+			            sizeof(report->extra_bytes));
+			avail = sizeof(report->extra_bytes);
+		}
 		report->extra_bytes_len = avail;
 		memcpy(report->extra_bytes, buf, avail);
 	}
