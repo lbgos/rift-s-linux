@@ -6,11 +6,13 @@ extern "C" {
 #include "rift_s_firmware.h"
 #include "rift_s_protocol.h"
 #include "rift_s_radio.h"
+#include "rift_s_haptics.h"
 #include "util/u_logging.h"
 }
 #include <array>
 #include <cstring>
 #include <vector>
+#include <limits>
 
 enum u_logging_level rift_s_log_level = U_LOGGING_ERROR;
 
@@ -359,4 +361,26 @@ TEST_CASE("Rift S parser bounds unknown controller blocks and rejects empty inpu
 	packet[9] = 52; // An exactly fitting spill is legal.
 	REQUIRE(rift_s_parse_controller_report(&report, packet.data(), packet.size()));
 	CHECK(report.extra_bytes_len == sizeof(report.extra_bytes));
+}
+
+TEST_CASE("Rift S raw haptics encode the HAL register and bound amplitude and duration")
+{
+	std::array<uint8_t, 5> packet{};
+	REQUIRE(rift_s_encode_haptic_raw(.4f, packet.data()) == packet.size());
+	CHECK(packet == std::array<uint8_t, 5>{0x97, 1, 8, 0, 102});
+	for (float amplitude : {-1.f, 0.f, std::numeric_limits<float>::quiet_NaN(),
+	                        std::numeric_limits<float>::infinity()}) {
+		rift_s_encode_haptic_raw(amplitude, packet.data());
+		CHECK(packet[4] == 0);
+	}
+	rift_s_encode_haptic_raw(2.f, packet.data());
+	CHECK(packet[4] == 255);
+	xrt_output_value_vibration value{160.f, .4f, 100000000};
+	CHECK(rift_s_haptic_duration(&value) == 100000000);
+	value.duration_ns = XRT_MIN_HAPTIC_DURATION;
+	CHECK(rift_s_haptic_duration(&value) == 5000000);
+	value.duration_ns = XRT_INFINITE_DURATION;
+	CHECK(rift_s_haptic_duration(&value) == 60000000000LL);
+	value.amplitude = 0;
+	CHECK(rift_s_haptic_duration(&value) == 0);
 }

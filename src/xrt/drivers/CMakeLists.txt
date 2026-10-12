@@ -356,6 +356,8 @@ if(XRT_BUILD_DRIVER_RIFT_S)
 		rift_s/rift_s_slam_guard.h
 		rift_s/rift_s_firmware.c
 		rift_s/rift_s_firmware.h
+		rift_s/rift_s_haptics.c
+		rift_s/rift_s_haptics.h
 		rift_s/rift_s_hmd.c
 		rift_s/rift_s_hmd.h
 		rift_s/rift_s_model_check.cpp

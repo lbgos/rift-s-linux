@@ -50,6 +50,7 @@
 #include "rift_s_hmd.h"
 #include "rift_s_controller.h"
 #include "rift_s_camera.h"
+#include "rift_s_haptics.h"
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
@@ -215,6 +216,10 @@ rift_s_system_create(struct xrt_prober *xp,
 	}
 
 	rift_s_radio_state_init(&sys->radio_state);
+	for (unsigned hand = 0; hand < MAX_TRACKED_DEVICES; ++hand) {
+		sys->haptics[hand].sys = sys;
+		sys->haptics[hand].hand = hand;
+	}
 
 	/* Create the HMD now. Controllers are created in the
 	 * rift_s_system_get_controller() call later */
@@ -404,6 +409,8 @@ rift_s_system_remove_controller(struct rift_s_system *sys, struct rift_s_control
 
 	for (int i = 0; i < MAX_TRACKED_DEVICES; i++) {
 		if (sys->controllers[i] == ctrl) {
+			sys->haptics[i].end_ns = 0;
+			sys->haptics[i].amplitude = 0;
 			sys->controllers[i] = NULL;
 			break;
 		}
@@ -416,6 +423,101 @@ struct xrt_device *
 rift_s_system_get_hand_tracking_device(struct rift_s_system *sys)
 {
 	return rift_s_tracker_get_hand_tracking_device(sys->tracker);
+}
+
+xrt_result_t
+rift_s_system_set_haptic(struct rift_s_system *sys, unsigned hand, uint64_t device_id,
+                         const struct xrt_output_value_vibration *value)
+{
+	if (hand >= MAX_TRACKED_DEVICES)
+		return XRT_ERROR_OUTPUT_UNSUPPORTED;
+	uint8_t packet[5];
+	rift_s_encode_haptic_raw(value->amplitude, packet);
+	timepoint_ns now = os_monotonic_get_ns();
+	os_mutex_lock(&sys->dev_mutex);
+	struct rift_s_haptic_radio *h = &sys->haptics[hand];
+	if (device_id != 0)
+		h->device_id = device_id;
+	h->amplitude = packet[4];
+	h->end_ns = now + rift_s_haptic_duration(value);
+	os_mutex_unlock(&sys->dev_mutex);
+	// The raw register has no frequency field. Use native motor frequency rather
+	// than guessing the buffered protocol's device-clock timestamp.
+	RIFT_S_DEBUG("Haptic request hand=%s amplitude=%u duration_ms=%.3f requested_hz=%.1f mode=raw",
+	             hand ? "RIGHT" : "LEFT", packet[4], (double)rift_s_haptic_duration(value) / U_TIME_1MS_IN_NS,
+	             value->frequency);
+	return XRT_SUCCESS;
+}
+
+static void
+haptic_complete(bool success, uint8_t *response, int size, void *data)
+{
+	struct rift_s_haptic_radio *h = data;
+	uint32_t status = UINT32_MAX;
+	bool ok = success && size >= 0 && rift_s_controller_write_succeeded(response, (size_t)size, &status);
+	os_mutex_lock(&h->sys->dev_mutex);
+	h->in_flight = false;
+	if (ok) {
+		h->applied_amplitude = h->sent_amplitude;
+		h->refresh_ns = os_monotonic_get_ns() + 500 * U_TIME_1MS_IN_NS;
+	} else {
+		h->retry_ns = os_monotonic_get_ns() + 20 * U_TIME_1MS_IN_NS;
+	}
+	uint8_t amplitude = h->sent_amplitude;
+	unsigned hand = h->hand;
+	os_mutex_unlock(&h->sys->dev_mutex);
+	RIFT_S_DEBUG("Haptic radio hand=%s amplitude=%u ack=%s status=0x%x", hand ? "RIGHT" : "LEFT",
+	             amplitude, ok ? "ok" : "failed", status);
+}
+
+// Only called by the USB worker, between report handling and radio update. Keep
+// at most one command per hand and coalesce requests before touching the queue.
+static void
+update_haptics(struct rift_s_system *sys)
+{
+	if (sys->radio_state.pending_commands != NULL)
+		return; // Existing calibration/LED transactions keep their ordering.
+	for (unsigned hand = 0; hand < MAX_TRACKED_DEVICES; ++hand) {
+		struct rift_s_haptic_radio *h = &sys->haptics[hand];
+		timepoint_ns now = os_monotonic_get_ns();
+		os_mutex_lock(&sys->dev_mutex);
+		uint8_t desired = now < h->end_ns ? h->amplitude : 0;
+		bool needed = !h->in_flight && now >= h->retry_ns &&
+		              (desired != h->applied_amplitude || (desired != 0 && now >= h->refresh_ns));
+		uint64_t id = h->device_id;
+		os_mutex_unlock(&sys->dev_mutex);
+		if (!needed)
+			continue;
+		if (id == 0) {
+			// Pairing identity exists even when a desk controller is asleep and
+			// has not sent its first IMU packet. Do not change tracking readiness.
+			rift_s_devices_list_t list;
+			if (rift_s_read_devices_list(sys->handles[HMD_HID], &list) >= 0) {
+				for (unsigned i = 0; i < list.num_devices; ++i) {
+					rift_s_device_type type = hand ? RIFT_S_DEVICE_RIGHT_CONTROLLER : RIFT_S_DEVICE_LEFT_CONTROLLER;
+					if (list.devices[i].device_type == type)
+						id = list.devices[i].device_id;
+				}
+			}
+		}
+		os_mutex_lock(&sys->dev_mutex);
+		h->device_id = id;
+		desired = os_monotonic_get_ns() < h->end_ns ? h->amplitude : 0;
+		if (id == 0 || (desired == 0 && h->applied_amplitude == 0)) {
+			h->retry_ns = now + 100 * U_TIME_1MS_IN_NS;
+			os_mutex_unlock(&sys->dev_mutex);
+			continue;
+		}
+		h->sent_device_id = id;
+		h->sent_amplitude = desired;
+		h->in_flight = true;
+		os_mutex_unlock(&sys->dev_mutex);
+		uint8_t packet[5];
+		rift_s_encode_haptic_raw((float)desired / 255.0f, packet);
+		rift_s_radio_queue_report(&sys->radio_state, RIFT_S_RADIO_REPORT_WRITE, id, packet, sizeof(packet),
+		                          haptic_complete, h);
+		return; // One feature transaction this tick; the other hand runs next.
+	}
 }
 
 /* Packet reading / handling */
@@ -613,6 +715,7 @@ rift_s_run_thread(void *ptr)
 		bool success = handle_packets(sys);
 
 		if (success) {
+			update_haptics(sys);
 			rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
 
 			os_mutex_lock(&sys->dev_mutex);

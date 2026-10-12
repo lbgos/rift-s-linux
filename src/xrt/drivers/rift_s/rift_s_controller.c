@@ -2290,6 +2290,20 @@ rift_s_controller_pose_frames(bool left, struct xrt_pose *device_aim, struct xrt
 	math_pose_transform(&device_model, &model_aim, device_aim);
 }
 
+static xrt_result_t
+rift_s_controller_set_output(struct xrt_device *xdev, enum xrt_output_name name,
+                             const struct xrt_output_value *value)
+{
+	struct rift_s_controller *ctrl = (struct rift_s_controller *)xdev;
+	if (name != XRT_OUTPUT_NAME_TOUCH_HAPTIC || value->type != XRT_OUTPUT_VALUE_TYPE_VIBRATION)
+		return XRT_ERROR_OUTPUT_UNSUPPORTED;
+	os_mutex_lock(&ctrl->mutex);
+	uint64_t id = ctrl->device_id;
+	os_mutex_unlock(&ctrl->mutex);
+	unsigned hand = xdev->device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0;
+	return rift_s_system_set_haptic(ctrl->sys, hand, id, &value->vibration);
+}
+
 struct rift_s_controller *
 rift_s_controller_create(struct rift_s_system *sys, enum xrt_device_type device_type)
 {
@@ -2312,6 +2326,7 @@ rift_s_controller_create(struct rift_s_system *sys, enum xrt_device_type device_
 
 	u_device_populate_function_pointers(&ctrl->base, rift_s_controller_get_tracked_pose, rift_s_controller_destroy);
 	ctrl->base.update_inputs = rift_s_controller_update_inputs;
+	ctrl->base.set_output = rift_s_controller_set_output;
 	ctrl->base.get_view_poses = u_device_get_view_poses;
 	ctrl->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
 	ctrl->base.device_type = device_type;

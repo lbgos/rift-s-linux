@@ -77,6 +77,16 @@ struct rift_s_tracked_device
 	rift_s_device_type device_type;
 };
 
+struct rift_s_haptic_radio
+{
+	struct rift_s_system *sys;
+	unsigned hand;
+	uint64_t device_id, sent_device_id;
+	timepoint_ns end_ns, refresh_ns, retry_ns;
+	uint8_t amplitude, sent_amplitude, applied_amplitude;
+	bool in_flight;
+};
+
 struct rift_s_system
 {
 	struct xrt_tracking_origin base;
@@ -96,6 +106,8 @@ struct rift_s_system
 
 	/* Radio comms manager */
 	rift_s_radio_state radio_state;
+	// Requests are protected by dev_mutex; only the USB thread touches the radio queue.
+	struct rift_s_haptic_radio haptics[MAX_TRACKED_DEVICES];
 
 	/* Device lock protects device access */
 	struct os_mutex dev_mutex;
@@ -142,6 +154,10 @@ rift_s_system_remove_hmd(struct rift_s_system *sys);
 
 struct xrt_device *
 rift_s_system_get_controller(struct rift_s_system *sys, int index);
+xrt_result_t
+rift_s_system_set_haptic(struct rift_s_system *sys, unsigned hand, uint64_t device_id,
+                         const struct xrt_output_value_vibration *value);
+
 void
 rift_s_system_remove_controller(struct rift_s_system *sys, struct rift_s_controller *ctrl);
 
