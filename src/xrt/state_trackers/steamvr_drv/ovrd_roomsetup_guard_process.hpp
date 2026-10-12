@@ -32,6 +32,14 @@ public:
 	}
 	bool start()
 	{
+		if (pid > 0) {
+			// Activate can run again on the same driver object. Reuse the live
+			// guard instead of orphaning it behind a second child.
+			if (waitpid(pid, nullptr, WNOHANG) == 0) return true;
+			pid = -1;
+			acknowledged = false;
+			if (acknowledgement >= 0) { close(acknowledgement); acknowledgement = -1; }
+		}
 		Dl_info module{};
 		char server[4096];
 		ssize_t length = readlink("/proc/self/exe", server, sizeof(server) - 1);
