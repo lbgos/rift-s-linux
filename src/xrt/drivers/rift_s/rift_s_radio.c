@@ -64,7 +64,13 @@ rift_s_radio_update(rift_s_radio_state *state, struct os_hid_device *hid)
 			rift_s_radio_command *cmd = state->pending_commands;
 			rift_s_hmd_radio_command_t *pkt = &cmd->read_command;
 
-			os_hid_set_feature(hid, (uint8_t *)pkt, sizeof(*pkt));
+			if (os_hid_set_feature(hid, (uint8_t *)pkt, sizeof(*pkt)) < 0) {
+				/* Leave the command queued so a transient failure retries
+				 * next update instead of wedging the queue on a reply
+				 * that will never arrive. */
+				RIFT_S_DEBUG("Failed to send controller radio command");
+				break;
+			}
 			// rift_s_hexdump_buffer ("ControllerFWSend", (unsigned char *)(pkt), sizeof(*pkt));
 			state->command_result_pending = true;
 		}
