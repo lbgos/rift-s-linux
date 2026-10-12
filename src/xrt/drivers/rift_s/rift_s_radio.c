@@ -305,10 +305,10 @@ read_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, rift
 	read_cmd[7] = json_read->cur_offset >> 24;
 	read_cmd[8] = read_len;
 
+	// Queue failure may synchronously finish and free json_read.
+	json_read->cur_offset += read_len;
 	rift_s_radio_queue_command(json_read->state, json_read->device_id, read_cmd, sizeof(read_cmd),
 	                           (rift_s_radio_completion_fn)read_json_cb, json_read);
-
-	json_read->cur_offset += read_len;
 	return;
 
 fail:
