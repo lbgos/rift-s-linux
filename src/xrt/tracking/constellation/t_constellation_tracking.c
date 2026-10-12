@@ -2101,6 +2101,11 @@ t_constellation_tracker_add_device(struct t_constellation_tracker *ct,
                                    struct t_constellation_tracked_device_callbacks *cb)
 {
 	os_mutex_lock(&ct->tracked_device_lock);
+	if (ct->num_devices >= CONSTELLATION_MAX_DEVICES) {
+		CT_ERROR(ct, "Constellation tracker: device limit (%d) reached, rejecting add", CONSTELLATION_MAX_DEVICES);
+		os_mutex_unlock(&ct->tracked_device_lock);
+		return NULL;
+	}
 	assert(ct->num_devices < CONSTELLATION_MAX_DEVICES);
 
 	CT_DEBUG(ct, "Constellation tracker: Adding device %d", ct->num_devices);
