@@ -209,7 +209,10 @@ rift_s_camera_create(struct xrt_prober *xp,
 	struct xrt_fs_mode *modes = NULL;
 	uint32_t count;
 
-	xrt_fs_enumerate_modes(finder.xfs, &modes, &count);
+	if (!xrt_fs_enumerate_modes(finder.xfs, &modes, &count) || modes == NULL) {
+		RIFT_S_ERROR("Couldn't enumerate camera input formats.");
+		goto cleanup;
+	}
 
 	bool found_mode = false;
 	uint32_t selected_mode = 0;
@@ -229,6 +232,7 @@ rift_s_camera_create(struct xrt_prober *xp,
 	if (!found_mode) {
 		selected_mode = 0;
 		RIFT_S_ERROR("Couldn't find compatible camera input format.");
+		free(modes);
 		goto cleanup;
 	}
 
@@ -252,7 +256,10 @@ rift_s_camera_create(struct xrt_prober *xp,
 	u_var_add_sink_debug(cam, &cam->debug_sinks[1], "Controller Streams");
 
 	/* Finally, start the video feed */
-	xrt_fs_stream_start(finder.xfs, tmp, XRT_FS_CAPTURE_TYPE_TRACKING, selected_mode);
+	if (!xrt_fs_stream_start(finder.xfs, tmp, XRT_FS_CAPTURE_TYPE_TRACKING, selected_mode)) {
+		RIFT_S_ERROR("Couldn't start camera video feed.");
+		goto cleanup;
+	}
 
 	return cam;
 
