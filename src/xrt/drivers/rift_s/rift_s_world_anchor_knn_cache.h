@@ -138,8 +138,9 @@ public:
 
 	// Exact memoized knnMatch with k == kNeighbors. On any unexpected query layout the
 	// call falls back to a direct uncached knnMatch so behavior never changes.
+	template <typename Matcher>
 	void
-	knnMatch(cv::DescriptorMatcher &matcher,
+	knnMatch(Matcher &matcher,
 	         const cv::Mat &query,
 	         std::vector<std::vector<cv::DMatch>> &out,
 	         int k = kNeighbors)

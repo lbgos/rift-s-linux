@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "rift_s_world_anchor.h"
 #include "rift_s_world_anchor_knn_cache.h"
+#include "rift_s_world_matcher.hpp"
 #include "util/u_json.h"
 #include "util/u_logging.h"
 #include <cstdlib>
@@ -860,7 +861,7 @@ struct rift_s_world_anchor
 	bool index_dirty = true;
 	std::vector<cv::Vec3d> indexed_world;
 	cv::Mat indexed_descriptors[2];
-	cv::Ptr<cv::DescriptorMatcher> index[2];
+	std::unique_ptr<RiftSWorldMatcher> index[2];
 	// Bounded exact memo of knnMatch 4-neighbor lists per bank. Cleared on every index
 	// rebuild and whenever the map is replaced/cleared/reloaded (see index_dirty sites).
 	rift_s_knn_memo::ExactKnnMemo knn_cache[2];
@@ -1420,13 +1421,7 @@ build_index(rift_s_world_anchor &a)
 			for (const auto &point : k.points)
 				std::memcpy(a.indexed_descriptors[bank].ptr(int(row++)), point.descriptors[bank].data(),
 				            32);
-		if (a.indexed_world.size() > 2000)
-			a.index[bank] =
-			    cv::makePtr<cv::FlannBasedMatcher>(cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
-		else
-			a.index[bank] = cv::makePtr<cv::BFMatcher>(cv::NORM_HAMMING);
-		a.index[bank]->add(std::vector<cv::Mat>{a.indexed_descriptors[bank]});
-		a.index[bank]->train();
+		a.index[bank] = std::make_unique<RiftSWorldMatcher>(a.indexed_descriptors[bank]);
 	}
 	a.index_dirty = false;
 }
