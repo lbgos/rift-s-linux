@@ -1277,9 +1277,9 @@ namespace {
 struct PublishedPoseController
 {
 	rift_s_controller ctrl = {};
-	ctrl.sys = &online_test_system();
 	explicit PublishedPoseController(bool right)
 	{
+		ctrl.sys = &online_test_system();
 		ctrl.base.device_type =
 		    right ? XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER : XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER;
 		ctrl.gravity_initialized = true;
@@ -1587,7 +1587,7 @@ namespace {
 struct FusionRig
 {
 	rift_s_controller ctrl = {};
-	ctrl.sys = &online_test_system();
+
 	xrt_vec3 bias;
 	xrt_quat truth = XRT_QUAT_IDENTITY;
 	timepoint_ns t = 1000000000;
@@ -1595,6 +1595,7 @@ struct FusionRig
 
 	explicit FusionRig(xrt_vec3 accel_bias) : bias(accel_bias)
 	{
+		ctrl.sys = &online_test_system();
 		m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 		ctrl.device_type = RIFT_S_DEVICE_RIGHT_CONTROLLER;
 		os_mutex_init(&ctrl.mutex);
