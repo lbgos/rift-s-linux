@@ -12,6 +12,9 @@
 #define VIEW_SIZE 320
 #define MAX_AGE_NS (250 * U_TIME_1MS_IN_NS)
 
+// Owned by target_builder_rift_s.c via RIFT_S_LOG; declared here to avoid a heavy header.
+extern enum u_logging_level rift_s_log_level;
+
 struct rift_s_passthrough
 {
 	struct xrt_camera base;
@@ -141,14 +144,17 @@ rift_s_passthrough_push(struct xrt_camera *camera, struct xrt_frame *left, struc
 		uint64_t now = os_monotonic_get_ns();
 		if (now - p->last_diag_ns >= 5ULL * U_TIME_1S_IN_NS) {
 			p->last_diag_ns = now;
-			struct sensor_pixels pixels[2] = {measure_pixels(left), measure_pixels(right)};
-			double count = (double)left->width * left->height;
-			u_log(__FILE__, __LINE__, __func__, U_LOGGING_INFO,
-			      "Passthrough stereo sequence=%" PRIu64 " timestamp=%" PRIu64
-			      " left=%u,%u,%.3f right=%u,%u,%.3f rejected=%" PRIu64,
-			      left->source_sequence, left->timestamp, pixels[0].min, pixels[0].max,
-			      pixels[0].sum / count, pixels[1].min, pixels[1].max, pixels[1].sum / count,
-			      p->rejected_pairs);
+			// Periodic stereo health is debug-only; rejection warnings below still emit.
+			if (rift_s_log_level <= U_LOGGING_DEBUG) {
+				struct sensor_pixels pixels[2] = {measure_pixels(left), measure_pixels(right)};
+				double count = (double)left->width * left->height;
+				U_LOG_IFL_D(rift_s_log_level,
+				            "Passthrough stereo sequence=%" PRIu64 " timestamp=%" PRIu64
+				            " left=%u,%u,%.3f right=%u,%u,%.3f rejected=%" PRIu64,
+				            left->source_sequence, left->timestamp, pixels[0].min, pixels[0].max,
+				            pixels[0].sum / count, pixels[1].min, pixels[1].max,
+				            pixels[1].sum / count, p->rejected_pairs);
+			}
 		}
 		xrt_frame_reference(&p->raw[0], left);
 		xrt_frame_reference(&p->raw[1], right);

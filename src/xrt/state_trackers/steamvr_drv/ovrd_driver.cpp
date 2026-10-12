@@ -68,6 +68,9 @@ DEBUG_GET_ONCE_BOOL_OPTION(emulate_index_controller, "STEAMVR_EMULATE_INDEX_CONT
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
+// Repeated unhandled SteamVR events are diagnostics only; keep them behind explicit opt-in.
+DEBUG_GET_ONCE_BOOL_OPTION(steamvr_event_debug, "MONADO_STEAMVR_EVENT_DEBUG", false)
+
 DEBUG_GET_ONCE_BOOL_OPTION(native_room_setup, "STEAMVR_NATIVE_ROOM_SETUP", true)
 DEBUG_GET_ONCE_BOOL_OPTION(native_room_setup_vrlink, "STEAMVR_NATIVE_ROOM_SETUP_VRLINK", false)
 
@@ -2103,7 +2106,10 @@ CServerDriver_Monado::RunFrame()
 		case vr::VREvent_Compositor_ChaperoneBoundsShown:
 		case vr::VREvent_Compositor_ChaperoneBoundsHidden: break;
 
-		default: ovrd_log("Unhandled Event: %d\n", event.eventType);
+		default:
+			if (debug_get_bool_option_steamvr_event_debug())
+				ovrd_log("Unhandled Event: %d\n", event.eventType);
+			break;
 		}
 	}
 }

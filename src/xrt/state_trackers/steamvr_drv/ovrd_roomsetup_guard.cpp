@@ -211,9 +211,22 @@ static bool restore(vr::IVRChaperoneSetup &setup, const fs::path &path, const Sn
 	return read_file(path) == saved.file;
 }
 
+// Coordinate dump issues several public queries per call. Keep it behind an
+// explicit opt-in so default runs only pay for meaningful state changes/errors.
+static bool
+coords_debug_enabled()
+{
+	static const bool enabled = [] {
+		const char *value = getenv("MONADO_ROOMSETUP_COORDS_DEBUG");
+		return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+	}();
+	return enabled;
+}
+
 // Capture public coordinate state on transitions without changing calibration.
 static void log_coordinates(vr::IVRSystem &system, vr::IVRChaperoneSetup &setup, uint32_t event, uint32_t step)
 {
+	if (!coords_debug_enabled()) return;
 	auto raw_to_standing = system.GetRawZeroPoseToStandingAbsoluteTrackingPose();
 	auto seated_to_standing = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
 	vr::HmdMatrix34_t standing_to_raw{};
