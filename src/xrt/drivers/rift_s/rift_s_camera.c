@@ -55,6 +55,7 @@ struct rift_s_camera
 	struct os_mutex lock;
 
 	struct rift_s_tracker *tracker;
+	struct xrt_fs *frameserver;
 
 	struct rift_s_camera_calibration_block *camera_calibration;
 
@@ -171,6 +172,9 @@ rift_s_camera_create(struct xrt_prober *xp,
 	}
 
 	struct rift_s_camera *cam = U_TYPED_CALLOC(struct rift_s_camera);
+	if (cam == NULL)
+		return NULL;
+	cam->frameserver = finder.xfs;
 
 	if (os_mutex_init(&cam->lock) != 0) {
 		RIFT_S_ERROR("Failed to init camera configuration mutex");
@@ -267,6 +271,19 @@ rift_s_camera_create(struct xrt_prober *xp,
 cleanup:
 	rift_s_camera_destroy(cam);
 	return NULL;
+}
+
+void
+rift_s_camera_stop(struct rift_s_camera *cam)
+{
+	if (cam != NULL && cam->frameserver != NULL)
+		xrt_fs_stream_stop(cam->frameserver);
+}
+
+bool
+rift_s_camera_is_running(struct rift_s_camera *cam)
+{
+	return cam != NULL && xrt_fs_is_running(cam->frameserver);
 }
 
 void

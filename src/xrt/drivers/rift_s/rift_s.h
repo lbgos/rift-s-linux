@@ -86,6 +86,13 @@ struct rift_s_system
 	/* Packet processing thread */
 	struct os_thread_helper oth;
 	struct os_hid_device *handles[3];
+	//! Borrowed from the instance, which outlives all registered devices.
+	struct xrt_prober *prober;
+	char serial[XRT_DEVICE_NAME_LEN];
+	//! Atomic so pose callbacks never invert the system/controller lock order.
+	xrt_atomic_s32_t transport_online;
+	uint32_t read_errors[3];
+	timepoint_ns read_retry_ns[3];
 	uint64_t last_keep_alive;
 	// Raw proximity diagnostics must stay independent of the bench override.
 	uint64_t last_proximity_log_ns;
@@ -120,6 +127,8 @@ struct rift_s_system
 
 	/* Video feed handling */
 	struct xrt_frame_context xfctx;
+	//! Camera nodes can be replaced without destroying SLAM/constellation consumers.
+	struct xrt_frame_context camera_context;
 	struct rift_s_camera *cam;
 };
 
@@ -137,6 +146,9 @@ rift_s_system_radio(struct rift_s_system *sys);
 
 struct rift_s_tracker *
 rift_s_system_get_tracker(struct rift_s_system *sys);
+
+bool
+rift_s_system_is_online(struct rift_s_system *sys);
 
 struct xrt_device *
 rift_s_system_get_hmd(struct rift_s_system *sys);

@@ -56,7 +56,8 @@ os_hidraw_read(struct os_hid_device *ohdev, uint8_t *data, size_t length, int mi
 			return ret;
 		}
 		if (fds.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-			// Device disconnect?
+			// Preserve a meaningful error for callers that distinguish loss from interruption.
+			errno = (fds.revents & POLLNVAL) ? EBADF : ENODEV;
 			return -1;
 		}
 	}

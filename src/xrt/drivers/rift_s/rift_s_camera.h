@@ -35,4 +35,10 @@ void
 rift_s_camera_destroy(struct rift_s_camera *cam);
 
 void
+rift_s_camera_stop(struct rift_s_camera *cam);
+
+bool
+rift_s_camera_is_running(struct rift_s_camera *cam);
+
+void
 rift_s_camera_update(struct rift_s_camera *cam, struct os_hid_device *hid);

@@ -1438,12 +1438,13 @@ ctrl_irled_cb(bool success, uint8_t *response_bytes, int response_bytes_len, voi
 static void
 ctrl_config_cb(bool success, uint8_t *response_bytes, int response_bytes_len, struct rift_s_controller *ctrl)
 {
-	if (!success) {
-		RIFT_S_WARN("Failed to read controller config");
-		return;
-	}
 	os_mutex_lock(&ctrl->mutex);
 	ctrl->reading_config = false;
+	if (!success) {
+		RIFT_S_WARN("Failed to read controller config");
+		os_mutex_unlock(&ctrl->mutex);
+		return;
+	}
 	if (response_bytes_len < 0 ||
 	    !rift_s_decode_controller_config(response_bytes, (size_t)response_bytes_len, &ctrl->config)) {
 		RIFT_S_WARN("Failed to read controller config hand=%s", hand_alias(ctrl));
@@ -1548,14 +1549,14 @@ log_model_check(struct rift_s_controller *ctrl)
 static void
 ctrl_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, struct rift_s_controller *ctrl)
 {
-	if (!success) {
-		// Only radio shutdown completes commands unsuccessfully; the controller may be gone.
-		RIFT_S_DEBUG("Failed to read controller calibration block");
-		return;
-	}
-
 	os_mutex_lock(&ctrl->mutex);
 	ctrl->reading_calibration = false;
+	if (!success) {
+		RIFT_S_DEBUG("Failed to read controller calibration block");
+		ctrl->calibration_retry_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS;
+		os_mutex_unlock(&ctrl->mutex);
+		return;
+	}
 
 	RIFT_S_TRACE("Got Controller calibration device=%d:\n%s", ctrl->base.device_type, response_bytes);
 
@@ -1825,6 +1826,10 @@ rift_s_controller_get_tracked_pose(struct xrt_device *xdev,
 	}
 
 	struct xrt_relation_chain xrc = {0};
+	if (!rift_s_system_is_online(ctrl->sys)) {
+		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		return XRT_ERROR_POSE_NOT_ACTIVE;
+	}
 
 	os_mutex_lock(&ctrl->mutex);
 	// Constellation needs the bounded gyro-compensated gravity bootstrap. Aim/grip
@@ -1895,15 +1900,14 @@ rift_s_controller_destroy(struct xrt_device *xdev)
 	DRV_TRACE_MARKER();
 
 	RIFT_S_DEBUG("Destroying %s controller", ctrl->device_type == RIFT_S_DEVICE_LEFT_CONTROLLER ? "left" : "right");
+	/* Join USB/radio callbacks before removing the constellation connection. */
+	rift_s_system_remove_controller(ctrl->sys, ctrl);
 
 	// Tell the tracker that we're going away
 	if (ctrl->tracking_connection) {
 		t_constellation_tracked_device_connection_disconnect(ctrl->tracking_connection);
 		ctrl->tracking_connection = NULL;
 	}
-
-	/* Tell the system this controller is going away */
-	rift_s_system_remove_controller(ctrl->sys, ctrl);
 
 	// Save outside the IMU/USB path, after callbacks and device reports have stopped.
 	char path[1024];
@@ -2420,6 +2424,25 @@ rift_s_controller_create(struct rift_s_system *sys, enum xrt_device_type device_
 	reset_position_filter(ctrl);
 	ctrl->tracking_connection = rift_s_tracker_add_controller(tracker, &ctrl->base, &tracking_callbacks);
 	return ctrl;
+}
+
+void
+rift_s_controller_device_lost(struct rift_s_controller *ctrl)
+{
+	os_mutex_lock(&ctrl->mutex);
+	// The next report re-applies radio configuration even for the same paired ID.
+	ctrl->device_id = 0;
+	ctrl->reading_config = ctrl->reading_calibration = false;
+	ctrl->have_config = ctrl->have_calibration = false;
+	ctrl->imu_descriptor_requested = ctrl->imu_descriptor_done = false;
+	ctrl->irled_requested = false;
+	ctrl->calibration_retry_ns = 0;
+	ctrl->last_tracked_pose_ts = 0;
+	ctrl->attitude_history_count = ctrl->attitude_history_start = 0;
+	ctrl->buttons = 0;
+	ctrl->fingers = 0;
+	reset_position_filter(ctrl);
+	os_mutex_unlock(&ctrl->mutex);
 }
 
 void

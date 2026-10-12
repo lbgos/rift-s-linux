@@ -420,6 +420,9 @@ rift_s_controller_get_tracked_pose(struct xrt_device *xdev,
                                    struct xrt_space_relation *out_relation);
 
 void
+rift_s_controller_device_lost(struct rift_s_controller *ctrl);
+
+void
 rift_s_controller_update_configuration(struct rift_s_controller *ctrl, uint64_t device_id);
 bool
 rift_s_controller_handle_report(struct rift_s_controller *ctrl,

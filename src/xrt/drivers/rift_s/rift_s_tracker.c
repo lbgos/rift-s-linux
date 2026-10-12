@@ -53,6 +53,9 @@
 #include "rift_s_tracker.h"
 #include "rift_s_passthrough.h"
 
+static void
+pause_slam_locked(struct rift_s_tracker *t);
+
 #ifdef XRT_FEATURE_SLAM
 static const bool slam_supported = true;
 #else

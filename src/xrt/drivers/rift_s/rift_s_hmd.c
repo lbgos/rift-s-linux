@@ -61,6 +61,8 @@ rift_s_get_tracked_pose(struct xrt_device *xdev,
 	}
 
 	U_ZERO(out_relation);
+	if (!rift_s_system_is_online(hmd->sys))
+		return XRT_ERROR_POSE_NOT_ACTIVE;
 
 	rift_s_tracker_get_tracked_pose(hmd->tracker, RIFT_S_TRACKER_POSE_DEVICE, at_timestamp_ns, out_relation);
 	return XRT_SUCCESS;
@@ -416,7 +418,7 @@ rift_s_hmd_set_proximity(struct rift_s_hmd *hmd, bool prox_sensor)
 	if (prox_sensor != hmd->display_on) {
 		struct os_hid_device *hid_hmd = rift_s_system_hid_handle(hmd->sys);
 
-		rift_s_set_screen_enable(hid_hmd, prox_sensor);
-		hmd->display_on = prox_sensor;
+		if (hid_hmd != NULL && rift_s_set_screen_enable(hid_hmd, prox_sensor) >= 0)
+			hmd->display_on = prox_sensor;
 	}
 }

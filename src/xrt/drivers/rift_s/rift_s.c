@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <assert.h>
+#include <errno.h>
 
 #include "math/m_api.h"
 #include "math/m_vec3.h"
@@ -51,6 +52,8 @@
 #include "rift_s_controller.h"
 #include "rift_s_camera.h"
 #include "rift_s_haptics.h"
+#include "rift_s_interface.h"
+#include "rift_s_usb.h"
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 
@@ -178,6 +181,10 @@ rift_s_system_create(struct xrt_prober *xp,
 	DRV_TRACE_MARKER();
 
 	struct rift_s_system *sys = U_TYPED_CALLOC(struct rift_s_system);
+	if (sys == NULL)
+		return NULL;
+	sys->prober = xp;
+	snprintf(sys->serial, sizeof(sys->serial), "%s", hmd_serial_no);
 	sys->base.type = XRT_TRACKING_TYPE_NONE;
 	sys->base.initial_offset.orientation.w = 1.0f;
 
@@ -234,13 +241,6 @@ rift_s_system_create(struct xrt_prober *xp,
 
 	sys->hmd = hmd;
 
-	// Start the packet reading thread
-	ret = os_thread_helper_start(&sys->oth, rift_s_run_thread, sys);
-	if (ret != 0) {
-		RIFT_S_ERROR("Failed to start packet processing thread");
-		goto cleanup;
-	}
-
 	/* Turn on the headset and display connection */
 	if (rift_s_hmd_enable(sys->handles[HMD_HID], true) < 0) {
 		RIFT_S_ERROR("Failed to enable Rift S");
@@ -262,7 +262,7 @@ rift_s_system_create(struct xrt_prober *xp,
 
 	// Start the camera input
 	struct rift_s_camera *cam =
-	    rift_s_camera_create(xp, &sys->xfctx, (const char *)hmd_serial_no, sys->handles[HMD_HID], sys->tracker,
+	    rift_s_camera_create(xp, &sys->camera_context, (const char *)hmd_serial_no, sys->handles[HMD_HID], sys->tracker,
 	                         &sys->hmd_config.camera_calibration);
 	if (cam == NULL) {
 		RIFT_S_ERROR("Failed to open Rift S camera device");
@@ -273,6 +273,12 @@ rift_s_system_create(struct xrt_prober *xp,
 	os_mutex_unlock(&sys->dev_mutex);
 
 	rift_s_tracker_start(sys->tracker);
+	xrt_atomic_s32_store(&sys->transport_online, 1);
+	ret = os_thread_helper_start(&sys->oth, rift_s_run_thread, sys);
+	if (ret != 0) {
+		RIFT_S_ERROR("Failed to start packet processing thread");
+		goto cleanup;
+	}
 
 	RIFT_S_DEBUG("Oculus Rift S driver ready");
 
@@ -303,6 +309,8 @@ rift_s_system_free(struct rift_s_system *sys)
 
 	/* Stop all the frame processing (has to happen before the cameras
 	 * and tracker are destroyed */
+	rift_s_camera_stop(sys->cam);
+	xrt_frame_context_destroy_nodes(&sys->camera_context);
 	xrt_frame_context_destroy_nodes(&sys->xfctx);
 
 	rift_s_radio_state_clear(&sys->radio_state);
@@ -375,6 +383,12 @@ rift_s_system_get_tracker(struct rift_s_system *sys)
 	return sys->tracker;
 }
 
+bool
+rift_s_system_is_online(struct rift_s_system *sys)
+{
+	return xrt_atomic_s32_load(&sys->transport_online) != 0;
+}
+
 struct xrt_device *
 rift_s_system_get_hmd(struct rift_s_system *sys)
 {
@@ -384,6 +398,9 @@ rift_s_system_get_hmd(struct rift_s_system *sys)
 void
 rift_s_system_remove_hmd(struct rift_s_system *sys)
 {
+	os_thread_helper_stop_and_wait(&sys->oth);
+	xrt_atomic_s32_store(&sys->transport_online, 0);
+	rift_s_radio_state_clear(&sys->radio_state);
 	os_mutex_lock(&sys->dev_mutex);
 	sys->hmd = NULL;
 	os_mutex_unlock(&sys->dev_mutex);
@@ -409,6 +426,11 @@ rift_s_system_get_controller(struct rift_s_system *sys, int index)
 void
 rift_s_system_remove_controller(struct rift_s_system *sys, struct rift_s_controller *ctrl)
 {
+	// Registered devices are only destroyed at session teardown. Join the producer
+	// and finish radio callbacks while every controller is still alive.
+	os_thread_helper_stop_and_wait(&sys->oth);
+	xrt_atomic_s32_store(&sys->transport_online, 0);
+	rift_s_radio_state_clear(&sys->radio_state);
 	os_mutex_lock(&sys->dev_mutex);
 
 	for (int i = 0; i < MAX_TRACKED_DEVICES; i++) {
@@ -679,11 +701,11 @@ handle_controller_report(struct rift_s_system *sys, timepoint_ns local_ts, const
 	os_mutex_unlock(&sys->dev_mutex);
 }
 
-static bool
+static enum rift_s_usb_result
 handle_packets(struct rift_s_system *sys)
 {
 	unsigned char buf[FEATURE_BUFFER_SIZE];
-	bool ret = true;
+	enum rift_s_usb_result ret = RIFT_S_USB_OK;
 
 	// Handle keep alive messages
 	timepoint_ns now = os_monotonic_get_ns();
@@ -699,14 +721,31 @@ handle_packets(struct rift_s_system *sys)
 	for (int i = 0; i < 3; i++) {
 		if (sys->handles[i] == NULL)
 			continue;
+		if (now < sys->read_retry_ns[i]) {
+			ret = RIFT_S_USB_RETRY;
+			continue;
+		}
 
-		while (ret) {
+		while (true) {
+			errno = 0;
 			int size = os_hid_read(sys->handles[i], buf, FEATURE_BUFFER_SIZE, 0);
 			if (size < 0) {
-				RIFT_S_ERROR("error reading from HMD device");
-				ret = false;
+				int error = errno;
+				uint32_t errors = ++sys->read_errors[i];
+				enum rift_s_usb_result result = rift_s_usb_read_error(error, errors);
+				if (result == RIFT_S_USB_LOST) {
+					RIFT_S_WARN("USB interface %d lost errno=%d", i, error);
+					return result;
+				}
+				sys->read_retry_ns[i] = os_monotonic_get_ns() + rift_s_usb_backoff_ns(errors);
+				if (errors == 1)
+					RIFT_S_DEBUG("USB interface %d interrupted errno=%d; retrying", i, error);
+				ret = RIFT_S_USB_RETRY;
 				break;
-			} else if (size == 0) {
+			}
+			sys->read_errors[i] = 0;
+			sys->read_retry_ns[i] = 0;
+			if (size == 0) {
 				break; // No more messages, return.
 			}
 
@@ -740,6 +779,112 @@ handle_packets(struct rift_s_system *sys)
 	return ret;
 }
 
+static void
+close_transport(struct rift_s_system *sys)
+{
+	xrt_atomic_s32_store(&sys->transport_online, 0);
+	rift_s_tracker_device_lost(sys->tracker);
+	// Do not hold dev_mutex across a frameserver join or a SLAM restart.
+	rift_s_camera_stop(sys->cam);
+	xrt_frame_context_destroy_nodes(&sys->camera_context);
+	os_mutex_lock(&sys->dev_mutex);
+	if (sys->cam != NULL) {
+		rift_s_camera_destroy(sys->cam);
+		sys->cam = NULL;
+	}
+	rift_s_radio_state_clear(&sys->radio_state);
+	for (unsigned i = 0; i < MAX_TRACKED_DEVICES; i++) {
+		if (sys->controllers[i] != NULL)
+			rift_s_controller_device_lost(sys->controllers[i]);
+		sys->haptics[i] = (struct rift_s_haptic_radio){.sys = sys, .hand = i};
+		rift_s_motion_reset_hand(sys->motion, i);
+	}
+	if (sys->hmd != NULL) {
+		sys->hmd->last_imu_timestamp_ns = 0;
+		sys->hmd->last_imu_timestamp32 = 0;
+		sys->hmd->display_on = false;
+	}
+	for (unsigned i = 0; i < 3; i++) {
+		if (sys->handles[i] != NULL)
+			os_hid_destroy(sys->handles[i]);
+		sys->handles[i] = NULL;
+	}
+	sys->num_active_tracked_devices = 0;
+	memset(sys->tracked_device, 0, sizeof(sys->tracked_device));
+	memset(sys->read_errors, 0, sizeof(sys->read_errors));
+	memset(sys->read_retry_ns, 0, sizeof(sys->read_retry_ns));
+	os_mutex_unlock(&sys->dev_mutex);
+	RIFT_S_WARN("Rift S transport closed; waiting for serial %s", sys->serial);
+}
+
+static bool
+open_transport(struct rift_s_system *sys)
+{
+	// Reprobe only after startup is complete; the instance owns this prober.
+	struct xrt_prober_device **devices = NULL;
+	size_t count = 0;
+	if (strcmp(sys->serial, "Unknown") == 0 || xrt_prober_probe(sys->prober) != XRT_SUCCESS ||
+	    xrt_prober_lock_list(sys->prober, &devices, &count) != XRT_SUCCESS)
+		return false;
+	struct os_hid_device *handles[3] = {0};
+	bool found = false;
+	for (size_t i = 0; i < count; i++) {
+		struct xrt_prober_device *dev = devices[i];
+		if (dev->vendor_id != OCULUS_VR_INC_VID || dev->product_id != OCULUS_RIFT_S_PID ||
+		    dev->bus != XRT_BUS_TYPE_USB)
+			continue;
+		unsigned char serial[XRT_DEVICE_NAME_LEN] = {0};
+		if (xrt_prober_get_string_descriptor(sys->prober, dev, XRT_PROBER_STRING_SERIAL_NUMBER,
+		                                     serial, sizeof(serial)) < 0 ||
+		    strcmp(sys->serial, (const char *)serial) != 0)
+			continue;
+		found = true;
+		for (unsigned iface = 0; iface < 3; iface++) {
+			if (xrt_prober_open_hid_interface(sys->prober, dev, 6 + iface, &handles[iface]) != 0) {
+				found = false;
+				break;
+			}
+		}
+		break;
+	}
+	xrt_prober_unlock_list(sys->prober, &devices);
+	if (!found)
+		goto fail;
+	// Calibration belongs to the matched serial. Reapply volatile hardware state.
+	if (rift_s_protocol_set_proximity_threshold(handles[HMD_HID], sys->hmd_config.proximity_threshold) < 0 ||
+	    rift_s_hmd_enable(handles[HMD_HID], true) < 0 ||
+	    rift_s_set_screen_enable(handles[HMD_HID], true) < 0)
+		goto fail;
+	// Power the panel during enumeration even off-head. Proximity packets restore
+	// ordinary standby after the DP link and camera input have returned.
+	os_nanosleep(2ULL * U_TIME_1S_IN_NS);
+	if (!os_thread_helper_is_running(&sys->oth))
+		goto fail;
+	struct rift_s_camera *cam = rift_s_camera_create(sys->prober, &sys->camera_context, sys->serial,
+	                                                handles[HMD_HID], sys->tracker,
+	                                                &sys->hmd_config.camera_calibration);
+	if (cam == NULL) {
+		xrt_frame_context_destroy_nodes(&sys->camera_context);
+		goto fail;
+	}
+	os_mutex_lock(&sys->dev_mutex);
+	memcpy(sys->handles, handles, sizeof(handles));
+	sys->cam = cam;
+	sys->last_keep_alive = 0;
+	if (sys->hmd != NULL)
+		sys->hmd->display_on = true;
+	os_mutex_unlock(&sys->dev_mutex);
+	rift_s_tracker_start(sys->tracker);
+	xrt_atomic_s32_store(&sys->transport_online, 1);
+	RIFT_S_WARN("Rift S serial %s reconnected; camera/radio resumed", sys->serial);
+	return true;
+fail:
+	for (unsigned i = 0; i < 3; i++) {
+		if (handles[i] != NULL)
+			os_hid_destroy(handles[i]);
+	}
+	return false;
+}
 
 static void *
 rift_s_run_thread(void *ptr)
@@ -757,9 +902,12 @@ rift_s_run_thread(void *ptr)
 	while (os_thread_helper_is_running_locked(&sys->oth)) {
 		os_thread_helper_unlock(&sys->oth);
 
-		bool success = handle_packets(sys);
-
-		if (success) {
+		if (!rift_s_system_is_online(sys)) {
+			if (!open_transport(sys))
+				os_nanosleep(U_TIME_1S_IN_NS);
+		} else if (handle_packets(sys) == RIFT_S_USB_LOST || !rift_s_camera_is_running(sys->cam)) {
+			close_transport(sys);
+		} else {
 			update_haptics(sys);
 			rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
 
@@ -771,10 +919,6 @@ rift_s_run_thread(void *ptr)
 		}
 
 		os_thread_helper_lock(&sys->oth);
-
-		if (!success) {
-			break;
-		}
 
 		if (os_thread_helper_is_running_locked(&sys->oth)) {
 			os_nanosleep(U_TIME_1MS_IN_NS / 2);
