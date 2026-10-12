@@ -1,6 +1,7 @@
 // Copyright 2026, lbgos
 // SPDX-License-Identifier: BSL-1.0
 #include "rift_s_world_anchor.h"
+#include "rift_s_world_anchor_knn_cache.h"
 #include "util/u_json.h"
 #include "util/u_logging.h"
 #include <cstdlib>
@@ -860,6 +861,9 @@ struct rift_s_world_anchor
 	std::vector<cv::Vec3d> indexed_world;
 	cv::Mat indexed_descriptors[2];
 	cv::Ptr<cv::DescriptorMatcher> index[2];
+	// Bounded exact memo of knnMatch 4-neighbor lists per bank. Cleared on every index
+	// rebuild and whenever the map is replaced/cleared/reloaded (see index_dirty sites).
+	rift_s_knn_memo::ExactKnnMemo knn_cache[2];
 	StereoWarp warps[RIFT_S_WORLD_MAX_CAMERAS][RIFT_S_WORLD_MAX_CAMERAS];
 	cv::Mat camera_rays[RIFT_S_WORLD_MAX_CAMERAS];
 	// Trusted capture reference for temporal depth in room directions without rig overlap.
@@ -1180,6 +1184,8 @@ load(rift_s_world_anchor &a)
 	a.bound_boundary = current_boundary;
 	a.boundary_bound = true;
 	a.index_dirty = true;
+	a.knn_cache[0].clear();
+	a.knn_cache[1].clear();
 	U_LOG_I("World map loaded keyframes=%zu bytes=%zu", a.frames.size(), b.data.size());
 	return true;
 }
@@ -1292,6 +1298,8 @@ rift_s_world_anchor_clear(rift_s_world_anchor *a)
 	a->storage_rejected = false;
 	a->reference_valid = false;
 	a->index_dirty = true;
+	a->knn_cache[0].clear();
+	a->knn_cache[1].clear();
 }
 bool
 rift_s_world_anchor_reload(rift_s_world_anchor *a)
@@ -1302,6 +1310,8 @@ rift_s_world_anchor_reload(rift_s_world_anchor *a)
 	a->boundary_bound = false;
 	a->reference_valid = false;
 	a->index_dirty = true;
+	a->knn_cache[0].clear();
+	a->knn_cache[1].clear();
 	bool loaded = !a->path.empty() && load(*a);
 	a->storage_rejected = !loaded && !a->path.empty() && access(a->path.c_str(), F_OK) == 0;
 	return loaded;
@@ -1396,6 +1406,9 @@ build_index(rift_s_world_anchor &a)
 {
 	if (!a.index_dirty)
 		return;
+	// The memoized 4-neighbor lists are only valid for the previous index contents.
+	a.knn_cache[0].clear();
+	a.knn_cache[1].clear();
 	a.indexed_world.clear();
 	for (const auto &k : a.frames)
 		for (const auto &point : k.points)
@@ -1425,7 +1438,9 @@ room_matches(rift_s_world_anchor &a, const Features &f)
 		return {};
 	for (unsigned bank = 0; bank < 2; ++bank) {
 		std::vector<std::vector<cv::DMatch>> nearest;
-		a.index[bank]->knnMatch(f.descriptors, nearest, 4);
+		// Exact memo: identical 32-byte queries hit the bounded per-bank cache; misses
+		// are batched through one knnMatch call preserving row order and tie order.
+		a.knn_cache[bank].knnMatch(*a.index[bank], f.descriptors, nearest, 4);
 		for (const auto &list : nearest) {
 			if (list.empty() || list[0].distance >= 64)
 				continue;
@@ -1711,6 +1726,8 @@ rift_s_world_anchor_process_rig_gravity(rift_s_world_anchor *a,
 			} else
 				a->frames.push_back(std::move(keyframe));
 			a->index_dirty = true;
+			a->knn_cache[0].clear();
+			a->knn_cache[1].clear();
 			result->recorded = true;
 			result->keyframes = uint32_t(a->frames.size());
 			return true;

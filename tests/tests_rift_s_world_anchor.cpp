@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "catch_amalgamated.hpp"
 #include "rift_s_world_anchor.h"
+#include "rift_s_world_anchor_knn_cache.h"
 #include "rift_s_slam_guard.h"
 #include "../src/xrt/state_trackers/steamvr_drv/ovrd_world_universe.hpp"
 #include <opencv2/calib3d.hpp>
+#include <opencv2/features2d.hpp>
+#include <opencv2/flann.hpp>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
@@ -934,4 +937,284 @@ TEST_CASE("Room recovery pools sparse cross-session matches across cameras")
 				v.world_point = {random.uniform(-4.f, 4.f), random.uniform(-3.f, 3.f), random.uniform(-4.f, 4.f)};
 		CHECK_FALSE(rift_s_world_anchor_solve_rig_gravity(&c, obs, counts, 2, &tilt, &result));
 	}
+}
+
+namespace {
+cv::Mat
+knn_test_random_orb(int rows, uint64_t seed)
+{
+	cv::Mat m(rows, 32, CV_8U);
+	cv::RNG rng(seed);
+	rng.fill(m, cv::RNG::UNIFORM, 0, 256);
+	return m;
+}
+cv::Ptr<cv::DescriptorMatcher>
+knn_test_bf(const cv::Mat &train)
+{
+	auto m = cv::makePtr<cv::BFMatcher>(cv::NORM_HAMMING);
+	m->add(std::vector<cv::Mat>{train});
+	m->train();
+	return m;
+}
+cv::Ptr<cv::DescriptorMatcher>
+knn_test_lsh(const cv::Mat &train)
+{
+	// Same search params as the room index rebuild path.
+	auto m = cv::makePtr<cv::FlannBasedMatcher>(cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
+	m->add(std::vector<cv::Mat>{train});
+	m->train();
+	return m;
+}
+bool
+knn_lists_equal(const std::vector<std::vector<cv::DMatch>> &a, const std::vector<std::vector<cv::DMatch>> &b)
+{
+	if (a.size() != b.size())
+		return false;
+	for (size_t i = 0; i < a.size(); ++i) {
+		if (a[i].size() != b[i].size())
+			return false;
+		for (size_t j = 0; j < a[i].size(); ++j) {
+			if (a[i][j].queryIdx != b[i][j].queryIdx || a[i][j].trainIdx != b[i][j].trainIdx ||
+			    a[i][j].imgIdx != b[i][j].imgIdx || a[i][j].distance != b[i][j].distance)
+				return false;
+		}
+	}
+	return true;
+}
+void
+knn_check_equal(const std::vector<std::vector<cv::DMatch>> &a, const std::vector<std::vector<cv::DMatch>> &b)
+{
+	REQUIRE(a.size() == b.size());
+	for (size_t i = 0; i < a.size(); ++i) {
+		INFO("row " << i << " sizes " << a[i].size() << " vs " << b[i].size());
+		REQUIRE(a[i].size() == b[i].size());
+		for (size_t j = 0; j < a[i].size(); ++j) {
+			INFO("row " << i << " neighbor " << j);
+			CHECK(a[i][j].queryIdx == b[i][j].queryIdx);
+			CHECK(a[i][j].trainIdx == b[i][j].trainIdx);
+			CHECK(a[i][j].imgIdx == b[i][j].imgIdx);
+			CHECK(a[i][j].distance == b[i][j].distance);
+		}
+		// The matcher contract preserved here: queryIdx names the query row.
+		for (const auto &m : a[i])
+			CHECK(m.queryIdx == int(i));
+	}
+}
+} // namespace
+
+TEST_CASE("Knn memo preserves exact 4-neighbor results for repeats and reorder (BF small)")
+{
+	cv::Mat train = knn_test_random_orb(200, 101);
+	cv::Mat query = knn_test_random_orb(80, 202);
+	auto matcher = knn_test_bf(train);
+	std::vector<std::vector<cv::DMatch>> direct;
+	matcher->knnMatch(query, direct, 4);
+	REQUIRE(direct.size() == 80);
+
+	rift_s_knn_memo::ExactKnnMemo cache;
+	std::vector<std::vector<cv::DMatch>> first;
+	cache.knnMatch(*matcher, query, first, 4);
+	knn_check_equal(direct, first);
+
+	// Repeats hit the cache; results stay bit-exact including queryIdx/trainIdx.
+	std::vector<std::vector<cv::DMatch>> second;
+	cache.knnMatch(*matcher, query, second, 4);
+	knn_check_equal(direct, second);
+	CHECK(cache.size() <= rift_s_knn_memo::ExactKnnMemo::kMaxEntries);
+
+	// Reordered queries resolve per-descriptor, with queryIdx re-stamped to the new row.
+	cv::Mat reversed(query.rows, 32, CV_8U);
+	for (int i = 0; i < query.rows; ++i)
+		std::memcpy(reversed.ptr(i), query.ptr(query.rows - 1 - i), 32);
+	std::vector<std::vector<cv::DMatch>> direct_reversed;
+	matcher->knnMatch(reversed, direct_reversed, 4);
+	std::vector<std::vector<cv::DMatch>> cached_reversed;
+	cache.knnMatch(*matcher, reversed, cached_reversed, 4);
+	knn_check_equal(direct_reversed, cached_reversed);
+
+	// A single changed byte is a different key: unchanged rows stay exact and the changed
+	// row matches a fresh uncached query.
+	cv::Mat changed = query.clone();
+	changed.at<uint8_t>(7, 3) ^= 0x01;
+	changed.at<uint8_t>(20, 31) ^= 0x80;
+	std::vector<std::vector<cv::DMatch>> direct_changed;
+	matcher->knnMatch(changed, direct_changed, 4);
+	std::vector<std::vector<cv::DMatch>> cached_changed;
+	cache.knnMatch(*matcher, changed, cached_changed, 4);
+	knn_check_equal(direct_changed, cached_changed);
+
+	// Forced ties (duplicated train identities) keep matcher tie order through the cache.
+	cv::Mat tied = train.clone();
+	for (int r = 1; r < 6; ++r)
+		std::memcpy(tied.ptr(r), train.ptr(0), 32);
+	auto tied_matcher = knn_test_bf(tied);
+	cv::Mat tie_query(4, 32, CV_8U);
+	for (int r = 0; r < 4; ++r)
+		std::memcpy(tie_query.ptr(r), train.ptr(0), 32);
+	std::vector<std::vector<cv::DMatch>> tie_direct;
+	tied_matcher->knnMatch(tie_query, tie_direct, 4);
+	rift_s_knn_memo::ExactKnnMemo tie_cache;
+	std::vector<std::vector<cv::DMatch>> tie_cached;
+	tie_cache.knnMatch(*tied_matcher, tie_query, tie_cached, 4);
+	knn_check_equal(tie_direct, tie_cached);
+}
+
+TEST_CASE("Knn memo preserves exact 4-neighbor results on a large LSH map")
+{
+	// Above the 2000-point production threshold that selects the Flann LSH index.
+	cv::Mat train = knn_test_random_orb(2500, 303);
+	cv::Mat query = knn_test_random_orb(200, 404);
+	auto matcher = knn_test_lsh(train);
+	std::vector<std::vector<cv::DMatch>> direct;
+	matcher->knnMatch(query, direct, 4);
+	REQUIRE(direct.size() == 200);
+
+	rift_s_knn_memo::ExactKnnMemo cache;
+	std::vector<std::vector<cv::DMatch>> first;
+	cache.knnMatch(*matcher, query, first, 4);
+	knn_check_equal(direct, first);
+
+	// Second pass is served from cache (including any empty short lists) with identical order.
+	std::vector<std::vector<cv::DMatch>> second;
+	cache.knnMatch(*matcher, query, second, 4);
+	knn_check_equal(direct, second);
+
+	// Reordered plus-duplicate batch: duplicates of one descriptor share neighbors,
+	// queryIdx still names the new row.
+	cv::Mat mixed(120, 32, CV_8U);
+	for (int i = 0; i < 60; ++i)
+		std::memcpy(mixed.ptr(i), query.ptr(query.rows - 1 - i), 32);
+	for (int i = 60; i < 120; ++i)
+		std::memcpy(mixed.ptr(i), query.ptr(0), 32);
+	std::vector<std::vector<cv::DMatch>> direct_mixed;
+	matcher->knnMatch(mixed, direct_mixed, 4);
+	std::vector<std::vector<cv::DMatch>> cached_mixed;
+	cache.knnMatch(*matcher, mixed, cached_mixed, 4);
+	knn_check_equal(direct_mixed, cached_mixed);
+
+	// Short lists (train smaller than k) cache exactly too. BF serves small indexes in
+	// production; LSH requires k <= index size and is only built above 2000 points.
+	cv::Mat tiny_train = knn_test_random_orb(2, 505);
+	auto tiny = knn_test_bf(tiny_train);
+	cv::Mat tiny_query = knn_test_random_orb(10, 606);
+	std::vector<std::vector<cv::DMatch>> tiny_direct;
+	tiny->knnMatch(tiny_query, tiny_direct, 4);
+	rift_s_knn_memo::ExactKnnMemo tiny_cache;
+	std::vector<std::vector<cv::DMatch>> tiny_cached, tiny_repeat;
+	tiny_cache.knnMatch(*tiny, tiny_query, tiny_cached, 4);
+	tiny_cache.knnMatch(*tiny, tiny_query, tiny_repeat, 4);
+	knn_check_equal(tiny_direct, tiny_cached);
+	knn_check_equal(tiny_direct, tiny_repeat);
+}
+
+TEST_CASE("Knn memo handles changed descriptors, empty lists and index invalidation")
+{
+	// Empty neighbor lists are first-class cache entries.
+	rift_s_knn_memo::ExactKnnMemo cache;
+	uint8_t bytes[32] = {};
+	rift_s_knn_memo::DescriptorKey key = rift_s_knn_memo::make_key(bytes);
+	cache.insert(key, {});
+	REQUIRE(cache.size() == 1);
+	rift_s_knn_memo::CachedNeighbors got{};
+	REQUIRE(cache.lookup(key, got));
+	CHECK(got.count == 0);
+	// Duplicate inserts keep the original FIFO slot and do not grow the cache.
+	cache.insert(key, {});
+	CHECK(cache.size() == 1);
+
+	// Deterministic invalidation probe: query is an exact copy of trainA row 0, so the
+	// uncached answer against trainA is a distance-0 hit that trainB cannot reproduce.
+	cv::Mat train_a(64, 32, CV_8U, cv::Scalar(0xff));
+	cv::Mat train_b(64, 32, CV_8U, cv::Scalar(0xff));
+	std::memset(train_a.ptr(0), 0, 32);
+	std::memset(train_b.ptr(7), 0, 32);
+	auto matcher_a = knn_test_bf(train_a);
+	auto matcher_b = knn_test_bf(train_b);
+	cv::Mat query(4, 32, CV_8U, cv::Scalar(0xff));
+	std::memset(query.ptr(0), 0, 32);
+	std::memset(query.ptr(2), 0, 32);
+	std::vector<std::vector<cv::DMatch>> direct_a, direct_b;
+	matcher_a->knnMatch(query, direct_a, 4);
+	matcher_b->knnMatch(query, direct_b, 4);
+	REQUIRE(direct_a[0].size() == 4);
+	CHECK(direct_a[0][0].trainIdx == 0);
+	CHECK(direct_a[0][0].distance == 0);
+	REQUIRE(!knn_lists_equal(direct_a, direct_b));
+
+	rift_s_knn_memo::ExactKnnMemo bank;
+	std::vector<std::vector<cv::DMatch>> cached_a;
+	bank.knnMatch(*matcher_a, query, cached_a, 4);
+	knn_check_equal(direct_a, cached_a);
+	// Without a clear the stale bank would keep answering for the old index contents.
+	std::vector<std::vector<cv::DMatch>> stale;
+	bank.knnMatch(*matcher_b, query, stale, 4);
+	CHECK(!knn_lists_equal(stale, direct_b));
+	// Clearing on index rebuild restores exact behavior for the new index.
+	bank.clear();
+	CHECK(bank.size() == 0);
+	std::vector<std::vector<cv::DMatch>> cached_b;
+	bank.knnMatch(*matcher_b, query, cached_b, 4);
+	knn_check_equal(direct_b, cached_b);
+
+	// Per-bank isolation: the same query set against two different indexes stays exact.
+	rift_s_knn_memo::ExactKnnMemo banks[2];
+	cv::Mat shared = knn_test_random_orb(40, 707);
+	std::vector<std::vector<cv::DMatch>> da, db, ca, cb;
+	matcher_a->knnMatch(shared, da, 4);
+	matcher_b->knnMatch(shared, db, 4);
+	banks[0].knnMatch(*matcher_a, shared, ca, 4);
+	banks[1].knnMatch(*matcher_b, shared, cb, 4);
+	knn_check_equal(da, ca);
+	knn_check_equal(db, cb);
+}
+
+TEST_CASE("Knn memo batches mixed hits and misses in row order and bounds memory")
+{
+	cv::Mat train = knn_test_random_orb(300, 808);
+	cv::Mat query_a = knn_test_random_orb(60, 909);
+	auto matcher = knn_test_bf(train);
+	rift_s_knn_memo::ExactKnnMemo cache;
+	std::vector<std::vector<cv::DMatch>> out_a;
+	cache.knnMatch(*matcher, query_a, out_a, 4);
+	std::vector<std::vector<cv::DMatch>> direct_a;
+	matcher->knnMatch(query_a, direct_a, 4);
+	knn_check_equal(direct_a, out_a);
+
+	// Interleave 30 cache hits with 30 fresh misses; the batched miss query must preserve
+	// the caller's row order and queryIdx values.
+	cv::Mat fresh = knn_test_random_orb(30, 1010);
+	cv::Mat query_b(60, 32, CV_8U);
+	for (int i = 0; i < 30; ++i) {
+		std::memcpy(query_b.ptr(2 * i), query_a.ptr(2 * i), 32);
+		std::memcpy(query_b.ptr(2 * i + 1), fresh.ptr(i), 32);
+	}
+	std::vector<std::vector<cv::DMatch>> direct_b;
+	matcher->knnMatch(query_b, direct_b, 4);
+	std::vector<std::vector<cv::DMatch>> cached_b;
+	cache.knnMatch(*matcher, query_b, cached_b, 4);
+	knn_check_equal(direct_b, cached_b);
+
+	// Bounded FIFO: synthetic inserts past capacity evict the oldest but stay exact on re-query.
+	rift_s_knn_memo::ExactKnnMemo bounded;
+	for (size_t i = 0; i < rift_s_knn_memo::ExactKnnMemo::kMaxEntries + 1024; ++i) {
+		// Unique keys: embed the counter so all inserts are distinct and FIFO eviction is exercised.
+		uint8_t row[32] = {};
+		std::memcpy(row, &i, sizeof(i));
+		for (int b = 8; b < 32; ++b)
+			row[b] = uint8_t((i * 31 + b * 17) & 0xff);
+		std::vector<cv::DMatch> list{cv::DMatch(0, int(i % 300), 0, float(i % 251))};
+		bounded.insert(rift_s_knn_memo::make_key(row), list);
+	}
+	CHECK(bounded.size() == rift_s_knn_memo::ExactKnnMemo::kMaxEntries);
+	std::vector<std::vector<cv::DMatch>> direct_c, cached_c;
+	cv::Mat query_c = knn_test_random_orb(50, 1111);
+	matcher->knnMatch(query_c, direct_c, 4);
+	bounded.knnMatch(*matcher, query_c, cached_c, 4);
+	knn_check_equal(direct_c, cached_c);
+	CHECK(bounded.size() <= rift_s_knn_memo::ExactKnnMemo::kMaxEntries);
+
+	// Empty queries never touch the matcher and return empty.
+	std::vector<std::vector<cv::DMatch>> empty_out{{cv::DMatch(0, 1, 0, 5)}};
+	cache.knnMatch(*matcher, cv::Mat(), empty_out, 4);
+	CHECK(empty_out.empty());
 }
