@@ -1108,8 +1108,13 @@ public:
 
 		timepoint_ns now_ns = os_monotonic_get_ns();
 
-		struct xrt_space_relation rel;
-		xrt_device_get_tracked_pose(m_xdev, grip_name, now_ns, &rel);
+		struct xrt_space_relation rel{};
+		xrt_result_t result = xrt_device_get_tracked_pose(m_xdev, grip_name, now_ns, &rel);
+		if (is_rift_s_touch(m_xdev) && result == XRT_ERROR_POSE_NOT_ACTIVE) {
+			m_had_position = false;
+			m_pose = disconnected_pose();
+			return m_pose;
+		}
 
 		struct xrt_pose *offset = &m_xdev->tracking_origin->initial_offset;
 
@@ -1685,8 +1690,12 @@ CDeviceDriver_Monado::GetPose()
 {
 
 	timepoint_ns now_ns = os_monotonic_get_ns();
-	struct xrt_space_relation rel;
-	xrt_device_get_tracked_pose(m_xdev, XRT_INPUT_GENERIC_HEAD_POSE, now_ns, &rel);
+	struct xrt_space_relation rel{};
+	xrt_result_t result = xrt_device_get_tracked_pose(m_xdev, XRT_INPUT_GENERIC_HEAD_POSE, now_ns, &rel);
+	// A missing Rift S transport must publish a connection transition while the
+	// registered device and its index remain alive for native hot reconnect.
+	if (strcmp(m_xdev->str, "Oculus Rift S") == 0 && result == XRT_ERROR_POSE_NOT_ACTIVE)
+		return disconnected_pose();
 
 	struct xrt_pose *offset = &m_xdev->tracking_origin->initial_offset;
 

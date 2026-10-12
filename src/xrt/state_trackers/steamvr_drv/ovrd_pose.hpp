@@ -8,6 +8,17 @@
 #include "openvr_driver.h"
 #include <cmath>
 
+inline vr::DriverPose_t
+disconnected_pose()
+{
+	vr::DriverPose_t pose{};
+	pose.qWorldFromDriverRotation.w = 1;
+	pose.qDriverFromHeadRotation.w = 1;
+	pose.qRotation.w = 1;
+	pose.result = vr::TrackingResult_Uninitialized;
+	return pose;
+}
+
 inline void
 copy_vec3(struct xrt_vec3 *from, double *to)
 {
