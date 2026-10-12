@@ -1404,6 +1404,7 @@ constellation_tracker_process_frame_fast(struct xrt_frame_sink *sink, struct xrt
 
 		u_frame_create_roi(xf, cam->roi, &view->vframe);
 		view->bw = cam->bw;
+		view->bw_lock = &cam->bw_lock;
 
 		os_mutex_lock(&cam->bw_lock);
 		blobwatch_process(cam->bw, view->vframe, &view->bwobs);

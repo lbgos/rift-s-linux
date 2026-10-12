@@ -19,6 +19,8 @@
 #include "pose_metrics.h"
 #include "constrained_pose.h"
 
+#include "os/os_threading.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -70,6 +72,12 @@ struct tracking_sample_frame
 
 	/* blobs observation and the owning blobwatch */
 	blobwatch *bw;
+	/* Lock guarding bw's observation queue for the release in
+	 * constellation_tracking_sample_free(). The fast thread pops in
+	 * blobwatch_process() under this lock, but both the fast and the
+	 * long thread push back via sample_free(), so the release must take
+	 * it too. NULL when single-threaded (tests). */
+	struct os_mutex *bw_lock;
 	blobservation *bwobs;
 };
 

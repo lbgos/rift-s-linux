@@ -54,7 +54,15 @@ constellation_tracking_sample_free(struct constellation_tracking_sample *sample)
 		xrt_frame_reference(&view->vframe, NULL);
 		if (view->bwobs != NULL) {
 			assert(view->bw != NULL);
+			/* The fast thread pops observations under bw_lock while
+			 * both threads push them back here; serialize the push. */
+			if (view->bw_lock != NULL) {
+				os_mutex_lock(view->bw_lock);
+			}
 			blobwatch_release_observation(view->bw, view->bwobs);
+			if (view->bw_lock != NULL) {
+				os_mutex_unlock(view->bw_lock);
+			}
 		}
 	}
 
