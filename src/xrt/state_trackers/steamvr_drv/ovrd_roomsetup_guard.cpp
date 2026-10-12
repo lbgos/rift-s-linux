@@ -367,7 +367,9 @@ int main(int argc, char **argv)
 				bool immediate = std::chrono::steady_clock::now() <= commit_deadline;
 				native_commit = false; // Our restore also emits this event.
 				if (immediate && saved && compositor_failed()) failed = true;
-				if (immediate && failed && !repair()) { running = false; break; }
+				// A handled failure already restored its snapshot. Later finishes
+				// must not restore that stale snapshot over a newer setup.
+				if (immediate && failed && !failure_handled && !repair()) { running = false; break; }
 				if (immediate && world_setup && !failed) {
 					world_command("save");
 					world_setup = false;
