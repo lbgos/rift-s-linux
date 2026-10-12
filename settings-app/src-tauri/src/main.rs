@@ -511,6 +511,25 @@ fn start_native_room_setup() -> Result<(), String> {
     Ok(())
 }
 
+fn start_runtime(launcher: &Path) -> Result<(), String> {
+    // Bare `python` is absent on several distributions. Try `python3` first
+    // and only fall back when the interpreter itself is missing, so a failing
+    // script is never executed twice.
+    match Command::new("python3")
+        .arg(launcher)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("Command failed with {status}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            checked(Command::new("python").arg(launcher))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn checked(command: &mut Command) -> Result<(), String> {
     let status = command
         .stdout(Stdio::null())
@@ -612,7 +631,7 @@ async fn restart_steamvr(confirmed: bool) -> Result<String, String> {
         }
         let launcher = home()?.join("src/steamvr-fixes-tools/start-steamvr.py");
         if launcher.is_file() {
-            checked(Command::new("python").arg(launcher))?;
+            start_runtime(&launcher)?;
         } else {
             checked(Command::new("steam").arg("steam://rungameid/250820"))?;
         }
