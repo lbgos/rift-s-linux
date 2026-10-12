@@ -21,6 +21,7 @@ VkQueue idle_queue = VK_NULL_HANDLE;
 RingFields *idle_old_fields = nullptr;
 RingFields idle_new_fields{};
 bool idle_recreate_ring = false;
+bool idle_recreate_same_slot = false;
 bool idle_disable_ring = false;
 bool idle_zero_during_wait = false;
 VkResult submit_result = VK_SUCCESS;
@@ -45,7 +46,11 @@ VkResult VKAPI_CALL fake_idle(VkQueue)
 		// ready so a drain that misses ownership would reset or disable it.
 		idle_state->rings.erase(idle_buffer);
 		RingRecovery replacement{};
-		replacement.slot = reinterpret_cast<uintptr_t>(&idle_new_fields);
+		replacement.slot = reinterpret_cast<uintptr_t>(idle_recreate_same_slot ? idle_old_fields : &idle_new_fields);
+		if (idle_recreate_same_slot) {
+			replacement.draining = true;
+			replacement.drain_id = UINT64_MAX;
+		}
 		replacement.identity.buffer = idle_buffer;
 		replacement.identity.memory = idle_old_fields ? idle_old_fields->memory : VK_NULL_HANDLE;
 		replacement.identity.mapped = idle_new_fields.mapped;
@@ -554,6 +559,8 @@ TEST_CASE("SteamVR ring drain leaves a handle-reusing replacement alone")
 	idle_queue = queue;
 	idle_old_fields = &fields;
 	idle_new_fields = RingFields{reinterpret_cast<uintptr_t>(storage.data()), buffer, memory, original};
+	SECTION("replacement with a new slot") { idle_recreate_same_slot = false; }
+	SECTION("replacement draining with identical slot and Vulkan handles") { idle_recreate_same_slot = true; }
 	idle_recreate_ring = true;
 	recover_rings(f.state, queue, {command});
 	CHECK(idle_calls == 1);
@@ -564,7 +571,8 @@ TEST_CASE("SteamVR ring drain leaves a handle-reusing replacement alone")
 	CHECK(idle_new_fields.used == original);
 	CHECK(found->second.resets == 0);
 	CHECK_FALSE(found->second.disabled);
-	CHECK_FALSE(found->second.draining);
+	CHECK(found->second.draining == idle_recreate_same_slot);
+	idle_recreate_same_slot = false;
 }
 
 TEST_CASE("SteamVR ring drain fails closed on mid-wait changes and concurrent drains")

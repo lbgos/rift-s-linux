@@ -135,6 +135,7 @@ struct RingRecovery
 {
 	bool disabled = false;
 	bool draining = false;
+	uint64_t drain_id = 0;
 	uintptr_t slot = 0;
 	RingFields identity{};
 	VkQueue queue = VK_NULL_HANDLE;
@@ -316,7 +317,9 @@ void recover_rings(const std::shared_ptr<Device> &d, VkQueue queue, const std::v
 		VkDeviceMemory identity_memory;
 		uint64_t used;
 		uint64_t resets;
+		uint64_t id;
 	};
+	static uint64_t next_drain_id = 0; // Protected by the dispatch mutex.
 	std::vector<Drain> drains;
 	auto wait = next<PFN_vkQueueWaitIdle>(d, "vkQueueWaitIdle");
 	{
@@ -329,8 +332,9 @@ void recover_rings(const std::shared_ptr<Device> &d, VkQueue queue, const std::v
 			if (!before || !ring.ready(before->used)) continue;
 			if (!wait) { ring.disable("transfer queue wait unavailable"); continue; }
 			ring.draining = true;
+			ring.drain_id = ++next_drain_id;
 			drains.push_back({buffer, ring.slot, ring.identity.buffer, ring.identity.memory,
-			                  before->used, ring.resets});
+			                  before->used, ring.resets, ring.drain_id});
 		}
 	}
 	if (drains.empty()) return;
@@ -345,7 +349,7 @@ void recover_rings(const std::shared_ptr<Device> &d, VkQueue queue, const std::v
 		// Ownership: the buffer handle may have been destroyed and recreated
 		// while unlocked. A replacement starts with draining==false and its own
 		// slot/identity, so leave it alone instead of resetting or disabling it.
-		if (!ring.draining || ring.slot != drain.slot ||
+		if (!ring.draining || ring.drain_id != drain.id || ring.slot != drain.slot ||
 		    ring.identity.buffer != drain.identity_buffer ||
 		    ring.identity.memory != drain.identity_memory) continue;
 		ring.draining = false;
