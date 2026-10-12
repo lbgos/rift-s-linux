@@ -78,6 +78,7 @@ struct rift_s_camera
 
 	rift_s_camera_report_t camera_report;
 
+	uint64_t exposure_retry_ns;
 	uint16_t last_slam_exposure, target_exposure;
 	uint8_t last_slam_gain, target_gain;
 
@@ -570,31 +571,35 @@ update_expgain(struct rift_s_camera *cam, struct xrt_frame *xf)
 void
 rift_s_camera_update(struct rift_s_camera *cam, struct os_hid_device *hid)
 {
-	bool need_update = false;
-	int i;
-
+	uint64_t now = os_monotonic_get_ns();
+	if (now < cam->exposure_retry_ns)
+		return;
 	os_mutex_lock(&cam->lock);
-	if (cam->target_exposure != cam->last_slam_exposure) {
-		for (i = 0; i < 5; i++) {
-			cam->camera_report.slam_frame_exposures[i] = cam->target_exposure;
-		}
-		cam->last_slam_exposure = cam->target_exposure;
-		need_update = true;
-	}
-
-	if (cam->target_gain != cam->last_slam_gain) {
-		for (i = 0; i < 5; i++) {
-			cam->camera_report.slam_frame_gains[i] = cam->target_gain;
-		}
-		cam->last_slam_gain = cam->target_gain;
-		need_update = true;
-	}
+	uint16_t exposure = cam->target_exposure;
+	uint8_t gain = cam->target_gain;
 	os_mutex_unlock(&cam->lock);
+	if (exposure == cam->last_slam_exposure && gain == cam->last_slam_gain)
+		return;
 
-	if (need_update) {
-		RIFT_S_DEBUG("Updating AEG exposure to %u gain %u", cam->target_exposure, cam->target_gain);
-		if (rift_s_protocol_send_camera_report(hid, &cam->camera_report) < 0) {
-			RIFT_S_WARN("Failed to update camera settings");
-		}
+	// Keep firmware-owned fields from the current report when changing exposure.
+	rift_s_camera_report_t report = {0};
+	int read = os_hid_get_feature(hid, 0x05, (uint8_t *)&report, sizeof(report));
+	if (read != sizeof(report) || report.id != 0x05 || report.marker[0] != 0x26 ||
+	    report.marker[1] != 0 || report.marker[2] != 0x40) {
+		cam->exposure_retry_ns = now + 5 * U_TIME_1S_IN_NS;
+		RIFT_S_WARN("Failed to read camera settings; exposure updates paused for 5 seconds");
+		return;
 	}
+	for (unsigned i = 0; i < 5; ++i) {
+		report.slam_frame_exposures[i] = exposure;
+		report.slam_frame_gains[i] = gain;
+	}
+	if (rift_s_protocol_send_camera_report(hid, &report) < 0) {
+		cam->exposure_retry_ns = now + 5 * U_TIME_1S_IN_NS;
+		RIFT_S_WARN("Failed to update camera settings; exposure updates paused for 5 seconds");
+		return;
+	}
+	cam->camera_report = report;
+	cam->last_slam_exposure = exposure;
+	cam->last_slam_gain = gain;
 }

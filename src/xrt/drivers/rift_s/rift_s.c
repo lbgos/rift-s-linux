@@ -616,7 +616,7 @@ rift_s_run_thread(void *ptr)
 			rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
 
 			os_mutex_lock(&sys->dev_mutex);
-			if (sys->cam != NULL) {
+			if (sys->cam != NULL && sys->physical_proximity) {
 				rift_s_camera_update(sys->cam, sys->handles[HMD_HID]);
 			}
 			os_mutex_unlock(&sys->dev_mutex);
