@@ -1254,10 +1254,14 @@ joint_p3p_fallback(struct t_constellation_tracker *ct,
 	// Without a verified P3P root, the cold result stays as the claim but is not P3P's verdict.
 	*rejection = CONSTELLATION_CONSTRAINED_NO_PAIR;
 	*budget_exhausted = false;
-	struct joint_p3p_context *ctx = calloc(1, sizeof(*ctx));
+	struct joint_p3p_context *ctx = malloc(sizeof(*ctx));
 	if (!ctx) {
 		return false;
 	}
+	/* Only count/overflow need a defined start; candidate slots are
+	 * written before they are read. Avoid zeroing ~300KB per fallback. */
+	ctx->count = 0;
+	ctx->overflow = false;
 	ctx->model = state->led_model;
 	ctx->state = state;
 	ctx->views = views;
