@@ -1774,6 +1774,8 @@ void
 CDeviceDriver_Monado::GetRecommendedRenderTargetSize(uint32_t *pnWidth, uint32_t *pnHeight)
 {
 	int scale = debug_get_num_option_scale_percentage();
+	if (scale <= 0)
+		scale = 100;
 	float fscale = (float)scale / 100.f;
 
 	ovrd_get_recommended_render_target_size(m_xdev, fscale, pnWidth, pnHeight);
