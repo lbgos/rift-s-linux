@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #pragma once
 #include "xrt/xrt_defines.h"
+#include "util/u_time.h"
 #ifdef __cplusplus
 extern "C" {
 #endif

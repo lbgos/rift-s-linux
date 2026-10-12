@@ -25,7 +25,7 @@ rift_s_haptic_duration(const struct xrt_output_value_vibration *value)
 	time_duration_ns duration = value->duration_ns;
 	if (duration < 5 * U_TIME_1MS_IN_NS)
 		duration = 5 * U_TIME_1MS_IN_NS;
-	if (duration > 60 * U_TIME_1S_IN_NS)
-		duration = 60 * U_TIME_1S_IN_NS;
+	if (duration > 60LL * U_TIME_1S_IN_NS)
+		duration = 60LL * U_TIME_1S_IN_NS;
 	return duration;
 }

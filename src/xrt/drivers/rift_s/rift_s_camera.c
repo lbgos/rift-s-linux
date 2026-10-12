@@ -594,7 +594,7 @@ rift_s_camera_update(struct rift_s_camera *cam, struct os_hid_device *hid)
 	int read = os_hid_get_feature(hid, 0x05, (uint8_t *)&report, sizeof(report));
 	if (read != sizeof(report) || report.id != 0x05 || report.marker[0] != 0x26 ||
 	    report.marker[1] != 0 || report.marker[2] != 0x40) {
-		cam->exposure_retry_ns = now + 5 * U_TIME_1S_IN_NS;
+		cam->exposure_retry_ns = now + 5ULL * U_TIME_1S_IN_NS;
 		RIFT_S_WARN("Failed to read camera settings; exposure updates paused for 5 seconds");
 		return;
 	}
@@ -603,7 +603,7 @@ rift_s_camera_update(struct rift_s_camera *cam, struct os_hid_device *hid)
 		report.slam_frame_gains[i] = gain;
 	}
 	if (rift_s_protocol_send_camera_report(hid, &report) < 0) {
-		cam->exposure_retry_ns = now + 5 * U_TIME_1S_IN_NS;
+		cam->exposure_retry_ns = now + 5ULL * U_TIME_1S_IN_NS;
 		RIFT_S_WARN("Failed to update camera settings; exposure updates paused for 5 seconds");
 		return;
 	}
