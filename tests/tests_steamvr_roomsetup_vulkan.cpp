@@ -14,12 +14,47 @@ VkIndexType drawn_type;
 uint32_t idle_calls;
 VkResult idle_result;
 uint64_t *idle_cursor;
+bool idle_lock_free = false;
+std::shared_ptr<Device> idle_state;
+VkBuffer idle_buffer = VK_NULL_HANDLE;
+VkQueue idle_queue = VK_NULL_HANDLE;
+RingFields *idle_old_fields = nullptr;
+RingFields idle_new_fields{};
+bool idle_recreate_ring = false;
+bool idle_disable_ring = false;
+bool idle_zero_during_wait = false;
 VkResult submit_result = VK_SUCCESS;
 VkResult VKAPI_CALL fake_submit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence) { return submit_result; }
-VkResult VKAPI_CALL fake_idle(VkQueue) {
- ++idle_calls;
- if (idle_cursor) *idle_cursor += 4;
- return idle_result;
+VkResult VKAPI_CALL fake_idle(VkQueue)
+{
+	++idle_calls;
+	{
+		// recover_rings must not hold the dispatch lock across this wait.
+		std::unique_lock<std::mutex> attempt(mutex, std::try_to_lock);
+		idle_lock_free = attempt.owns_lock();
+	}
+	if (idle_cursor) *idle_cursor += 4;
+	if (idle_zero_during_wait && idle_old_fields) idle_old_fields->used = 0;
+	if (idle_disable_ring && idle_state) {
+		auto found = idle_state->rings.find(idle_buffer);
+		if (found != idle_state->rings.end()) found->second.disable("test disabled during drain");
+	}
+	if (idle_recreate_ring && idle_state) {
+		// Simulate vkDestroyBuffer + create/bind/map reusing the same handle
+		// while the drain wait is unlocked. The replacement is fully valid and
+		// ready so a drain that misses ownership would reset or disable it.
+		idle_state->rings.erase(idle_buffer);
+		RingRecovery replacement{};
+		replacement.slot = reinterpret_cast<uintptr_t>(&idle_new_fields);
+		replacement.identity.buffer = idle_buffer;
+		replacement.identity.memory = idle_old_fields ? idle_old_fields->memory : VK_NULL_HANDLE;
+		replacement.identity.mapped = idle_new_fields.mapped;
+		replacement.queue = idle_queue;
+		replacement.copied_end = idle_new_fields.used;
+		idle_state->rings.emplace(idle_buffer, std::move(replacement));
+		idle_recreate_ring = false;
+	}
+	return idle_result;
 }
 void VKAPI_CALL fake_bind(VkCommandBuffer, VkBuffer, VkDeviceSize, VkIndexType type) { bindings.push_back(type); }
 void VKAPI_CALL fake_draw(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
@@ -76,8 +111,24 @@ struct Fixture
 		storage.fill(0x5a);
 		copy_count = 0;
 		bindings.clear();
+		idle_lock_free = false;
+		idle_state.reset();
+		idle_buffer = VK_NULL_HANDLE;
+		idle_queue = VK_NULL_HANDLE;
+		idle_old_fields = nullptr;
+		idle_new_fields = {};
+		idle_recreate_ring = false;
+		idle_disable_ring = false;
+		idle_zero_during_wait = false;
 	}
-	~Fixture() { devices.erase(dispatch); }
+	~Fixture()
+	{
+		devices.erase(dispatch);
+		idle_state.reset();
+		idle_recreate_ring = false;
+		idle_disable_ring = false;
+		idle_zero_during_wait = false;
+	}
 };
 }
 
@@ -439,6 +490,140 @@ TEST_CASE("SteamVR ring reset drains submitted reads and rejects outstanding res
 		CHECK(ring.disabled);
 	}
 	idle_cursor = nullptr;
+}
+
+TEST_CASE("SteamVR ring drain releases the dispatch lock across the queue wait")
+{
+	Fixture f;
+	f.state->ring_allowed = true;
+	auto buffer = reinterpret_cast<VkBuffer>(uintptr_t{20});
+	auto memory = reinterpret_cast<VkDeviceMemory>(uintptr_t{21});
+	auto command = reinterpret_cast<VkCommandBuffer>(f.handle);
+	auto queue = reinterpret_cast<VkQueue>(f.handle);
+	RingFields fields{reinterpret_cast<uintptr_t>(storage.data()), buffer, memory, ring_capacity - ring_margin + 64};
+	f.state->buffers.emplace(buffer, Buffer{ring_capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, memory, 0});
+	f.state->mappings.emplace(memory, Mapping{storage.data(), 0, VK_WHOLE_SIZE});
+	identify_ring(f.state, memory, reinterpret_cast<void **>(&fields));
+	REQUIRE(f.state->rings.size() == 1);
+	auto &ring = f.state->rings.at(buffer);
+	ring.copy(command, fields.used);
+	ring.commands.at(command).ended = true;
+	idle_calls = 0;
+	idle_result = VK_SUCCESS;
+	idle_cursor = nullptr;
+	idle_lock_free = false;
+	const uint64_t original = fields.used;
+	VkSubmitInfo info{};
+	info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	info.commandBufferCount = 1;
+	info.pCommandBuffers = &command;
+	REQUIRE(vkQueueSubmit(queue, 1, &info, VK_NULL_HANDLE) == VK_SUCCESS);
+	CHECK(idle_calls == 1);
+	// The fake wait could only acquire the mutex if recover_rings waited unlocked.
+	CHECK(idle_lock_free);
+	CHECK(fields.used == 0);
+	CHECK(ring.resets == 1);
+	CHECK_FALSE(ring.disabled);
+	CHECK(original != 0);
+}
+
+TEST_CASE("SteamVR ring drain leaves a handle-reusing replacement alone")
+{
+	Fixture f;
+	f.state->ring_allowed = true;
+	auto buffer = reinterpret_cast<VkBuffer>(uintptr_t{20});
+	auto memory = reinterpret_cast<VkDeviceMemory>(uintptr_t{21});
+	auto command = reinterpret_cast<VkCommandBuffer>(f.handle);
+	auto queue = reinterpret_cast<VkQueue>(f.handle);
+	RingFields fields{reinterpret_cast<uintptr_t>(storage.data()), buffer, memory, ring_capacity - ring_margin + 64};
+	f.state->buffers.emplace(buffer, Buffer{ring_capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, memory, 0});
+	f.state->mappings.emplace(memory, Mapping{storage.data(), 0, VK_WHOLE_SIZE});
+	identify_ring(f.state, memory, reinterpret_cast<void **>(&fields));
+	REQUIRE(f.state->rings.size() == 1);
+	auto &setup = f.state->rings.at(buffer);
+	setup.copy(command, fields.used);
+	setup.commands.at(command).ended = true;
+	idle_calls = 0;
+	idle_result = VK_SUCCESS;
+	idle_cursor = nullptr;
+	const uint64_t original = fields.used;
+	// The replacement reuses the same buffer handle and cursor value and is fully
+	// valid, so only slot/identity ownership distinguishes it from the drained ring.
+	idle_state = f.state;
+	idle_buffer = buffer;
+	idle_queue = queue;
+	idle_old_fields = &fields;
+	idle_new_fields = RingFields{reinterpret_cast<uintptr_t>(storage.data()), buffer, memory, original};
+	idle_recreate_ring = true;
+	recover_rings(f.state, queue, {command});
+	CHECK(idle_calls == 1);
+	auto found = f.state->rings.find(buffer);
+	REQUIRE(found != f.state->rings.end());
+	// Neither the old slot nor the replacement may be reset or disabled.
+	CHECK(fields.used == original);
+	CHECK(idle_new_fields.used == original);
+	CHECK(found->second.resets == 0);
+	CHECK_FALSE(found->second.disabled);
+	CHECK_FALSE(found->second.draining);
+}
+
+TEST_CASE("SteamVR ring drain fails closed on mid-wait changes and concurrent drains")
+{
+	Fixture f;
+	f.state->ring_allowed = true;
+	auto buffer = reinterpret_cast<VkBuffer>(uintptr_t{20});
+	auto memory = reinterpret_cast<VkDeviceMemory>(uintptr_t{21});
+	auto command = reinterpret_cast<VkCommandBuffer>(f.handle);
+	auto queue = reinterpret_cast<VkQueue>(f.handle);
+	RingFields fields{reinterpret_cast<uintptr_t>(storage.data()), buffer, memory, ring_capacity - ring_margin + 64};
+	f.state->buffers.emplace(buffer, Buffer{ring_capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, memory, 0});
+	f.state->mappings.emplace(memory, Mapping{storage.data(), 0, VK_WHOLE_SIZE});
+	identify_ring(f.state, memory, reinterpret_cast<void **>(&fields));
+	REQUIRE(f.state->rings.size() == 1);
+	auto &ring = f.state->rings.at(buffer);
+	ring.copy(command, fields.used);
+	ring.commands.at(command).ended = true;
+	idle_calls = 0;
+	idle_result = VK_SUCCESS;
+	idle_cursor = nullptr;
+	const uint64_t original = fields.used;
+
+	SECTION("disabled during drain never resets") {
+		idle_state = f.state;
+		idle_buffer = buffer;
+		idle_disable_ring = true;
+		recover_rings(f.state, queue, {command});
+		CHECK(idle_calls == 1);
+		CHECK(fields.used == original);
+		CHECK(ring.disabled);
+		CHECK(ring.resets == 0);
+		CHECK_FALSE(ring.draining);
+	}
+	SECTION("failed wait stays a failure even when the cursor reads zero") {
+		idle_result = VK_ERROR_DEVICE_LOST;
+		idle_old_fields = &fields;
+		idle_zero_during_wait = true;
+		recover_rings(f.state, queue, {command});
+		CHECK(idle_calls == 1);
+		CHECK(fields.used == 0);
+		CHECK(ring.disabled);
+		CHECK(ring.resets == 0);
+	}
+	SECTION("concurrent drain in progress is skipped, not disabled") {
+		ring.draining = true;
+		recover_rings(f.state, queue, {command});
+		CHECK(idle_calls == 0);
+		CHECK(fields.used == original);
+		CHECK_FALSE(ring.disabled);
+		CHECK(ring.draining);
+		ring.draining = false;
+		idle_calls = 0;
+		recover_rings(f.state, queue, {command});
+		CHECK(idle_calls == 1);
+		CHECK(fields.used == 0);
+		CHECK(ring.resets == 1);
+		CHECK_FALSE(ring.disabled);
+	}
 }
 
 TEST_CASE("SteamVR unknown builds and inaccessible allocator storage fail closed")

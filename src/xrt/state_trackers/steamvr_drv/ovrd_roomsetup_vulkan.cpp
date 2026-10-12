@@ -134,6 +134,7 @@ struct RingCommand
 struct RingRecovery
 {
 	bool disabled = false;
+	bool draining = false;
 	uintptr_t slot = 0;
 	RingFields identity{};
 	VkQueue queue = VK_NULL_HANDLE;
@@ -304,26 +305,67 @@ void ring_copy(const std::shared_ptr<Device> &d, VkCommandBuffer command, VkBuff
 }
 void recover_rings(const std::shared_ptr<Device> &d, VkQueue queue, const std::vector<VkCommandBuffer> &commands)
 {
-	for (auto &[buffer, ring] : d->rings) {
-		if (ring.disabled || !ring.submitted(queue, commands)) continue;
-		auto before = validate_ring(d, ring);
-		if (!before || !ring.ready(before->used)) continue;
-		auto wait = next<PFN_vkQueueWaitIdle>(d, "vkQueueWaitIdle");
-		if (!wait) { ring.disable("transfer queue wait unavailable"); continue; }
-		auto start = std::chrono::steady_clock::now();
-		auto result = wait(queue);
-		auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+	// Draining the transfer queue can stall for milliseconds. Collect candidates
+	// under the dispatch lock, wait without it so other threads keep recording,
+	// then revalidate ownership before resetting the cursor.
+	struct Drain
+	{
+		VkBuffer buffer;
+		uintptr_t slot;
+		VkBuffer identity_buffer;
+		VkDeviceMemory identity_memory;
+		uint64_t used;
+		uint64_t resets;
+	};
+	std::vector<Drain> drains;
+	auto wait = next<PFN_vkQueueWaitIdle>(d, "vkQueueWaitIdle");
+	{
+		std::lock_guard guard(mutex);
+		for (auto &[buffer, ring] : d->rings) {
+			// A ring already draining in a concurrent recovery is skipped, not
+			// disabled: its drain owns the reset decision.
+			if (ring.disabled || ring.draining || !ring.submitted(queue, commands)) continue;
+			auto before = validate_ring(d, ring);
+			if (!before || !ring.ready(before->used)) continue;
+			if (!wait) { ring.disable("transfer queue wait unavailable"); continue; }
+			ring.draining = true;
+			drains.push_back({buffer, ring.slot, ring.identity.buffer, ring.identity.memory,
+			                  before->used, ring.resets});
+		}
+	}
+	if (drains.empty()) return;
+	auto start = std::chrono::steady_clock::now();
+	auto result = wait(queue);
+	auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+	std::lock_guard guard(mutex);
+	for (const auto &drain : drains) {
+		auto found = d->rings.find(drain.buffer);
+		if (found == d->rings.end()) continue;
+		auto &ring = found->second;
+		// Ownership: the buffer handle may have been destroyed and recreated
+		// while unlocked. A replacement starts with draining==false and its own
+		// slot/identity, so leave it alone instead of resetting or disabling it.
+		if (!ring.draining || ring.slot != drain.slot ||
+		    ring.identity.buffer != drain.identity_buffer ||
+		    ring.identity.memory != drain.identity_memory) continue;
+		ring.draining = false;
+		// Recheck after the wait: another thread may have disabled the ring
+		// (unmap, author change, fresh recording) while the wait was unlocked.
+		if (ring.disabled) continue;
+		// A concurrent recovery already reset this ring; skip without disabling.
+		if (ring.resets != drain.resets) continue;
 		auto after = validate_ring(d, ring);
 		// Waiting drains submitted reads. It cannot drain a still-recording upload.
 		// A cursor change during the wait means an unobserved CPU reservation exists.
-		if (result != VK_SUCCESS || !after || after->used != before->used || !ring.ready(after->used)) {
+		// A failed wait stays a failure even if the cursor reads back zero.
+		if (result != VK_SUCCESS || !after || after->used != drain.used || !ring.ready(after->used)) {
 			ring.disable("queue drain failed or reservation changed during drain");
 			continue;
 		}
 		if (!local_write(ring.slot + offsetof(RingFields, used), 0)) { ring.disable("cursor write failed"); continue; }
 		ring.copied_end = 0;
 		fprintf(stderr, "monado-ring: reset=%llu used=%llu stall_us=%lld\n", (unsigned long long)++ring.resets,
-		        (unsigned long long)before->used, (long long)elapsed);
+		        (unsigned long long)drain.used, (long long)elapsed);
 	}
 }
 
@@ -610,11 +652,13 @@ vkQueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo *infos, VkFence 
 	}
 	auto result = next<PFN_vkQueueSubmit>(device, "vkQueueSubmit")(queue, count, infos, fence);
 	if (result == VK_SUCCESS && device->ring_allowed) {
-		std::lock_guard guard(mutex);
 		if (!future_wait) recover_rings(device, queue, commands);
-		else for (auto &[buffer, ring] : device->rings) {
-			bool touched = std::any_of(commands.begin(), commands.end(), [&ring](auto cmd) { return ring.commands.count(cmd); });
-			if (touched) ring.disable("upload has a nonzero timeline wait");
+		else {
+			std::lock_guard guard(mutex);
+			for (auto &[buffer, ring] : device->rings) {
+				bool touched = std::any_of(commands.begin(), commands.end(), [&ring](auto cmd) { return ring.commands.count(cmd); });
+				if (touched) ring.disable("upload has a nonzero timeline wait");
+			}
 		}
 	}
 	return result;
