@@ -98,6 +98,7 @@ update_rift_s_universe(vr::PropertyContainerHandle_t container, uint64_t &univer
 	int64_t stamp = 0;
 	std::string status;
 	stream >> stamp >> status;
+	if (!stream) return; // Missing or half-written status: keep the current universe, do not flap.
 	static const int64_t started = now;
 	uint64_t next = rift_s_world_universe(status, stamp, now, started);
 	if (next == universe) return;
