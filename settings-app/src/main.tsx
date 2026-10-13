@@ -78,8 +78,13 @@ function KeyValues({ rows }: { rows: [string, string][] }) {
   return <div className="t kv">{rows.map(([label, value]) => <div key={label}><span>{label}</span><span>{value}</span></div>)}</div>;
 }
 
+interface PreviewStatus { presented: number; width: number; height: number; error: string | null }
+
+// The headset view is drawn natively: a Wayland subsurface owned by the Rust
+// side covers the preview box and receives GPU frames at the headset refresh
+// rate. This component only reports where the box is and shows status text
+// in the box while no frame covers it.
 function HeadsetPreview({ enabled }: { enabled: boolean }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const [error, setError] = useState('');
   const [stats, setStats] = useState('');
@@ -101,77 +106,55 @@ function HeadsetPreview({ enabled }: { enabled: boolean }) {
     return () => removeEventListener('keydown', keys);
   }, [toggle]);
   useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let frames = 0, marked = performance.now(), size = '', latencies: number[] = [];
-    // The full per-frame cost (capture + JPEG + IPC + draw) is ~11 ms, so an
-    // uncapped loop burns a core without ever reaching the display rate.
-    // Pace at 30 fps; slower backend responses back off naturally.
-    const period = 1000 / 30;
-    async function poll() {
-      if (cancelled) return;
-      const frameStart = performance.now();
-      if (!document.hidden) {
-        try {
-          const started = performance.now();
-          const frame = await invoke<ArrayBuffer>('preview');
-          latencies.push(performance.now() - started);
-          if (cancelled) return;
-          const header = new DataView(frame);
-          const width = header.getUint32(0, true), height = header.getUint32(4, true);
-          if (!width || !height || width > 512 || height > 512 || frame.byteLength <= 8 || frame.byteLength > 8 + 512 * 512)
-            throw new Error('Headset preview frame invalid');
-          const target = canvas.current;
-          if (target) {
-            // Resetting the size clears the canvas; only do it on change.
-            if (target.width !== width) target.width = width;
-            if (target.height !== height) target.height = height;
-            const context = target.getContext('2d');
-            if (context) {
-              const bitmap = await createImageBitmap(new Blob([frame.slice(8)], { type: 'image/jpeg' }));
-              if (cancelled) { bitmap.close(); return; }
-              context.drawImage(bitmap, 0, 0);
-              bitmap.close();
-            }
-          }
-          size = `${width}×${height}`;
-          frames++;
-          setError('');
-        } catch (failure) {
-          if (cancelled) return;
-          const target = canvas.current;
-          target?.getContext('2d')?.clearRect(0, 0, target.width, target.height);
-          setError(String(failure));
-        }
-        const now = performance.now();
-        if (now - marked >= 1000) {
-          const avg = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
-          setStats(`${Math.round(frames * 1000 / (now - marked))} fps · ${size || '—'} · ${avg.toFixed(1)} ms`);
-          frames = 0; marked = now; latencies = [];
-        }
-      }
-      // Pace at 30 fps with setTimeout chaining: sleeping the full period
-      // and then waiting for the next vsync overshoots to ~21 fps, so the
-      // next poll is scheduled directly. Slower backend responses back off
-      // naturally since the next frame starts only after this one finishes.
-      if (!cancelled) {
-        let wait = period - (performance.now() - frameStart);
-        if (document.hidden) wait = Math.max(wait, 1000);
-        if (wait > 0)
-          await new Promise<void>(resolve => { timer = setTimeout(resolve, wait); });
-        if (!cancelled) timer = setTimeout(poll, 0);
-      }
+    const element = box.current;
+    if (!element) return;
+    let last = '';
+    function report(visible: boolean) {
+      const r = element!.getBoundingClientRect();
+      const layout = { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height), visible: visible && !document.hidden };
+      const key = JSON.stringify(layout);
+      if (key === last) return;
+      last = key;
+      invoke('preview_layout', layout).catch((failure: unknown) => setError(String(failure)));
     }
-    timer = setTimeout(poll, 0);
-    return () => { cancelled = true; clearTimeout(timer); };
+    const update = () => report(enabled);
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    addEventListener('resize', update);
+    document.addEventListener('visibilitychange', update);
+    update();
+    return () => {
+      observer.disconnect();
+      removeEventListener('resize', update);
+      document.removeEventListener('visibilitychange', update);
+      report(false);
+    };
   }, [enabled]);
-  return <div className="well preview" ref={box} onDoubleClick={toggle}>
-    <canvas ref={canvas} aria-label="Live headset view"/>
-    <button className="btn sm fs" onClick={toggle} aria-label={full ? 'Exit fullscreen preview' : 'Fullscreen preview'}>{full ? 'Exit' : 'Fullscreen'}</button>
-    {stats && !error && <span className="meta" aria-label="Preview rate">{stats}</span>}
-    {error && <output role="status">{error}</output>}
-  </div>;
+  useEffect(() => {
+    if (!enabled) return;
+    let previous: { presented: number; at: number } | null = null;
+    async function poll() {
+      try {
+        const status = await invoke<PreviewStatus>('preview_status');
+        const now = performance.now();
+        setError(status.error ?? '');
+        if (previous && !status.error) {
+          const fps = (status.presented - previous.presented) * 1000 / (now - previous.at);
+          setStats(`${Math.round(fps)} fps · ${status.width} × ${status.height}`);
+        } else setStats('');
+        previous = { presented: status.presented, at: now };
+      } catch (failure) { setError(String(failure)); }
+    }
+    void poll();
+    const timer = setInterval(() => void poll(), 1000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return <>
+    <h2 className="pv">Preview <span><span className="meta" aria-label="Preview rate">{stats}</span><button className="btn sm" onClick={toggle} aria-label={full ? 'Exit fullscreen preview' : 'Fullscreen preview'}>{full ? 'Exit' : 'Fullscreen'}</button></span></h2>
+    <div className="well preview" ref={box} onDoubleClick={toggle} aria-label="Live headset view">
+      {error && <output role="status">{error}</output>}
+    </div>
+  </>;
 }
 
 function App() {

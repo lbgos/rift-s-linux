@@ -28,6 +28,22 @@ unsafe extern "C" {
         height: *mut u32,
     ) -> *const std::ffi::c_char;
     fn rifts_shutdown();
+    fn rifts_surface_place(
+        webview: *mut std::ffi::c_void,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        visible: bool,
+    );
+    fn rifts_preview_step() -> i64;
+    fn rifts_preview_status(
+        presented: *mut u64,
+        width: *mut u32,
+        height: *mut u32,
+        error: *mut std::ffi::c_char,
+        capacity: usize,
+    ) -> usize;
 }
 static VR: Mutex<()> = Mutex::new(());
 static SERVER_PID: AtomicU32 = AtomicU32::new(0);
@@ -44,16 +60,34 @@ fn steam_home() -> Result<PathBuf, String> {
         .find(|p| p.join("steamapps/common/SteamVR").is_dir())
         .ok_or("SteamVR is not installed".into())
 }
+// This user's lowest PID with the exact process name, like `pgrep -u -x`
+// but without spawning. The last hit is revalidated with one /proc read, so
+// the 1 Hz status poll does not rescan /proc while SteamVR runs.
+static PIDS: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
 fn process_pid(name: &str) -> Option<String> {
-    let out = Command::new("pgrep")
-        .args(["-u", &unsafe { libc_uid() }.to_string(), "-x", name])
-        .output()
-        .ok()?;
-    String::from_utf8(out.stdout)
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc_uid() };
+    let matches = |pid: u32| {
+        fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim_end() == name)
+            && fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid)
+    };
+    let mut cache = PIDS.lock().ok()?;
+    if let Some(&(_, pid)) = cache.iter().find(|(n, _)| n == name) {
+        if matches(pid) {
+            return Some(pid.to_string());
+        }
+    }
+    let pid = fs::read_dir("/proc")
         .ok()?
-        .split_whitespace()
-        .next()
-        .map(str::to_owned)
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| matches(pid))
+        .min();
+    cache.retain(|(n, _)| n != name);
+    if let Some(pid) = pid {
+        cache.push((name.to_owned(), pid));
+    }
+    pid.map(|p| p.to_string())
 }
 fn server_pid() -> Option<String> {
     process_pid("vrserver")
@@ -161,6 +195,86 @@ async fn preview() -> Result<tauri::ipc::Response, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// Headset preview. The frontend reports the preview box; the GTK main thread
+// places a Wayland subsurface there and the preview thread presents one GPU
+// frame per compositor vsync into it (native/headset_preview.cpp).
+static PREVIEW_WAKE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+fn wake_preview() {
+    if let Ok(mut changed) = PREVIEW_WAKE.0.lock() {
+        *changed = true;
+        PREVIEW_WAKE.1.notify_one();
+    }
+}
+fn preview_thread() {
+    let (flag, wake) = &PREVIEW_WAKE;
+    loop {
+        let delay = match VR.lock() {
+            Ok(_lock) => unsafe { rifts_preview_step() },
+            Err(_) => return,
+        };
+        let Ok(mut changed) = flag.lock() else {
+            return;
+        };
+        // Negative: hidden until the next layout change. Early wake-ups are
+        // harmless; the step presents at most once per compositor frame.
+        if delay < 0 {
+            while !*changed {
+                let Ok(guard) = wake.wait(changed) else {
+                    return;
+                };
+                changed = guard;
+            }
+        } else if !*changed {
+            let Ok((guard, _)) = wake.wait_timeout(changed, Duration::from_micros(delay as u64))
+            else {
+                return;
+            };
+            changed = guard;
+        }
+        *changed = false;
+    }
+}
+
+#[tauri::command]
+fn preview_layout(
+    window: tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    visible: bool,
+) -> Result<(), String> {
+    window
+        .with_webview(move |webview| {
+            #[cfg(target_os = "linux")]
+            {
+                use webkit2gtk::glib::object::ObjectType;
+                unsafe {
+                    rifts_surface_place(webview.inner().as_ptr().cast(), x, y, width, height, visible)
+                };
+            }
+            wake_preview();
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn preview_status() -> Value {
+    let (mut presented, mut width, mut height) = (0, 0, 0);
+    let mut error = [0u8; 256];
+    let length = unsafe {
+        rifts_preview_status(
+            &mut presented,
+            &mut width,
+            &mut height,
+            error.as_mut_ptr().cast(),
+            error.len(),
+        )
+    };
+    let error = (length > 0).then(|| String::from_utf8_lossy(&error[..length]).into_owned());
+    json!({ "presented": presented, "width": width, "height": height, "error": error })
 }
 
 fn bench_mode() -> bool {
@@ -398,8 +512,12 @@ fn physical_proximity() -> Option<bool> {
 #[tauri::command]
 async fn snapshot() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let _lock = VR.lock().map_err(|e| e.to_string())?;
-        let mut value = vr_snapshot()?;
+        // Hold the OpenVR lock for the OpenVR calls only: the file reads and
+        // process spawns below must not stall the preview thread.
+        let mut value = {
+            let _lock = VR.lock().map_err(|e| e.to_string())?;
+            vr_snapshot()?
+        };
         let steam = steam_home().ok();
         let rect: Vec<[f64; 3]> = serde_json::from_value(value["rect"].clone()).unwrap_or_default();
         let walls: Vec<[[f64; 3]; 4]> =
@@ -739,6 +857,9 @@ fn main() {
     };
     tauri::Builder::default()
         .setup(move |app| {
+            std::thread::Builder::new()
+                .name("headset-preview".into())
+                .spawn(preview_thread)?;
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
                 let ready = window.clone();
@@ -761,6 +882,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             preview,
+            preview_layout,
+            preview_status,
             set_ipd,
             vr_action,
             export_logs,
