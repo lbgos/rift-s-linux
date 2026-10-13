@@ -1,6 +1,5 @@
 #include "openvr.h"
 #include "headset_preview.hpp"
-#include "overlay_preview.hpp"
 #include <dlfcn.h>
 #include <chrono>
 #include <cmath>
@@ -174,17 +173,11 @@ extern "C" int rifts_action(int action) {
 }
 extern "C" void rifts_shutdown() {
     rifts_headset_preview_shutdown();
-    rifts_overlay_shutdown();
     overlay_view = nullptr;
     if(camera_handle && camera) camera->ReleaseVideoStreamingService(camera_handle);
     camera_handle=0; camera=nullptr; previous_frame=false;
     if(library) { auto shutdown=reinterpret_cast<void (*)()>(dlsym(library,"VR_ShutdownInternal")); if(shutdown) shutdown(); dlclose(library); }
     library=nullptr; vr_system=nullptr; compositor=nullptr; settings=nullptr; chaperone=nullptr; setup=nullptr; overlay=nullptr; display=nullptr;
-}
-
-extern "C" const char *rifts_preview(const char *path, const uint8_t **data, size_t *bytes, uint32_t *width, uint32_t *height) {
-    if (!connect(path)) return "SteamVR is not running";
-    return rifts_overlay_frame(vr_system, compositor, overlay, overlay_view, data, bytes, width, height);
 }
 
 // Preview thread, OpenVR lock held. Uses the connection the snapshot poll

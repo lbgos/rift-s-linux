@@ -35,15 +35,6 @@ h2{margin:0 0 .75rem;font-size:.8125rem;font-weight:700;letter-spacing:.09em;tex
 .btn.lit:hover{background:#fff}
 .btn.sm{height:2rem;padding:0 .75rem;font-size:.8125rem}
 .btn.wide{width:100%;justify-content:center;height:2.75rem;font-size:1rem}
-.seg{display:flex;gap:2px}
-.seg label{flex:1;position:relative}
-.seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
-.seg span{display:block;text-align:center;line-height:2.25rem;background:var(--ctl);font-weight:600;font-size:.9rem}
-.seg label:first-child span{border-radius:3px 0 0 3px}
-.seg label:last-child span{border-radius:0 3px 3px 0}
-.seg input:hover+span{background:var(--ctl-h)}
-.seg input:checked+span{background:var(--lit);color:#000}
-.seg input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
 .range{display:flex;align-items:center;gap:1rem}
 .range output{width:4.5rem;text-align:right;font-weight:600}
 input[type=range]{--p:50%;flex:1;appearance:none;height:1.5rem;background:linear-gradient(var(--acc),var(--acc)) 0/var(--p) 4px no-repeat,linear-gradient(#55575d,#55575d) 0/100% 4px no-repeat;background-position:0 50%;cursor:pointer;margin:0}
@@ -93,11 +84,5 @@ nav a{display:flex;align-items:center;gap:.625rem;height:2.75rem;padding:0 1.125
 nav a:hover{background:#38393e;color:#fff}
 nav a[aria-current]{background:#46484e;color:#fff}
 nav svg{width:1.5rem;height:1.5rem;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linejoin:round;stroke-linecap:square}
-
-/* standalone mirror window */
-body.mirror nav,body.mirror main{display:none}
-#mirror-only{display:none}
-body.mirror #mirror-only{display:flex;flex:1;background:#000}
-#mirror-only svg{flex:1;width:100%;height:100%}
 
 #root{display:flex;flex-direction:column;height:100dvh} .well.empty{align-items:center;justify-content:center;color:var(--mut);font-size:.9rem}.error{position:fixed;bottom:4.5rem;left:2rem;color:var(--mut);font-size:.8125rem} dialog{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px;max-width:28rem}dialog::backdrop{background:#000a}.actions{display:flex;gap:.75rem;justify-content:flex-end}button:disabled{opacity:.5;cursor:default}.fb{overflow-wrap:anywhere}

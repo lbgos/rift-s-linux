@@ -15,8 +15,6 @@ interface Snapshot {
   dropped?: number | null;
   ipdSetting?: number | null;
   ipd?: number | null;
-  proximity?: boolean | null;
-  idle?: boolean;
   rect?: Quad | null;
   walls?: Quad[];
   floor?: number | null;
