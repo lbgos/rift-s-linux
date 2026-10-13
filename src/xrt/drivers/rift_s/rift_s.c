@@ -802,19 +802,7 @@ close_transport(struct rift_s_system *sys)
 	for (unsigned i = 0; i < MAX_TRACKED_DEVICES; i++) {
 		if (sys->controllers[i] != NULL)
 			rift_s_controller_device_lost(sys->controllers[i]);
-		// The raw register latches amplitude and the transport is gone, so a stop
-		// can no longer be sent. Keep the possibly-latched identity so the first
-		// update after reconnect turns it off instead of forgetting it.
-		uint64_t latched_id = sys->haptics[i].applied_device_id;
-		uint8_t latched_amp = sys->haptics[i].applied_amplitude;
-		if (latched_amp == 0 && sys->haptics[i].sent_amplitude != 0) {
-			// The write reached the HMD but the ack never came back.
-			latched_id = sys->haptics[i].sent_device_id;
-			latched_amp = sys->haptics[i].sent_amplitude;
-		}
-		sys->haptics[i] = (struct rift_s_haptic_radio){.sys = sys, .hand = i};
-		sys->haptics[i].applied_device_id = latched_id;
-		sys->haptics[i].applied_amplitude = latched_amp;
+		rift_s_haptic_transport_lost(&sys->haptics[i]);
 		rift_s_motion_reset_hand(sys->motion, i);
 	}
 	if (sys->hmd != NULL) {

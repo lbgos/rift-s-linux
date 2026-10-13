@@ -391,3 +391,68 @@ TEST_CASE("Haptic latched stop survives a transport reset")
 	amp = 0xFF;
 	CHECK_FALSE(rift_s_haptic_next(&idle, T0, &id, &amp));
 }
+
+TEST_CASE("Transport loss discards requests and preserves unacknowledged motor writes")
+{
+	rift_s_haptic_radio h = {};
+	h.hand = 1;
+	h.device_id = h.sent_device_id = 42;
+	h.sent_amplitude = 200;
+	h.amplitude = 200;
+	h.end_ns = T0 + 1000 * MS;
+	h.in_flight = true;
+	h.retry_ns = T0 + 10 * MS;
+	rift_s_haptic_transport_lost(&h);
+	CHECK(h.hand == 1);
+	CHECK(h.device_id == 0);
+	CHECK(h.end_ns == 0);
+	CHECK_FALSE(h.in_flight);
+	uint64_t id = 0;
+	uint8_t amp = 255;
+	REQUIRE(rift_s_haptic_next(&h, T0, &id, &amp));
+	CHECK(id == 42);
+	CHECK(amp == 0);
+	// A reconnect can fail again before the stop is sent.
+	rift_s_haptic_transport_lost(&h);
+	REQUIRE(rift_s_haptic_next(&h, T0, &id, &amp));
+	CHECK(id == 42);
+	h.device_id = 99;
+	h.amplitude = 100;
+	h.end_ns = T0 + 100 * MS;
+	REQUIRE(rift_s_haptic_next(&h, T0, &id, &amp));
+	CHECK(id == 42);
+	CHECK(amp == 0);
+	// The pending zero ack on loss must not erase the last acknowledged ON.
+	h.sent_device_id = 42;
+	h.sent_amplitude = 0;
+	h.in_flight = true;
+	rift_s_haptic_transport_lost(&h);
+	REQUIRE(rift_s_haptic_next(&h, T0, &id, &amp));
+	CHECK(id == 42);
+	CHECK(amp == 0);
+}
+
+TEST_CASE("Shutdown zero-only queue can send after a failed radio epoch")
+{
+	rift_s_radio_state st;
+	rift_s_radio_state_init(&st);
+	FakeHid hid = make_fake();
+	Cb a;
+	queue_one(&st, &a);
+	rift_s_radio_update_at(&st, &hid.base, T0);
+	rift_s_radio_update_at(&st, &hid.base, T0 + RIFT_S_RADIO_CMD_TIMEOUT_MS * MS);
+	REQUIRE(st.recovery_required);
+	rift_s_radio_state_clear(&st);
+	uint8_t stop[5];
+	rift_s_encode_haptic_raw(0, stop);
+	rift_s_radio_queue_report(&st, RIFT_S_RADIO_REPORT_WRITE, 42, stop, sizeof(stop), nullptr, nullptr);
+	hid.get_fn = [](uint8_t *data, size_t size) {
+		uint8_t payload[] = {0, 0, 0, 0};
+		return fill_response(data, size, 11, 0, payload, sizeof(payload));
+	};
+	st.recovery_required = false;
+	rift_s_radio_update_at(&st, &hid.base, T0 + 2000 * MS);
+	CHECK(hid.set_calls == 2);
+	CHECK(st.pending_commands == nullptr);
+	rift_s_radio_state_clear(&st);
+}

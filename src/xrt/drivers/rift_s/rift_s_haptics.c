@@ -31,6 +31,20 @@ rift_s_haptic_duration(const struct xrt_output_value_vibration *value)
 }
 
 
+void
+rift_s_haptic_transport_lost(struct rift_s_haptic_radio *h)
+{
+	uint64_t id = h->applied_device_id;
+	uint8_t amplitude = h->applied_amplitude;
+	if (amplitude == 0 && h->sent_amplitude != 0) {
+		id = h->sent_device_id;
+		amplitude = h->sent_amplitude;
+	}
+	*h = (struct rift_s_haptic_radio){.sys = h->sys, .hand = h->hand,
+	                                .applied_device_id = id, .applied_amplitude = amplitude};
+}
+
+
 bool
 rift_s_haptic_next(const struct rift_s_haptic_radio *h, timepoint_ns now, uint64_t *id, uint8_t *amplitude)
 {

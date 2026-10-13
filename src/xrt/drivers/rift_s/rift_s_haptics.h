@@ -17,6 +17,10 @@ struct rift_s_haptic_radio
 	bool in_flight;
 };
 
+//! Discard requests while retaining the identity that may still have a latched motor.
+void
+rift_s_haptic_transport_lost(struct rift_s_haptic_radio *h);
+
 //! Select the next serialized write, stopping an old identity before its replacement.
 bool
 rift_s_haptic_next(const struct rift_s_haptic_radio *h, timepoint_ns now, uint64_t *id, uint8_t *amplitude);
