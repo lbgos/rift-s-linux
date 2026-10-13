@@ -1,10 +1,14 @@
 # Rift S on Linux
 
-Free and open-source Oculus/Meta Rift S support for Linux SteamVR, built on Monado and Basalt. Steam and SteamVR are installed separately.
+**Rift S, liberated.** The Oculus/Meta Rift S, fully working on Linux SteamVR: in-headset Room Setup and boundary, headset and controller tracking, haptics, a Settings app and an in-headset desktop. No Oculus software, no Windows, no Meta account.
+
+Free and open source, built on Monado and Basalt. Steam and SteamVR are installed separately.
 
 ## Demo
 
-Demo video coming soon.
+[![Rift S on Linux: SteamVR dashboard, passthrough and the in-headset desktop](https://files.lbgos.dev/f/5d3660e46bee46740f70527368118dad/rift-s-linux-demo-74b99cc1.gif)](https://files.lbgos.dev/f/3a0ac9436abd84141d30bb87d0158c55/rift-s-linux-demo-take2-clean-5f638529.mp4)
+
+[Full-quality video (19 s, MP4)](https://files.lbgos.dev/f/3a0ac9436abd84141d30bb87d0158c55/rift-s-linux-demo-take2-clean-5f638529.mp4), recorded from SteamVR's VR View on the test machine.
 
 ## Status
 
