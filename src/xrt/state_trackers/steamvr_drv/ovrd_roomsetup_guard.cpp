@@ -168,8 +168,47 @@ static int unique_runtime_process(const fs::path &executable, pid_t expected = 0
 	return result;
 }
 
+// Read only new compositor diagnostics for this setup attempt. The assertion is
+// visible before the process finishes crash handling and its pidfd becomes ready.
+class OverflowLog
+{
+	fs::path path;
+	std::string needle;
+	uint64_t cursor = 0;
+	std::string suffix;
+public:
+	explicit OverflowLog(fs::path value, std::string match = "Vulkan transfer ring buffer overflow")
+	    : path(std::move(value)), needle(std::move(match)) {}
+	void begin()
+	{
+		std::error_code error;
+		cursor = fs::file_size(path, error);
+		if (error) cursor = 0;
+		suffix.clear();
+	}
+	bool overflowed()
+	{
+		std::error_code error;
+		uint64_t size = fs::file_size(path, error);
+		if (error) return false;
+		if (size < cursor) { cursor = 0; suffix.clear(); }
+		if (size == cursor) return false;
+		std::ifstream stream(path, std::ios::binary);
+		stream.seekg(cursor);
+		std::string bytes(static_cast<size_t>(std::min<uint64_t>(size - cursor, 65536)), '\0');
+		stream.read(bytes.data(), bytes.size());
+		bytes.resize(static_cast<size_t>(stream.gcount()));
+		cursor += bytes.size();
+		suffix += bytes;
+		bool found = suffix.find(needle) != std::string::npos;
+		if (suffix.size() > 128) suffix.erase(0, suffix.size() - 128);
+		return found;
+	}
+};
+
+
 // Replacement compositors can retain a broken direct-display session and grow
-// NVIDIA/SteamVR descriptors. Refresh the whole session after transport returns.
+// NVIDIA/SteamVR descriptors. Drain the crashed session after transport returns.
 // This bounded helper deliberately outlives the old server during shutdown.
 static int recover_display()
 {
@@ -188,8 +227,8 @@ static int recover_display()
 		return true;
 	};
 	if (!wait_session(std::chrono::seconds(10))) {
-		// A wedged old server must not leave an already-stopped monitor without
-		// a replacement. Signal only the pinned old session generations.
+		// A wedged old server must not retain the failed display resources.
+		// Signal only the pinned old session generations.
 		for (int fd : {3, 4, 5})
 			if (!exited(fd)) syscall(SYS_pidfd_send_signal, fd, SIGTERM, nullptr, 0);
 		if (!wait_session(std::chrono::seconds(5))) {
@@ -199,8 +238,10 @@ static int recover_display()
 		}
 	}
 	close(3); close(4); close(5);
-	execlp("steam", "steam", "steam://rungameid/250820", nullptr);
-	return 1;
+	// The guard is gone now, so it cannot observe a later user Quit. Never launch
+	// Steam from this detached helper; the user owns starting the next session.
+	fprintf(stderr, "monado-roomsetup-guard: display-loss session stopped; start SteamVR again\n");
+	return 0;
 }
 
 class DisplayHealth
@@ -222,32 +263,41 @@ class DisplayRecovery
 {
 	int compositor = -1;
 	pid_t requester = -1;
-	bool connected_once = false, lost = false;
+	bool connected_once = false, lost = false, crash_seen = false, quit_requested = false;
+	unsigned loss_streak = 0, attempts = 0;
+	OverflowLog crash_log;
 	std::chrono::steady_clock::time_point next_request{};
 	DisplayHealth display_health;
 public:
+	explicit DisplayRecovery(fs::path log = {})
+	    : crash_log(std::move(log), "Failed Watchdog timeout in thread Render in WaitForPresent")
+	{ crash_log.begin(); }
+	void note_quit() { quit_requested = true; }
 	~DisplayRecovery()
 	{
 		if (compositor >= 0) close(compositor);
-		// The session restart helper must survive this guard/server's shutdown.
+		// The cleanup helper must survive this guard/server's shutdown.
 		if (requester > 0) waitpid(requester, nullptr, WNOHANG);
 	}
 	void update(bool connected, float vsync_age, uint64_t vsync, int server, pid_t server_pid, const char *library)
 	{
 		auto now = std::chrono::steady_clock::now();
+		if (quit_requested) return;
 		if (requester > 0) {
 			int status = 0;
 			pid_t result = waitpid(requester, &status, WNOHANG);
 			if (result == requester || (result < 0 && errno == ECHILD)) {
 				requester = -1;
 				next_request = now + std::chrono::seconds(5);
-				fprintf(stderr, "monado-roomsetup-guard: session restart did not complete; retry in 5 seconds\n");
+				fprintf(stderr, "monado-roomsetup-guard: display-loss cleanup helper exited; retries capped at three\n");
 			}
 		}
+		if (loss_streak || lost) crash_seen |= crash_log.overflowed();
 		fs::path runtime = fs::path(library).parent_path();
 		bool stable = display_health.update(connected && !exited(compositor), vsync_age, vsync, now);
 		if (connected) {
 			connected_once = true;
+			loss_streak = 0;
 			if (exited(compositor)) {
 				// Adopt a replacement compositor if SteamVR already respawned
 				// one: killing the session then would destroy a self-healed
@@ -261,18 +311,30 @@ public:
 			}
 			// A watchdog can exit well after USB returns. Disarm only after native
 			// vsync advances continuously, never merely because the process lives.
-			if (lost && stable) lost = false;
+			if (lost && stable) {
+				lost = crash_seen = false;
+				attempts = 0;
+				crash_log.begin();
+			}
 		} else if (connected_once) {
-			lost = true;
+			if (loss_streak == 0 && !lost) { crash_log.begin(); crash_seen = false; }
+			// Five consecutive 100 ms polls reject one transient connection miss.
+			if (loss_streak < 5) ++loss_streak;
+			if (loss_streak >= 5) lost = true;
 		}
-		if (!connected || !lost || compositor < 0 || !exited(compositor) || requester > 0 ||
+		if (!connected || !lost || !crash_seen || attempts >= 3 || compositor < 0 || !exited(compositor) || requester > 0 ||
 		    now < next_request) return;
 		next_request = now + std::chrono::seconds(5);
 		int current_server = unique_runtime_process(runtime / "vrserver", server_pid);
 		if (current_server < 0) return;
 		close(current_server);
 		int monitor = unique_runtime_process(runtime / "vrmonitor");
-		if (monitor < 0) return;
+		if (monitor < 0) {
+			// There is no monitor generation left to signal. /dev/null is already
+			// readable, so exited() treats this slot as complete.
+			monitor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+			if (monitor < 0) return;
+		}
 		char executable[4096];
 		ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
 		if (length <= 0) { close(monitor); return; }
@@ -300,45 +362,13 @@ public:
 		posix_spawn_file_actions_destroy(&actions);
 		close(server_child); close(monitor_child); close(compositor_child);
 		if (spawned) requester = -1;
-		else fprintf(stderr, "monado-roomsetup-guard: automatically restarting SteamVR after display loss\n");
+		else {
+			++attempts;
+			fprintf(stderr, "monado-roomsetup-guard: draining crashed display-loss session, attempt %u/3; restart SteamVR manually\n", attempts);
+		}
 	}
 };
 
-// Read only new compositor diagnostics for this setup attempt. The assertion is
-// visible before the process finishes crash handling and its pidfd becomes ready.
-class OverflowLog
-{
-	fs::path path;
-	uint64_t cursor = 0;
-	std::string suffix;
-public:
-	explicit OverflowLog(fs::path value) : path(std::move(value)) {}
-	void begin()
-	{
-		std::error_code error;
-		cursor = fs::file_size(path, error);
-		if (error) cursor = 0;
-		suffix.clear();
-	}
-	bool overflowed()
-	{
-		std::error_code error;
-		uint64_t size = fs::file_size(path, error);
-		if (error) return false;
-		if (size < cursor) { cursor = 0; suffix.clear(); }
-		if (size == cursor) return false;
-		std::ifstream stream(path, std::ios::binary);
-		stream.seekg(cursor);
-		std::string bytes(static_cast<size_t>(std::min<uint64_t>(size - cursor, 65536)), '\0');
-		stream.read(bytes.data(), bytes.size());
-		bytes.resize(static_cast<size_t>(stream.gcount()));
-		cursor += bytes.size();
-		suffix += bytes;
-		bool found = suffix.find("Vulkan transfer ring buffer overflow") != std::string::npos;
-		if (suffix.size() > 128) suffix.erase(0, suffix.size() - 128);
-		return found;
-	}
-};
 
 struct Snapshot
 {
@@ -496,7 +526,7 @@ int main(int argc, char **argv)
 	std::string world_warning;
 	vr::VRNotificationId world_notification = 0;
 	auto next_notification_attempt = std::chrono::steady_clock::time_point{};
-	DisplayRecovery display_recovery;
+	DisplayRecovery display_recovery(log_path);
 	auto next_display_check = std::chrono::steady_clock::time_point{};
 	while (running && !exited(parent)) {
 		// Test before consuming Accept's events, including a compositor that exits immediately before Accept.
@@ -569,7 +599,7 @@ int main(int argc, char **argv)
 			    event.eventType == vr::VREvent_RoomViewShown || event.eventType == vr::VREvent_RoomViewHidden ||
 			    event.eventType == vr::VREvent_DashboardActivated || event.eventType == vr::VREvent_DashboardDeactivated))
 				log_coordinates(*system, *setup, event.eventType, step);
-			if (event.eventType == vr::VREvent_Quit) running = false;
+			if (event.eventType == vr::VREvent_Quit) { display_recovery.note_quit(); running = false; }
 		}
 		if (!running) break;
 		if (world_setup && world_cancel_deadline != std::chrono::steady_clock::time_point{} &&

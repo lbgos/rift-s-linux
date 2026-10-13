@@ -287,7 +287,7 @@ namespace {
 struct FakeRuntime
 {
 	fs::path dir;
-	fs::path library;
+	fs::path library, log;
 	pid_t compositor = -1, server = -1, monitor = -1;
 	int server_fd = -1;
 
@@ -334,12 +334,15 @@ struct FakeRuntime
 		fs::create_directories(dir, error);
 		REQUIRE_FALSE(error);
 		library = (dir / "libopenvr_api.so").string();
+		log = dir / "vrcompositor.txt";
+		std::ofstream(log) << "old log\n";
 		compositor = spawn(copy_sleeper(dir, "vrcompositor"));
 		server = spawn(copy_sleeper(dir, "vrserver"));
 		monitor = spawn(copy_sleeper(dir, "vrmonitor"));
 		server_fd = static_cast<int>(syscall(SYS_pidfd_open, server, 0));
 		REQUIRE(server_fd >= 0);
 	}
+	void crash_evidence() { std::ofstream(log, std::ios::app) << "Failed Watchdog timeout in thread Render in WaitForPresent\n"; }
 	void stop_compositor()
 	{
 		stop(compositor);
@@ -351,7 +354,7 @@ struct FakeRuntime
 	}
 	// The failed spawn below execs this test binary with an unknown flag, so
 	// the helper child exits without signalling anything. Only the parent's
-	// "automatically restarting" line marks a fired recovery.
+	// "draining crashed" line marks a fired recovery.
 	template <typename Poll> static std::string fired(Poll poll)
 	{
 		int saved = dup(STDERR_FILENO);
@@ -387,25 +390,110 @@ struct FakeRuntime
 TEST_CASE("Display recovery adopts a respawned compositor instead of restarting the session")
 {
 	FakeRuntime runtime("healed");
-	DisplayRecovery recovery;
+	DisplayRecovery recovery(runtime.log);
 	const char *library = runtime.library.c_str();
 	// Pin the first compositor generation, then arm the loss latch.
 	recovery.update(true, .01f, 100, runtime.server_fd, runtime.server, library);
-	recovery.update(false, .01f, 101, runtime.server_fd, runtime.server, library);
+	for (int i = 0; i < 5; ++i) recovery.update(false, .01f, 101, runtime.server_fd, runtime.server, library);
+	runtime.crash_evidence();
 	// SteamVR respawns the compositor on its own before the next check.
 	runtime.stop_compositor();
 	runtime.restart_compositor();
 	std::string output = FakeRuntime::fired([&] {
 		recovery.update(true, .01f, 101, runtime.server_fd, runtime.server, library);
 	});
-	CHECK(output.find("automatically restarting") == std::string::npos);
+	CHECK(output.find("draining crashed") == std::string::npos);
 	// The rig above can fire: with no replacement left, the dead handle triggers.
 	runtime.stop_compositor();
 	output = FakeRuntime::fired([&] {
 		recovery.update(true, .01f, 101, runtime.server_fd, runtime.server, library);
 	});
-	CHECK(output.find("automatically restarting") != std::string::npos);
+	CHECK(output.find("draining crashed") != std::string::npos);
 	// Let the helper child exit so the destructor does not leave a zombie.
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	recovery.update(false, -1, 101, runtime.server_fd, runtime.server, library);
+}
+
+TEST_CASE("Display cleanup requires sustained loss and fresh watchdog proof, and honors quit")
+{
+	FakeRuntime runtime("proof");
+	DisplayRecovery recovery(runtime.log);
+	const char *library = runtime.library.c_str();
+	recovery.update(true, .01f, 100, runtime.server_fd, runtime.server, library);
+	recovery.update(false, -1, 100, runtime.server_fd, runtime.server, library);
+	runtime.crash_evidence();
+	runtime.stop_compositor();
+	auto output = FakeRuntime::fired([&] {
+		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("draining crashed") == std::string::npos);
+	for (int i = 0; i < 5; ++i) recovery.update(false, -1, 100, runtime.server_fd, runtime.server, library);
+	// Prior-episode watchdog evidence cannot authorize this loss.
+	output = FakeRuntime::fired([&] {
+		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("draining crashed") == std::string::npos);
+	runtime.crash_evidence();
+	recovery.note_quit();
+	output = FakeRuntime::fired([&] {
+		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("draining crashed") == std::string::npos);
+}
+
+TEST_CASE("Display cleanup works without a monitor and stops at three attempts")
+{
+	FakeRuntime runtime("bounded");
+	FakeRuntime::stop(runtime.monitor);
+	runtime.monitor = -1;
+	DisplayRecovery recovery(runtime.log);
+	const char *library = runtime.library.c_str();
+	recovery.update(true, .01f, 100, runtime.server_fd, runtime.server, library);
+	for (int i = 0; i < 5; ++i) recovery.update(false, -1, 100, runtime.server_fd, runtime.server, library);
+	runtime.crash_evidence();
+	runtime.stop_compositor();
+	for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+		auto output = FakeRuntime::fired([&] {
+			recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+		});
+		CHECK(output.find("attempt " + std::to_string(attempt) + "/3") != std::string::npos);
+		std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5050));
+	}
+	auto output = FakeRuntime::fired([&] {
+		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("draining crashed") == std::string::npos);
+}
+
+TEST_CASE("Detached cleanup never launches Steam after stopping the pinned session")
+{
+	FakeRuntime runtime("helper");
+	// If the old helper tries exec, this private Steam command records it.
+	auto marker = runtime.dir / "relaunched";
+	auto steam = runtime.dir / "steam";
+	std::ofstream(steam) << "#!/bin/sh\ntouch '" << marker.string() << "'\n";
+	REQUIRE(chmod(steam.c_str(), 0700) == 0);
+	int sources[] = {
+		fcntl(runtime.server_fd, F_DUPFD_CLOEXEC, 10),
+		static_cast<int>(syscall(SYS_pidfd_open, runtime.monitor, 0)),
+		static_cast<int>(syscall(SYS_pidfd_open, runtime.compositor, 0))};
+	for (int fd : sources) REQUIRE(fd >= 0);
+	pid_t helper = fork();
+	REQUIRE(helper >= 0);
+	if (helper == 0) {
+		int copies[3];
+		for (int i = 0; i < 3; ++i) copies[i] = fcntl(sources[i], F_DUPFD_CLOEXEC, 10);
+		for (int i = 0; i < 3; ++i) dup2(copies[i], 3 + i);
+		setenv("PATH", runtime.dir.c_str(), 1);
+		_exit(recover_display());
+	}
+	for (int fd : sources) close(fd);
+	int status = 0;
+	REQUIRE(waitpid(helper, &status, 0) == helper);
+	CHECK(WIFEXITED(status));
+	CHECK(WEXITSTATUS(status) == 0);
+	CHECK_FALSE(fs::exists(marker));
+	CHECK(exited(runtime.server_fd));
 }
