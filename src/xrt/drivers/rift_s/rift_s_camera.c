@@ -180,7 +180,10 @@ rift_s_camera_create(struct xrt_prober *xp,
 
 	if (os_mutex_init(&cam->lock) != 0) {
 		RIFT_S_ERROR("Failed to init camera configuration mutex");
-		goto cleanup;
+		// No destroy: sinks/var/aeg are not set up yet, and the frameserver
+		// node stays owned by the caller's frame context.
+		free(cam);
+		return NULL;
 	}
 
 	// Store the tracker
@@ -293,6 +296,8 @@ rift_s_camera_destroy(struct rift_s_camera *cam)
 {
 	u_var_remove_root(cam);
 	u_autoexpgain_destroy(&cam->aeg);
+	u_sink_debug_destroy(&cam->debug_sinks[0]);
+	u_sink_debug_destroy(&cam->debug_sinks[1]);
 	os_mutex_destroy(&cam->lock);
 	free(cam);
 }
