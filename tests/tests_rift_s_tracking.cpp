@@ -2511,3 +2511,71 @@ TEST_CASE("Rift S motion queries preserve capture samples without holding the co
 		os_mutex_destroy(&ctrl.mutex);
 	}
 }
+
+TEST_CASE("Rift S IMU batches query the head at each accepted capture without blocking pose readers")
+{
+	struct Head {
+		rift_s_hmd hmd{};
+		rift_s_controller *ctrl{};
+		std::vector<timepoint_ns> queries;
+		bool unlocked = true;
+	};
+	Head head{};
+	rift_s_system sys{};
+	xrt_atomic_s32_store(&sys.transport_online, 1);
+	sys.hmd = &head.hmd;
+	sys.motion = rift_s_motion_create();
+	REQUIRE(sys.motion != nullptr);
+	os_mutex_init(&sys.dev_mutex);
+	rift_s_controller ctrl{};
+	ctrl.sys = &sys;
+	ctrl.base.device_type = XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER;
+	os_mutex_init(&ctrl.mutex);
+	m_imu_3dof_init(&ctrl.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
+	ctrl.have_calibration = ctrl.have_config = ctrl.imu_descriptor_done = true;
+	ctrl.config.accel_scale = 1.f / 1024;
+	ctrl.config.gyro_scale = .1220703125f;
+	ctrl.calibration.accel_calibration = {{{1, 0, 0, 0, 1, 0, 0, 0, 1}}, {}, 12};
+	ctrl.gyro_calibration = ctrl.calibration.accel_calibration;
+	ctrl.gravity_initialized = true;
+	ctrl.gravity_accel_scale = 1;
+	ctrl.pose.orientation = XRT_QUAT_IDENTITY;
+	ctrl.P_imu_device = ctrl.P_device_grip = XRT_POSE_IDENTITY;
+	const xrt_vec3 position = {.7f, 1.1f, 2.5f}, variance = {1e-5f, 1e-5f, 1e-5f};
+	rift_s_position_filter_reset(&ctrl.position_filter);
+	rift_s_position_filter_fix(&ctrl.position_filter, 2000000000, &position, &variance, .15f);
+	ctrl.last_fix_ns = 2000000000;
+	ctrl.track_vision_updates = 3;
+	head.ctrl = &ctrl;
+	head.hmd.base.get_tracked_pose = [](xrt_device *device, xrt_input_name name, int64_t timestamp,
+	                                  xrt_space_relation *out) {
+		auto &head = *reinterpret_cast<Head *>(device);
+		head.queries.push_back(timestamp);
+		bool unlocked = os_mutex_trylock(&head.ctrl->mutex) == 0;
+		head.unlocked &= unlocked;
+		if (unlocked) os_mutex_unlock(&head.ctrl->mutex);
+		return get_test_head_pose(device, name, timestamp, out);
+	};
+	rift_s_controller_report_t report{};
+	report.num_info = 3;
+	for (int i = 0; i < 3; ++i) {
+		report.info[i].block_id = RIFT_S_CTRL_IMU;
+		report.info[i].imu.timestamp = 1000000 + (i == 2 ? 1 : i) * 2000;
+		report.info[i].imu.accel[1] = 1024;
+	}
+	// Same outer lifetime/serialization lock as production radio dispatch.
+	os_mutex_lock(&sys.dev_mutex);
+	REQUIRE(rift_s_controller_handle_report(&ctrl, 2004000000, &report));
+	os_mutex_unlock(&sys.dev_mutex);
+	REQUIRE(head.queries.size() == 2);
+	CHECK(head.unlocked);
+	CHECK(head.queries[0] == ctrl.attitude_history[0].capture_ns);
+	CHECK(head.queries[1] == ctrl.attitude_history[1].capture_ns);
+	CHECK(head.queries[1] > head.queries[0]);
+	CHECK(ctrl.diagnostics.reject_duplicate == 1);
+	m_clock_windowed_skew_tracker_destroy(ctrl.imu_clock);
+	m_imu_3dof_close(&ctrl.fusion);
+	rift_s_motion_destroy(&sys.motion);
+	os_mutex_destroy(&ctrl.mutex);
+	os_mutex_destroy(&sys.dev_mutex);
+}
