@@ -73,6 +73,7 @@ struct rift_s_tracker
 	bool world_setup;
 	bool world_map_available;
 	bool world_storage_failed;
+	bool world_alignment_changed;
 	uint64_t world_command_id;
 	uint32_t world_confirmations;
 	struct xrt_pose world_candidate;

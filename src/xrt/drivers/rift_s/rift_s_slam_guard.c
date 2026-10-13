@@ -246,8 +246,10 @@ rift_s_slam_guard_suspend(struct rift_s_slam_guard *g, const struct xrt_quat *fu
 }
 
 bool
-rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam)
+rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam,
+                               uint32_t confirmations)
 {
+	if (confirmations < 3) return true;
 	float dot = fabsf(g->align.orientation.x * world_from_slam->orientation.x +
 	                  g->align.orientation.y * world_from_slam->orientation.y +
 	                  g->align.orientation.z * world_from_slam->orientation.z +

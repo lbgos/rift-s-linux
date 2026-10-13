@@ -1320,6 +1320,9 @@ world_write_status(struct rift_s_tracker *t)
 	                                                                                            : "unanchored";
 	struct rift_s_world_diagnostics diagnostics = t->world_diagnostics;
 	bool standby = t->standby, paused = t->slam_paused, restarting = t->slam_restart_pending;
+	bool tracking = t->slam_guard.state == RIFT_S_SLAM_GUARD_TRACKING;
+	bool world_valid = t->slam_guard.world_valid;
+	bool alignment_changed = t->world_alignment_changed;
 	uint64_t generation = t->slam_generation;
 	uint32_t confirmations = t->world_confirmations;
 	os_mutex_unlock(&t->mutex);
@@ -1363,14 +1366,14 @@ world_write_status(struct rift_s_tracker *t)
 	// available without a debug launch or stopping tracking with a debugger.
 	fprintf(file, "%lld %s attempts=%" PRIu64 " usable=%" PRIu64
 	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u history=%d standby=%d paused=%d restart=%d"
-	              " generation=%" PRIu64 " confirmations=%u keyframes=%u"
+	              " tracking=%d world_valid=%d alignment_changed=%d generation=%" PRIu64 " confirmations=%u keyframes=%u"
 	              " features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u"
 	              " matched=%d rejection=%s"
 	              " fail_paused=%" PRIu64 " fail_sample=%" PRIu64 " fail_gap=%" PRIu64 " fail_flags=%" PRIu64
 	              " fail_generation=%" PRIu64 " fail_guard=%" PRIu64 "\n",
 	        (long long)os_monotonic_get_ns(), state, diagnostics.attempts, diagnostics.usable,
 	        (long long)diagnostics.capture_ns, (long long)diagnostics.sample_ns, diagnostics.pose_valid,
-	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, generation, confirmations, result->keyframes,
+	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, tracking, world_valid, alignment_changed, generation, confirmations, result->keyframes,
 	        result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
 	        result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
 	        result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
@@ -1398,6 +1401,7 @@ world_read_command(struct rift_s_tracker *t)
 		rift_s_world_anchor_clear(t->world_anchor);
 		os_mutex_lock(&t->mutex);
 		t->world_setup = true;
+		t->world_alignment_changed = false;
 		t->slam_guard.boundary_confirmed = false;
 		t->slam_guard.require_relocalization = false;
 		t->world_confirmations = 0;
@@ -1423,6 +1427,7 @@ world_read_command(struct rift_s_tracker *t)
 		t->slam_guard.boundary_confirmed = saved && t->slam_guard.world_valid &&
 		                                   rift_s_world_anchor_has_map(t->world_anchor);
 		t->world_setup = false;
+		t->world_alignment_changed = false;
 		t->world_map_available = rift_s_world_anchor_has_map(t->world_anchor);
 		t->slam_guard.require_relocalization = requires_relocalization;
 		if (!saved || !t->world_map_available)
@@ -1444,6 +1449,7 @@ world_read_command(struct rift_s_tracker *t)
 			rift_s_slam_guard_suspend(&t->slam_guard, &t->pose.orientation);
 		}
 		t->world_setup = false;
+		t->world_alignment_changed = false;
 		t->world_map_available = rift_s_world_anchor_has_map(t->world_anchor);
 		t->slam_guard.require_relocalization = requires_relocalization;
 		t->world_confirmations = 0;
@@ -1626,12 +1632,6 @@ rift_s_world_thread(void *ptr)
 					struct xrt_vec3 rotated;
 					math_quat_rotate_vec3(&candidate.orientation, &capture.pose.position, &rotated);
 					candidate.position = m_vec3_sub(result.world_from_imu.position, rotated);
-					if (t->slam_guard.boundary_confirmed &&
-					    !rift_s_slam_guard_verify_world(&t->slam_guard, &candidate)) {
-						t->world_confirmations = 0;
-						t->world_last_verify_ns = 0;
-						RIFT_S_WARN("Saved room alignment changed; boundary unavailable until reconfirmed");
-					}
 					bool consistent =
 					    t->world_confirmations > 0 && t->world_candidate_generation == generation &&
 					    capture_ns > t->world_candidate_ns &&
@@ -1644,8 +1644,18 @@ rift_s_world_thread(void *ptr)
 					t->world_candidate = candidate;
 					t->world_candidate_generation = generation;
 					t->world_candidate_ns = capture_ns;
-					if (t->world_confirmations >= 3 && !t->slam_guard.boundary_confirmed) {
+					// Verification needs the same three agreeing votes as recognition. One
+					// displaced solution must not revoke bounds and re-place the dashboard.
+					if (t->slam_guard.boundary_confirmed) {
+						if (!rift_s_slam_guard_verify_world(&t->slam_guard, &candidate, t->world_confirmations)) {
+							t->world_alignment_changed = true;
+							t->world_last_verify_ns = 0;
+							RIFT_S_WARN("Saved room alignment changed across three votes; boundary unavailable until reconfirmed");
+						}
+						if (t->world_confirmations >= 3) t->world_confirmations = 0;
+					} else if (t->world_confirmations >= 3) {
 						rift_s_slam_guard_set_world(&t->slam_guard, &candidate);
+						t->world_alignment_changed = false;
 						RIFT_S_INFO(
 						    "World relocalized inliers=%u/%u error_px=%.3f "
 						    "transform=(%.4f,%.4f,%.4f)",

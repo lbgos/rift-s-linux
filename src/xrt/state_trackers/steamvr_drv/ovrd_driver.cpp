@@ -90,7 +90,8 @@ is_rift_s_touch(const struct xrt_device *xdev)
 }
 
 static void
-update_rift_s_universe(vr::PropertyContainerHandle_t container, uint64_t &universe, int64_t &last_poll)
+update_rift_s_universe(vr::PropertyContainerHandle_t container, uint64_t &universe, int64_t &last_poll,
+                       RiftSWorldUniverse &selection)
 {
 	int64_t now = os_monotonic_get_ns();
 	if (now - last_poll < 500000000LL) return;
@@ -101,9 +102,10 @@ update_rift_s_universe(vr::PropertyContainerHandle_t container, uint64_t &univer
 	int64_t stamp = 0;
 	std::string status;
 	stream >> stamp >> status;
-	if (!stream) return; // Missing or half-written status: keep the current universe, do not flap.
-	static const int64_t started = now;
-	uint64_t next = rift_s_world_universe(status, stamp, now, started);
+	std::string details;
+	if (stream) std::getline(stream, details);
+	else { stamp = 0; status.clear(); }
+	uint64_t next = selection.update(status, stamp, now, details, universe);
 	if (next == universe) return;
 	auto error = vr::VRProperties()->SetUint64Property(container, vr::Prop_CurrentUniverseId_Uint64, next);
 	if (error == vr::TrackedProp_Success) {
@@ -928,7 +930,7 @@ public:
 
 			if (m_unObjectId != vr::k_unTrackedDeviceIndexInvalid) {
 				if (is_rift_s_touch(m_xdev))
-					update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll);
+					update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll, m_worldSelection);
 				vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_unObjectId, GetPose(),
 				                                                   sizeof(vr::DriverPose_t));
 			}
@@ -961,8 +963,14 @@ public:
 		m_ulPropertyContainer = vr::VRProperties()->TrackedDeviceToPropertyContainer(m_unObjectId);
 
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
-		m_worldUniverse = is_rift_s_touch(m_xdev) ? 3 : 2;
-		vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
+		if (m_poseUpdateThread == nullptr) {
+			m_worldSelection = {};
+			m_worldPoll = 0;
+			m_worldUniverse = is_rift_s_touch(m_xdev) ? 3 : 2;
+			auto error = vr::VRProperties()->SetUint64Property(m_ulPropertyContainer,
+			    vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
+			if (error != vr::TrackedProp_Success) m_worldUniverse = 0; // Retry on the pose thread.
+		}
 		vr::VRProperties()->SetInt32Property(m_ulPropertyContainer, vr::Prop_DeviceClass_Int32, vr::TrackedDeviceClass_Controller);
 
 		if (m_hand == XRT_HAND_LEFT) {
@@ -1316,6 +1324,7 @@ public:
 	vr::PropertyContainerHandle_t m_ulPropertyContainer = vr::k_ulInvalidPropertyContainer;
 	uint64_t m_worldUniverse = 3;
 	int64_t m_worldPoll = 0;
+	RiftSWorldUniverse m_worldSelection;
 
 	bool m_emulate_index_controller = false;
 
@@ -1430,6 +1439,7 @@ private:
 	vr::PropertyContainerHandle_t m_ulPropertyContainer = vr::k_ulInvalidPropertyContainer;
 	uint64_t m_worldUniverse = 3;
 	int64_t m_worldPoll = 0;
+	RiftSWorldUniverse m_worldSelection;
 
 	float m_flSecondsFromVsyncToPhotons = -1;
 	float m_flDisplayFrequency = -1;
@@ -1513,7 +1523,7 @@ CDeviceDriver_Monado::PoseUpdateThreadFunction()
 			vr::VRDriverInput()->UpdateBooleanComponent(m_proximity, detected, 0);
 		}
 		if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0)
-			update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll);
+			update_rift_s_universe(m_ulPropertyContainer, m_worldUniverse, m_worldPoll, m_worldSelection);
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_trackedDeviceIndex, GetPose(),
 		                                                   sizeof(vr::DriverPose_t));
 	}
@@ -1555,8 +1565,14 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 		// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
 	if (strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 && !rift_s_prepare_session_origin())
 		ovrd_log("Could not prepare unbounded Rift S session origin\n");
-	m_worldUniverse = strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 ? 3 : 2;
-	vr::VRProperties()->SetUint64Property(m_ulPropertyContainer, vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
+	if (m_poseUpdateThread == nullptr) {
+		m_worldSelection = {};
+		m_worldPoll = 0;
+		m_worldUniverse = strncmp(m_xdev->str, "Oculus Rift S", 13) == 0 ? 3 : 2;
+		auto error = vr::VRProperties()->SetUint64Property(m_ulPropertyContainer,
+		    vr::Prop_CurrentUniverseId_Uint64, m_worldUniverse);
+		if (error != vr::TrackedProp_Success) m_worldUniverse = 0; // Retry on the pose thread.
+	}
 
     if (m_xdev->camera) {
         vr::EVRInitError queue_error = vr::VRInitError_None;

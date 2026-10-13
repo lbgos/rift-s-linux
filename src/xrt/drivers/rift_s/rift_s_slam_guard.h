@@ -166,9 +166,10 @@ rift_s_slam_guard_fallback_pose(const struct rift_s_slam_guard *g,
 void
 rift_s_slam_guard_suspend(struct rift_s_slam_guard *g, const struct xrt_quat *fusion_orientation);
 
-//! Compare a fresh visual match with the current alignment; revoke saved bounds on disagreement.
+//! Revoke saved bounds only after three agreeing visual votes disagree with the current alignment.
 bool
-rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam);
+rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam,
+                               uint32_t confirmations);
 
 //! Start the replacement backend's recovery interval without changing the held world pose.
 void

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rift S SteamVR
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/rifts-steamvr
+Icon=steam
+Terminal=false
+Categories=Game;

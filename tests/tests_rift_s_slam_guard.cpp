@@ -537,18 +537,116 @@ TEST_CASE("A fresh visual match detects saved boundary translation and yaw drift
 	xrt_pose candidate = saved;
 	SECTION("Near alignment remains confirmed") {
 		candidate.position.x += .03f;
-		CHECK(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK(rift_s_slam_guard_verify_world(&s.g, &candidate, 3));
 		CHECK(s.g.boundary_confirmed);
 	}
 	SECTION("Translation drift hides bounds without moving the held pose") {
 		candidate.position.x += .05f;
-		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate, 3));
 		CHECK_FALSE(s.g.boundary_confirmed);
 	}
 	SECTION("Yaw drift hides bounds") {
 		candidate.orientation = yaw_quat(yaw_of(saved.orientation) + .06f);
-		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate, 3));
 		CHECK_FALSE(s.g.boundary_confirmed);
 	}
 	CHECK(dist(s.g.align.position, saved.position) < 1e-6f);
+}
+
+TEST_CASE("Admitted SteamVR room survives alternating matching status without universe flips")
+{
+	RiftSWorldUniverse selection;
+	const int64_t start = 10000000000LL;
+	uint64_t universe = selection.update("localized", start, start,
+	    " generation=6 tracking=1 world_valid=1 standby=0 paused=0 restart=0", 3);
+	REQUIRE(universe == 2);
+	unsigned flips = 0;
+	for (int i = 1; i <= 120; ++i) {
+		auto now = start + i * 500 * MS;
+		auto next = selection.update(i % 2 ? "relocalizing" : "localized", now, now,
+		    "generation=6 tracking=1 world_valid=1 standby=0 paused=0 restart=0", universe);
+		flips += next != universe;
+		universe = next;
+	}
+	CHECK(flips == 0);
+	// Matching failure alone does not prove another room, even after a minute.
+	for (int i = 121; i <= 240; ++i) {
+		auto now = start + i * 500 * MS;
+		universe = selection.update("relocalizing", now, now,
+		    "generation=6 tracking=1 world_valid=1 paused=0", universe);
+		CHECK(universe == 2);
+	}
+}
+
+TEST_CASE("SteamVR room hysteresis releases real tracking or coordinate-frame loss")
+{
+	RiftSWorldUniverse selection;
+	const int64_t start = 10000000000LL;
+	const auto tracked = "generation=6 tracking=1 world_valid=1 paused=0";
+	REQUIRE(selection.update("localized", start, start, tracked, 3) == 2);
+	SECTION("continuous tracking loss has a five second grace") {
+		CHECK(selection.update("relocalizing", start + MS, start + MS,
+		    "generation=6 tracking=0 world_valid=1", 2) == 2);
+		CHECK(selection.update("relocalizing", start + 5000 * MS, start + 5000 * MS,
+		    "generation=6 tracking=0 world_valid=1", 2) == 2);
+		CHECK(selection.update("relocalizing", start + 5001 * MS, start + 5001 * MS,
+		    "generation=6 tracking=0 world_valid=1", 2) == 3);
+	}
+	SECTION("a brief loss followed by tracked matching misses clears the timer") {
+		CHECK(selection.update("relocalizing", start + MS, start + MS,
+		    "tracking=0 world_valid=1", 2) == 2);
+		CHECK(selection.update("relocalizing", start + 4000 * MS, start + 4000 * MS, tracked, 2) == 2);
+		CHECK(selection.update("relocalizing", start + 6000 * MS, start + 6000 * MS,
+		    "tracking=0 world_valid=1", 2) == 2);
+	}
+	SECTION("missing and stale status eventually release bounds") {
+		CHECK(selection.update("", 0, start + MS, "", 2) == 2);
+		CHECK(selection.update("", 0, start + 5001 * MS, "", 2) == 3);
+		CHECK(selection.update("localized", start, start + 6000 * MS, tracked, 3) == 3);
+	}
+	SECTION("standby and replacement frames release immediately") {
+		CHECK(selection.update("localized", start + MS, start + MS, "standby=1", 2) == 3);
+		CHECK(selection.update("localized", start + MS, start + MS, "generation=7", 2) == 3);
+		CHECK(selection.update("relocalizing", start + MS, start + MS, "world_valid=0", 2) == 3);
+		CHECK(selection.update("relocalizing", start + MS, start + MS, "alignment_changed=1", 2) == 3);
+	}
+}
+
+TEST_CASE("SteamVR room admission rejects a prior runtime's status")
+{
+	RiftSWorldUniverse selection;
+	const int64_t start = 10000000000LL;
+	CHECK(selection.update("localized", start - 1, start, "tracking=1 world_valid=1 paused=0", 3) == 3);
+	CHECK(selection.update("relocalizing", start + MS, start + MS, "tracking=1 world_valid=1 paused=0", 3) == 3);
+	CHECK(selection.update("localized", start + 2 * MS, start + 2 * MS, "tracking=1 world_valid=1 paused=0", 3) == 2);
+}
+
+TEST_CASE("One displaced alignment vote cannot revoke saved bounds")
+{
+	Sim s;
+	xrt_pose raw = XRT_POSE_IDENTITY;
+	REQUIRE(s.settle(raw) > 0);
+	xrt_pose candidate = s.g.align;
+	rift_s_slam_guard_set_world(&s.g, &candidate);
+	candidate.position.x += .1f;
+	for (uint32_t votes = 1; votes < 3; ++votes) {
+		CHECK(rift_s_slam_guard_verify_world(&s.g, &candidate, votes));
+		CHECK(s.g.boundary_confirmed);
+	}
+	CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate, 3));
+	CHECK_FALSE(s.g.boundary_confirmed);
+}
+
+TEST_CASE("SteamVR room admission needs complete live tracking metadata")
+{
+	const int64_t start = 10000000000LL;
+	for (auto details : {"", "tracking=garbage world_valid=1 paused=0",
+	    "tracking=2 world_valid=1 paused=0", "tracking=1 paused=0",
+	    "tracking=1 world_valid=1", "tracking=1 world_valid=1 paused=1"}) {
+		RiftSWorldUniverse selection;
+		CHECK(selection.update("localized", start, start, details, 3) == 3);
+	}
+	RiftSWorldUniverse selection;
+	CHECK(selection.update("setup", start, start, "tracking=1 world_valid=1 paused=0", 3) == 2);
+	CHECK(selection.update("localized", start + MS, start + MS, "restart=1", 2) == 3);
 }
