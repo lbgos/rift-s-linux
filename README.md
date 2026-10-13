@@ -1,60 +1,115 @@
 # Rift S on Linux
 
-Oculus Rift S support for Monado and SteamVR on Linux. It has inside-out head tracking with Basalt SLAM, Touch controller tracking from the controller LEDs, and room setup with a play-area boundary.
+Free and open-source Oculus/Meta Rift S support for Linux SteamVR, built on Monado and Basalt. Steam and SteamVR are installed separately.
 
-This is a fork of thaytan's Monado Rift S branch, `dev-constellation-controller-tracking`. The original Monado readme is in `README-monado.md`.
+## Demo
+
+Demo video coming soon.
 
 ## Status
 
-Rift S head and Touch controller tracking run inside the SteamVR driver. Saved-room recovery and controller behavior still need physical validation on each release.
+r28 was tested and accepted in the headset. It includes:
 
-Known rough edges:
+- In-headset Room Setup with floor calibration, a persistent boundary and saved-room recognition.
+- A stable dashboard and a held position with IMU rotation when headset tracking is lost.
+- Headset and both Touch controller tracking, with controller haptics.
+- Rift S Settings for device state, software IPD, recentering and Room Setup, with an 80 fps zero-copy headset preview and fullscreen. The preview drops to 1 fps in standby.
+- An in-headset Desktop overlay with mouse, scrolling and keyboard input on KDE Plasma Wayland.
 
-- Controller behavior when the controllers leave the camera view is still rough.
-- The boundary does not persist reliably across restarts.
+## Requirements
 
-## Build and install
+- Oculus Rift S, its Touch controllers, USB 3 and DisplayPort.
+- An x86-64 Linux desktop with a systemd user session and local USB seat access.
+- Native Steam with SteamVR installed from the Steam library.
+- A Vulkan-capable GPU and drivers supported by SteamVR's direct display mode. Current testing uses an NVIDIA RTX 3090.
+- The patched Basalt build below. An unpatched Basalt lacks the required reconnect support.
+- KDE Plasma Wayland for the Desktop overlay.
 
-Head tracking needs Basalt. Clone Basalt, apply the patches in `patches/basalt/` in order, then build and install it by its own readme using the same installation prefix as Monado. The driver finds `libbasalt.so` in that prefix's library directory automatically. System library installations also work. `VIT_SYSTEM_LIBRARY_PATH` is an optional override for development builds.
+## Install from source
 
-```
+AUR packages are planned and have not been published. Build from source for now. Close SteamVR and Settings before installing or upgrading.
+
+Install a C/C++ toolchain, CMake, Ninja, Eigen, TBB, fmt, OpenCV, Vulkan headers and loader, glslang, libusb, SDL2, cJSON, libcap, systemd and the X11, Wayland and DRM development libraries. The Desktop overlay also needs PipeWire development files, wayland-scanner, wayland-protocols and plasma-wayland-protocols. Settings needs Rust/Cargo, Node.js, pnpm, GTK3, WebKitGTK 4.1, shaderc's `glslc` and desktop-file-utils.
+
+Build Basalt at the supported revision, applying all three patches in order:
+
+```sh
+git clone https://github.com/lbgos/rift-s-linux.git
 git clone https://gitlab.freedesktop.org/mateosss/basalt.git
 cd basalt
+git checkout df6e970c8da7636eb401a09e3317fbeaaf829b9a
 git submodule update --init --recursive
-for p in /path/to/this/repo/patches/basalt/*.patch; do patch -p1 < "$p"; done
+for patchfile in ../rift-s-linux/patches/basalt/*.patch; do
+  patch -p1 < "$patchfile"
+done
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+  -DBASALT_INSTANTIATIONS_DOUBLE=OFF -DBASALT_BUILTIN_EIGEN=OFF \
+  -DEIGEN_ROOT=/usr/include/eigen3 -DBASALT_BUILD_SHARED_LIBRARY_ONLY=ON \
+  -DBASALT_ENABLE_ROSBAG2=OFF -DBASALT_BUILD_VISUALIZATION=OFF \
+  -DCXX_MARCH=x86-64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+cmake --build build --parallel 1
+sudo cmake --install build
+cd ../rift-s-linux
 ```
 
-The patches were made against Basalt main at df6e970.
+Build and install the driver in Bash:
 
-Then build Monado. OpenCV, Vulkan and Eigen are required on top of Monado's usual dependencies.
-
+```sh
+driver_options=()
+while read -r option; do driver_options+=("-D${option}=OFF"); done < <(
+  sed -n 's/.*(\(XRT_BUILD_DRIVER_[A-Z0-9_]*\) .*/\1/p' CMakeLists.txt)
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_TESTING=ON -DXRT_BUILD_SAMPLES=OFF \
+  "${driver_options[@]}" -DXRT_BUILD_DRIVER_RIFT_S=ON -DXRT_BUILD_DRIVER_SIMULATED=ON \
+  -DXRT_FEATURE_STEAMVR_PLUGIN=ON -DXRT_FEATURE_SLAM=ON \
+  -DXRT_HAVE_SYSTEM_CJSON=ON -DXRT_HAVE_GST=OFF -DXRT_HAVE_BLUETOOTH=OFF \
+  -DXRT_HAVE_DBUS=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_JPEG=OFF -DXRT_HAVE_LIBBSD=OFF \
+  -DXRT_HAVE_LIBUVC=OFF -DXRT_HAVE_OPENVR=OFF -DXRT_MODULE_MERCURY_HANDTRACKING=OFF
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
+sudo cmake --install build
+sudo tee /etc/udev/rules.d/70-monado-rifts.rules >/dev/null <<'EOF'
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2833", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="2833", TAG+="uaccess"
+EOF
+sudo udevadm control --reload-rules
 ```
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DXRT_BUILD_DRIVER_RIFT_S=ON -DXRT_FEATURE_SLAM=ON -DXRT_FEATURE_STEAMVR_PLUGIN=ON
-ninja -C build
-sudo ninja -C build install
-```
 
-The install puts the SteamVR driver in `/usr/local/share/steamvr-monado`. It installs a user session service that registers the driver with SteamVR's `vrpathreg`. Registration also works when SteamVR is installed later and when its library is on another drive. Other registered drivers and Steam settings are preserved. The installer applies `cap_sys_nice` to `monado-service` for standalone Monado use.
+The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
 
-Install SteamVR from the Steam library, connect the Rift S, open Steam normally, and launch SteamVR. The SteamVR driver uses Monado in-process; a separate running `monado-service` is unnecessary. Driver and native Room Setup support are enabled by default. The driver's camera integration configures native Room View.
+Build and install Settings:
 
-On Arch, the package uses `/usr/share/steamvr-monado` and starts the same registration service for active user sessions. The local packaging recipe is a release draft; it must point to published source before an AUR submission.
-
-Unit tests build with the default `BUILD_TESTING=ON` and run with `ctest --test-dir build`.
-
-## Settings app
-
-`settings-app/` is a small desktop app (Tauri + React) for the headset. It shows tracking state for the headset and controllers, the room boundary, and lets you set software IPD, recenter, start room setup, export logs and restart SteamVR. It talks to SteamVR through OpenVR, so SteamVR has to be running.
-
-```
+```sh
 cd settings-app
-pnpm install
-pnpm tauri build
+pnpm install --frozen-lockfile
+pnpm tauri build --no-bundle -- --locked
+./install.sh
 ```
 
-## License
+## First run
 
-Boost Software License 1.0, the same as Monado. See `LICENSE`. Third-party files keep their own licenses in `LICENSES/`.
+1. Connect USB and DisplayPort. Reconnect the headset after installation to apply USB access rules.
+2. Open Steam and click SteamVR in the library.
+3. Put on the headset and complete Room Setup. Set the floor and draw the boundary for your physical play area.
+4. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
+5. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.
+6. Open the dashboard's Desktop tab to use the KDE desktop inside the headset.
 
-Contact lbgos at contact@lbgos.dev.
+## Known issues
+
+- USB or DisplayPort loss can crash SteamVR's compositor. Reconnect the headset and relaunch SteamVR manually. Recovery does not launch SteamVR automatically.
+- Room recognition can remain pending, producing a "Guardian not found" notification. Uncover the cameras and look around; verify the boundary before playing.
+- The Desktop overlay is supported on KWin only for now. Other desktops' portal capture and input are unverified and may require a picker on the monitor.
+- Opening or resizing SteamVR's native VR View has triggered NVIDIA Xid 13 and compositor watchdog failures. Settings uses a Vulkan preview path; its full-resolution source still depends on VR View.
+- Haptics use the native motor frequency; requested-frequency synthesis is not implemented.
+
+## Credits and license
+
+This is a fork of [thaytan's Monado controller-tracking branch](https://gitlab.freedesktop.org/thaytan/monado/-/tree/dev-constellation-controller-tracking). Thanks to [Monado](https://monado.freedesktop.org/) and [Basalt](https://gitlab.freedesktop.org/mateosss/basalt) upstream and their contributors. The upstream README is [README-monado.md](README-monado.md).
+
+Monado, the driver and Desktop overlay use the [Boost Software License 1.0](LICENSE). [Rift S Settings](settings-app/LICENSE) uses MIT. Third-party files retain their own licenses in [LICENSES](LICENSES) and their source directories. OpenVR SDK headers use Valve's published BSD license.
+
+This is an independent project, not affiliated with Meta or Valve.
