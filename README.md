@@ -10,9 +10,7 @@ Free and open source, built on Monado and Basalt. Steam and SteamVR are installe
 
 [Full-quality video (19 s, MP4)](https://files.lbgos.dev/f/3a0ac9436abd84141d30bb87d0158c55/rift-s-linux-demo-take2-clean-5f638529.mp4), recorded from SteamVR's VR View on the test machine.
 
-## Status
-
-r28 was tested and accepted in the headset. It includes:
+## Features
 
 - In-headset Room Setup with floor calibration, a persistent boundary and saved-room recognition.
 - A stable dashboard and a held position with IMU rotation when headset tracking is lost.
