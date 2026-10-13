@@ -280,3 +280,132 @@ TEST_CASE("Late display watchdog remains armed until native vsync really resumes
 	CHECK_FALSE(health.update(true, -1, 1006, start + seconds(37)));
 	CHECK_FALSE(health.update(true, .01f, 0, start + seconds(38)));
 }
+
+namespace {
+// A private runtime whose daemons are uniquely identifiable by executable path,
+// so DisplayRecovery can pin and kill them without touching a real SteamVR session.
+struct FakeRuntime
+{
+	fs::path dir;
+	fs::path library;
+	pid_t compositor = -1, server = -1, monitor = -1;
+	int server_fd = -1;
+
+	static fs::path copy_sleeper(const fs::path &dir, const char *name)
+	{
+		const char *candidates[] = {"/bin/sleep", "/usr/bin/sleep"};
+		std::string bytes;
+		for (auto candidate : candidates) {
+			bytes = read_file(candidate);
+			if (!bytes.empty()) break;
+		}
+		REQUIRE_FALSE(bytes.empty());
+		auto dest = dir / name;
+		{
+			std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+			REQUIRE(out.good());
+			out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+			REQUIRE(out.good());
+		}
+		REQUIRE(chmod(dest.c_str(), 0700) == 0);
+		return dest;
+	}
+	static pid_t spawn(const fs::path &binary)
+	{
+		pid_t pid = fork();
+		REQUIRE(pid >= 0);
+		if (pid == 0) {
+			execl(binary.c_str(), binary.filename().c_str(), "60", nullptr);
+			_exit(127);
+		}
+		return pid;
+	}
+	static void stop(pid_t pid)
+	{
+		if (pid <= 0) return;
+		kill(pid, SIGKILL);
+		while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+	}
+	explicit FakeRuntime(const char *tag)
+	{
+		dir = fs::temp_directory_path() / (std::string("monado-display-recovery-") + tag +
+		                                   "-" + std::to_string(getpid()));
+		std::error_code error;
+		fs::create_directories(dir, error);
+		REQUIRE_FALSE(error);
+		library = (dir / "libopenvr_api.so").string();
+		compositor = spawn(copy_sleeper(dir, "vrcompositor"));
+		server = spawn(copy_sleeper(dir, "vrserver"));
+		monitor = spawn(copy_sleeper(dir, "vrmonitor"));
+		server_fd = static_cast<int>(syscall(SYS_pidfd_open, server, 0));
+		REQUIRE(server_fd >= 0);
+	}
+	void stop_compositor()
+	{
+		stop(compositor);
+		compositor = -1;
+	}
+	void restart_compositor()
+	{
+		compositor = spawn(dir / "vrcompositor");
+	}
+	// The failed spawn below execs this test binary with an unknown flag, so
+	// the helper child exits without signalling anything. Only the parent's
+	// "automatically restarting" line marks a fired recovery.
+	template <typename Poll> static std::string fired(Poll poll)
+	{
+		int saved = dup(STDERR_FILENO);
+		REQUIRE(saved >= 0);
+		int pipefd[2];
+		REQUIRE(pipe2(pipefd, O_CLOEXEC) == 0);
+		REQUIRE(dup2(pipefd[1], STDERR_FILENO) >= 0);
+		poll();
+		fflush(stderr);
+		REQUIRE(dup2(saved, STDERR_FILENO) >= 0);
+		close(saved);
+		close(pipefd[1]);
+		std::string out;
+		char buffer[4096];
+		ssize_t count = 0;
+		while ((count = read(pipefd[0], buffer, sizeof(buffer))) > 0)
+			out.append(buffer, static_cast<size_t>(count));
+		close(pipefd[0]);
+		return out;
+	}
+	~FakeRuntime()
+	{
+		stop(compositor);
+		stop(server);
+		stop(monitor);
+		if (server_fd >= 0) close(server_fd);
+		std::error_code error;
+		fs::remove_all(dir, error);
+	}
+};
+}
+
+TEST_CASE("Display recovery adopts a respawned compositor instead of restarting the session")
+{
+	FakeRuntime runtime("healed");
+	DisplayRecovery recovery;
+	const char *library = runtime.library.c_str();
+	// Pin the first compositor generation, then arm the loss latch.
+	recovery.update(true, .01f, 100, runtime.server_fd, runtime.server, library);
+	recovery.update(false, .01f, 101, runtime.server_fd, runtime.server, library);
+	// SteamVR respawns the compositor on its own before the next check.
+	runtime.stop_compositor();
+	runtime.restart_compositor();
+	std::string output = FakeRuntime::fired([&] {
+		recovery.update(true, .01f, 101, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("automatically restarting") == std::string::npos);
+	// The rig above can fire: with no replacement left, the dead handle triggers.
+	runtime.stop_compositor();
+	output = FakeRuntime::fired([&] {
+		recovery.update(true, .01f, 101, runtime.server_fd, runtime.server, library);
+	});
+	CHECK(output.find("automatically restarting") != std::string::npos);
+	// Let the helper child exit so the destructor does not leave a zombie.
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	recovery.update(false, -1, 101, runtime.server_fd, runtime.server, library);
+}
