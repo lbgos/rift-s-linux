@@ -1,0 +1,16 @@
+{
+  "applications": [
+    {
+      "app_key": "lbgos.rifts.desktop",
+      "launch_type": "binary",
+      "binary_path_linux": "@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop",
+      "is_dashboard_overlay": true,
+      "strings": {
+        "en_us": {
+          "name": "Linux Desktop",
+          "description": "Use the Linux desktop from the SteamVR dashboard"
+        }
+      }
+    }
+  ]
+}

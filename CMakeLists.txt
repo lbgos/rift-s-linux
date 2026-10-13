@@ -586,6 +586,12 @@ endif()
 add_subdirectory(src)
 add_subdirectory(doc)
 
+# SteamVR dashboard desktop overlay; skipped with a warning if its dependencies are missing.
+option(RIFTS_DESKTOP_OVERLAY "Build rifts-desktop, the SteamVR dashboard desktop overlay" ON)
+if(RIFTS_DESKTOP_OVERLAY AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	add_subdirectory(desktop-overlay)
+endif()
+
 if(BUILD_TESTING)
 	include(CTest)
 	add_subdirectory(tests)

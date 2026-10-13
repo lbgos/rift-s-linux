@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rift S Desktop
+Comment=Linux desktop in the SteamVR dashboard
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop
+Icon=video-display
+Terminal=false
+NoDisplay=true
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input,kde_output_order_v1
