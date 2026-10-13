@@ -173,7 +173,12 @@ static int unique_runtime_process(const fs::path &executable, pid_t expected = 0
 // This bounded helper deliberately outlives the old server during shutdown.
 static int recover_display()
 {
-	if (syscall(SYS_pidfd_send_signal, 4, SIGTERM, nullptr, 0) != 0) return 1;
+	// Ask the whole pinned session to stop up front. Signalling only the
+	// monitor leaves a live server/compositor to burn the entire first wait.
+	bool server_signalled = syscall(SYS_pidfd_send_signal, 3, SIGTERM, nullptr, 0) == 0;
+	syscall(SYS_pidfd_send_signal, 4, SIGTERM, nullptr, 0);
+	syscall(SYS_pidfd_send_signal, 5, SIGTERM, nullptr, 0);
+	if (!server_signalled) return 1;
 	auto wait_session = [](std::chrono::seconds duration) {
 		auto deadline = std::chrono::steady_clock::now() + duration;
 		while (!exited(3) || !exited(4) || !exited(5)) {
