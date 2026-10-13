@@ -1587,6 +1587,10 @@ rift_s_world_anchor_process_rig_gravity(rift_s_world_anchor *a,
 			unsigned bins[RIFT_S_WORLD_MAX_CAMERAS][12]{}, source_points[RIFT_S_WORLD_MAX_CAMERAS]{};
 			std::vector<bool> used[RIFT_S_WORLD_MAX_CAMERAS];
 			std::vector<cv::Point2d> coverage[RIFT_S_WORLD_MAX_CAMERAS];
+			// Second-view pixels that already supplied a landmark. Live and reference second views
+			// are different images, so each keeps its own set.
+			std::vector<cv::Point2d> accepted[RIFT_S_WORLD_MAX_CAMERAS];
+			std::vector<cv::Point2d> accepted_reference[RIFT_S_WORLD_MAX_CAMERAS];
 			for (unsigned e = 0; e < count; ++e)
 				used[e].resize(features[e].keys.size());
 			// Front stereo, side/front overlaps, and the top camera supply room directions.
@@ -1640,6 +1644,18 @@ rift_s_world_anchor_process_rig_gravity(rift_s_world_anchor *a,
 					if (used[first][m.queryIdx] || bins[first][bin] >= MAX_POINTS / 24 ||
 					    source_points[first] >= MAX_POINTS / (count == 2 ? 1 : count))
 						continue;
+					// One landmark per second-view pixel: independent first-view features
+					// converge onto the same second-view patch in repetitive texture, and each
+					// pairing triangulates a ghost landmark at another depth.
+					auto &seen = previous_capture ? accepted_reference[second] : accepted[second];
+					bool duplicate = false;
+					for (const auto &q : seen)
+						if (cv::norm(q - pixels[1]) < 1.0) {
+							duplicate = true;
+							break;
+						}
+					if (duplicate)
+						continue;
 					cv::Vec3d rays[2];
 					if (!unproject(stereo_config.camera[0], pixels[0], rays[0]) ||
 					    !unproject(stereo_config.camera[1], pixels[1], rays[1]))
@@ -1674,6 +1690,7 @@ rift_s_world_anchor_process_rig_gravity(rift_s_world_anchor *a,
 					std::memcpy(p.descriptors[1].data(),
 					            pair_features[1].descriptors.ptr(m.trainIdx), 32);
 					keyframe.points.push_back(p);
+					seen.push_back(pixels[1]);
 					used[first][m.queryIdx] = true;
 					++source_points[first];
 					coverage[first].push_back(pixels[0]);

@@ -38,6 +38,9 @@ struct rift_s_hmd_config;
 struct rift_s_world_diagnostics
 {
 	uint64_t attempts, usable;
+	//! First failing usability gate per unusable attempt: paused/standby state, missing SLAM sample,
+	//! late sample, invalid position flags, stale session, or gravity disagreement with the IMU.
+	uint64_t fail_paused, fail_sample, fail_gap, fail_flags, fail_generation, fail_guard;
 	timepoint_ns capture_ns, sample_ns;
 	bool pose_valid;
 	uint32_t pose_flags;
@@ -78,6 +81,8 @@ struct rift_s_tracker
 	struct rift_s_world_diagnostics world_diagnostics;
 	//! World worker's rate limit for native diagnostics while a worn room is unrecognized.
 	timepoint_ns world_last_diagnostic_ns;
+	//! Last processed capture while the room is localized; bounds verification cost once recognized.
+	timepoint_ns world_last_verify_ns;
 
 	//! Camera arrival watchdog uses the host clock, not predicted pose time.
 	timepoint_ns last_camera_arrival_ns;

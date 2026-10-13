@@ -1327,14 +1327,17 @@ world_write_status(struct rift_s_tracker *t)
 		RIFT_S_WARN("Room recognition pending attempts=%" PRIu64 " usable=%" PRIu64
 		            " capture_ns=%lld sample_ns=%lld valid=%d flags=%u history=%d generation=%" PRIu64
 		            " confirmations=%u keyframes=%u features=%u/%u/%u/%u/%u"
-		            " matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u matched=%d rejection=%s",
+		            " matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u matched=%d rejection=%s"
+		            " fail=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64,
 		            diagnostics.attempts, diagnostics.usable, (long long)diagnostics.capture_ns,
 		            (long long)diagnostics.sample_ns, diagnostics.pose_valid, diagnostics.pose_flags,
 		            diagnostics.history_result, generation, confirmations, result->keyframes,
 		            result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
 		            result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
 		            result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
-		            result->relocalized, result->rejection ? result->rejection : "none");
+		            result->relocalized, result->rejection ? result->rejection : "none",
+		            diagnostics.fail_paused, diagnostics.fail_sample, diagnostics.fail_gap,
+		            diagnostics.fail_flags, diagnostics.fail_generation, diagnostics.fail_guard);
 	}
 	if (state != last_state && strcmp(state, "relocalizing") == 0) {
 		RIFT_S_WARN("Guardian not found: saved room is not localized; boundary unavailable. "
@@ -1355,14 +1358,18 @@ world_write_status(struct rift_s_tracker *t)
 	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u history=%d standby=%d paused=%d restart=%d"
 	              " generation=%" PRIu64 " confirmations=%u keyframes=%u"
 	              " features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u"
-	              " matched=%d rejection=%s\n",
+	              " matched=%d rejection=%s"
+	              " fail_paused=%" PRIu64 " fail_sample=%" PRIu64 " fail_gap=%" PRIu64 " fail_flags=%" PRIu64
+	              " fail_generation=%" PRIu64 " fail_guard=%" PRIu64 "\n",
 	        (long long)os_monotonic_get_ns(), state, diagnostics.attempts, diagnostics.usable,
 	        (long long)diagnostics.capture_ns, (long long)diagnostics.sample_ns, diagnostics.pose_valid,
 	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, generation, confirmations, result->keyframes,
 	        result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
 	        result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
 	        result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
-	        result->relocalized, result->rejection ? result->rejection : "none");
+	        result->relocalized, result->rejection ? result->rejection : "none",
+	        diagnostics.fail_paused, diagnostics.fail_sample, diagnostics.fail_gap, diagnostics.fail_flags,
+	        diagnostics.fail_generation, diagnostics.fail_guard);
 	if (fclose(file) == 0) rename(temp, path);
 }
 
@@ -1436,6 +1443,8 @@ rift_s_world_thread(void *ptr)
 	struct rift_s_tracker *t = ptr;
 	timepoint_ns last_attempt_log_ns = 0;
 	uint64_t attempts = 0, usable = 0;
+	uint64_t fail_paused = 0, fail_sample = 0, fail_gap = 0, fail_flags = 0, fail_generation = 0,
+	         fail_guard = 0;
 	os_thread_helper_lock(&t->world_thread);
 	while (os_thread_helper_is_running_locked(&t->world_thread)) {
 		struct xrt_frame *frames[RIFT_S_CAMERA_COUNT] = {0};
@@ -1453,14 +1462,16 @@ rift_s_world_thread(void *ptr)
 			os_mutex_lock(&t->mutex);
 			uint64_t generation = t->slam_generation;
 			os_mutex_unlock(&t->mutex);
-			bool valid = false;
+			bool sample_ok = false;
 #ifdef XRT_FEATURE_SLAM
-			// Wait briefly for this exposure's SLAM sample, rather than triangulate against a prediction.
-			for (int attempt = 0; attempt < 12; attempt++) {
+			// Wait for this exposure's SLAM sample, rather than triangulate against a prediction. The
+			// bound matches the display pose path's 250 ms sample age, so a loaded backend does not make
+			// recognition samples unusable while published poses stay valid.
+			for (int attempt = 0; attempt < 25; attempt++) {
 				history_result = t_slam_get_sample_at(t->tracking.slam, capture_ns, &source_ns, &capture);
-                valid = history_result == M_RELATION_HISTORY_RESULT_EXACT ||
-                        history_result == M_RELATION_HISTORY_RESULT_INTERPOLATED;
-				if (valid && source_ns >= capture_ns)
+				sample_ok = history_result == M_RELATION_HISTORY_RESULT_EXACT ||
+				            history_result == M_RELATION_HISTORY_RESULT_INTERPOLATED;
+				if (sample_ok && source_ns >= capture_ns)
 					break;
 				os_nanosleep(10 * U_TIME_1MS_IN_NS);
 			}
@@ -1472,11 +1483,28 @@ rift_s_world_thread(void *ptr)
 			if (m_relation_history_get(t->fusion.history, capture_ns, &fusion_capture) !=
 			    M_RELATION_HISTORY_RESULT_INVALID)
 				fusion = fusion_capture.pose.orientation;
-			valid = valid && source_ns >= capture_ns && source_ns - capture_ns <= 150 * U_TIME_1MS_IN_NS &&
-			        (capture.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) &&
-			        capture_ns >= t->slam_min_sample_ns && generation == t->slam_generation &&
-			        !t->standby && !t->slam_paused && !t->slam_restart_pending &&
-			        rift_s_slam_guard_pose_usable(&capture.pose, &fusion);
+			// A worn room is recognized from rare usable samples. Count the first failing gate so the
+			// next session shows which capture/sample condition dominates instead of only usable=0.
+			bool settled = !t->standby && !t->slam_paused && !t->slam_restart_pending;
+			bool gap_ok = source_ns >= capture_ns && source_ns - capture_ns <= 250 * U_TIME_1MS_IN_NS;
+			bool flags_ok = (capture.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0;
+			bool session_ok = capture_ns >= t->slam_min_sample_ns && generation == t->slam_generation;
+			bool guard_ok = rift_s_slam_guard_pose_usable(&capture.pose, &fusion);
+			bool valid = sample_ok && gap_ok && flags_ok && session_ok && settled && guard_ok;
+			if (!valid) {
+				if (!settled)
+					fail_paused++;
+				else if (!sample_ok)
+					fail_sample++;
+				else if (!gap_ok)
+					fail_gap++;
+				else if (!flags_ok)
+					fail_flags++;
+				else if (!session_ok)
+					fail_generation++;
+				else
+					fail_guard++;
+			}
 			bool standby = t->standby;
 			struct xrt_pose world_capture;
 			struct xrt_vec3 no_pose_position = rift_s_slam_guard_no_pose_position(
@@ -1486,7 +1514,29 @@ rift_s_world_thread(void *ptr)
 			              !t->slam_guard.world_transition &&
 			              rift_s_slam_guard_query(&t->slam_guard, &capture.pose, capture_ns, &fusion,
 			                                      &no_pose_position, &world_capture);
+			// Off-head the SLAM samples recognition needs are invalid by construction, so skip the
+			// matcher instead of burning the room-matching thread. Once localized, verify at a low
+			// rate; while searching, match every queued pair.
+			bool match_now = true;
+			if (t->standby) {
+				match_now = false;
+			} else if (!record && t->slam_guard.boundary_confirmed && !t->slam_guard.world_transition &&
+			           !t->world_setup) {
+				match_now = capture_ns - t->world_last_verify_ns >= 5LL * U_TIME_1S_IN_NS;
+				if (match_now)
+					t->world_last_verify_ns = capture_ns;
+			}
 			os_mutex_unlock(&t->mutex);
+			if (!match_now) {
+				// Frozen attempts/diagnostics show the skip; the shared loop tail still releases the
+				// frames, refreshes the status file and yields.
+				for (int eye = 0; eye < RIFT_S_CAMERA_COUNT; eye++)
+					xrt_frame_reference(&frames[eye], NULL);
+				world_write_status(t);
+				os_nanosleep(20 * U_TIME_1MS_IN_NS);
+				os_thread_helper_lock(&t->world_thread);
+				continue;
+			}
 			rift_s_world_anchor_record_rig_frames(t->world_anchor, (const struct xrt_frame *const *)frames,
 			                                      RIFT_S_CAMERA_COUNT, valid ? &capture.pose : NULL);
 			struct rift_s_world_anchor_result result = {0};
@@ -1500,6 +1550,8 @@ rift_s_world_thread(void *ptr)
 			os_mutex_lock(&t->mutex);
 			t->world_diagnostics = (struct rift_s_world_diagnostics){
 			    .attempts = attempts, .usable = usable, .capture_ns = capture_ns, .sample_ns = source_ns,
+			    .fail_paused = fail_paused, .fail_sample = fail_sample, .fail_gap = fail_gap,
+			    .fail_flags = fail_flags, .fail_generation = fail_generation, .fail_guard = fail_guard,
 			    .pose_valid = valid, .pose_flags = capture.relation_flags, .history_result = history_result, .result = result};
 			os_mutex_unlock(&t->mutex);
 			if (capture_ns - last_attempt_log_ns >= U_TIME_1S_IN_NS) {
@@ -1509,7 +1561,8 @@ rift_s_world_thread(void *ptr)
 				            " standby=%d keyframes=%u features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u "
 				            "inliers=%u/%u/%u/%u/%u"
 				            " points_by_camera=%u/%u/%u/%u/%u support=%u stereo=%u triangulated=%u "
-				            "error_px=%.3f record=%d matched=%d confirmations=%u rejection=%s",
+				            "error_px=%.3f record=%d matched=%d confirmations=%u rejection=%s "
+				            "fail=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64,
 				            attempts, usable, valid,
 				            source_ns > 0 ? (double)(source_ns - capture_ns) / U_TIME_1MS_IN_NS : -1.0,
 				            standby, result.keyframes, result.features[0], result.features[1],
@@ -1520,7 +1573,8 @@ rift_s_world_thread(void *ptr)
 				            result.camera_points[1], result.camera_points[2], result.camera_points[3],
 				            result.camera_points[4], result.supporting_cameras, result.stereo_matches,
 				            result.triangulated, result.max_reprojection_px, record, result.relocalized,
-				            t->world_confirmations, result.rejection ? result.rejection : "none");
+				            t->world_confirmations, result.rejection ? result.rejection : "none",
+				            fail_paused, fail_sample, fail_gap, fail_flags, fail_generation, fail_guard);
 			}
 			if (processed && result.recorded) {
 				os_mutex_lock(&t->mutex);
@@ -1570,9 +1624,16 @@ rift_s_world_thread(void *ptr)
 					}
 				}
 				os_mutex_unlock(&t->mutex);
-			} else if (!record && (!valid || capture_ns - t->world_candidate_ns > 3LL * U_TIME_1S_IN_NS)) {
+			} else if (!record) {
+				// Hold partial confirmations across invalid samples: usable SLAM samples are rare
+				// while searching, and one missed sample must not discard agreeing votes. The
+				// candidate still drops when stale or from an older SLAM session, so a transient
+				// wrong match cannot accumulate votes across minutes. Vote agreement (4 cm, 3
+				// degrees, chained 3 s) and the 3-confirmation bar are unchanged.
 				os_mutex_lock(&t->mutex);
-				t->world_confirmations = 0;
+				if (t->world_candidate_generation != t->slam_generation ||
+				    capture_ns - t->world_candidate_ns > 3LL * U_TIME_1S_IN_NS)
+					t->world_confirmations = 0;
 				os_mutex_unlock(&t->mutex);
 			}
 		}

@@ -585,7 +585,9 @@ TEST_CASE("Cross-session camera map replay", "[.camera-replay]")
 				    result.supporting_cameras, result.max_reprojection_px, result.relocalized,
 				    result.rejection ? result.rejection : "none");
 			if (!processed || !result.relocalized || !valid) {
-				if (!valid || ts - previous_ns > 3000000000LL)
+				// Mirror of the driver's hold: invalid samples keep agreeing votes; only a stale
+				// candidate drops them, so a transient wrong match cannot accumulate votes.
+				if (ts - previous_ns > 3000000000LL)
 					confirmations = 0;
 				continue;
 			}
