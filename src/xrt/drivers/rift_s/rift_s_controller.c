@@ -269,6 +269,7 @@ attitude_sample(struct rift_s_controller *ctrl, unsigned int index)
 static void
 suspend_position_tracking(struct rift_s_controller *ctrl)
 {
+	ctrl->motion_generation++;
 	rift_s_position_filter_suspend(&ctrl->position_filter);
 	if (ctrl->sys != NULL) {
 		rift_s_motion_reset_hand(ctrl->sys->motion,
@@ -921,6 +922,7 @@ imu_descriptor_give_up(struct rift_s_controller *ctrl, const char *reason)
 static void
 reset_position_filter(struct rift_s_controller *ctrl)
 {
+	ctrl->motion_generation++;
 	rift_s_position_filter_reset(&ctrl->position_filter);
 	float accel_noise = debug_get_float_option_rift_s_position_accel_noise();
 	float bias_walk = debug_get_float_option_rift_s_position_bias_walk();
@@ -970,40 +972,69 @@ position_tracking_at(const struct rift_s_controller *ctrl, timepoint_ns t, bool 
 	return age > RIFT_S_COAST_AFTER_NS ? POSITION_COASTING : POSITION_TRACKED;
 }
 
-// Adapt the Monado filter's current uncertainty to the model reliability gate. Normal
-// vision delivery latency must not activate a model merely because capture time is old.
-void
-rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns)
+// Capture controller state before the potentially slow HMD query. The radio dispatch
+// keeps the devices alive and serializes IMU reports with configuration changes.
+struct motion_update
+{
+	struct rift_s_motion_sample sample;
+	uint64_t generation;
+};
+
+static bool
+prepare_motion_update(struct rift_s_controller *ctrl, timepoint_ns capture_ns, struct motion_update *update)
 {
 	if (ctrl->sys == NULL || ctrl->sys->motion == NULL || !ctrl->position_filter.initialized) {
-		return;
+		return false;
 	}
+	bool velocity_tracked;
+	enum position_tracking state = position_tracking_at(ctrl, capture_ns, &velocity_tracked);
+	*update = (struct motion_update){0};
+	update->generation = ctrl->motion_generation;
+	struct rift_s_motion_sample *sample = &update->sample;
+	sample->timestamp_ns = capture_ns;
+	sample->pose.orientation = ctrl->pose.orientation;
+	rift_s_position_filter_predict(&ctrl->position_filter, capture_ns, 0, &sample->pose.position,
+	                               &sample->linear_velocity);
+	sample->linear_acceleration = ctrl->world_accel;
+	sample->angular_velocity = ctrl->fusion.last.gyro;
+	for (int axis = 0; axis < 3; ++axis) {
+		sample->position_variance[axis] =
+		    state != POSITION_LOST && !ctrl->position_filter.suspended && ctrl->track_vision_updates >= 3
+		        ? ctrl->position_filter.state.P[axis][0][0]
+		        : -1;
+	}
+	return true;
+}
+
+static void
+submit_motion_update(struct rift_s_controller *ctrl, const struct motion_update *update)
+{
 	struct xrt_device *head = rift_s_system_get_hmd(ctrl->sys);
 	struct xrt_space_relation head_relation = XRT_SPACE_RELATION_ZERO;
 	if (head == NULL ||
-	    head->get_tracked_pose(head, XRT_INPUT_GENERIC_HEAD_POSE, capture_ns, &head_relation) != XRT_SUCCESS ||
+	    head->get_tracked_pose(head, XRT_INPUT_GENERIC_HEAD_POSE, update->sample.timestamp_ns, &head_relation) != XRT_SUCCESS ||
 	    (head_relation.relation_flags &
 	     (XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)) !=
 	        (XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)) {
 		return;
 	}
-	bool velocity_tracked;
-	enum position_tracking state = position_tracking_at(ctrl, capture_ns, &velocity_tracked);
-	struct rift_s_motion_sample sample = {0};
-	sample.timestamp_ns = capture_ns;
-	sample.pose.orientation = ctrl->pose.orientation;
-	rift_s_position_filter_predict(&ctrl->position_filter, capture_ns, 0, &sample.pose.position,
-	                               &sample.linear_velocity);
-	sample.linear_acceleration = ctrl->world_accel;
-	sample.angular_velocity = ctrl->fusion.last.gyro;
-	for (int axis = 0; axis < 3; ++axis) {
-		sample.position_variance[axis] =
-		    state != POSITION_LOST && !ctrl->position_filter.suspended && ctrl->track_vision_updates >= 3
-		        ? ctrl->position_filter.state.P[axis][0][0]
-		        : -1;
+	os_mutex_lock(&ctrl->mutex);
+	// A clock reset, loss or replacement during the unlocked query must not revive an old model.
+	if (update->generation == ctrl->motion_generation) {
+		unsigned int hand = ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0;
+		rift_s_motion_update(ctrl->sys->motion, hand, &update->sample, &head_relation.pose);
 	}
-	unsigned int hand = ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0;
-	rift_s_motion_update(ctrl->sys->motion, hand, &sample, &head_relation.pose);
+	os_mutex_unlock(&ctrl->mutex);
+}
+
+void
+rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns)
+{
+	struct motion_update update;
+	os_mutex_lock(&ctrl->mutex);
+	bool prepared = prepare_motion_update(ctrl, capture_ns, &update);
+	os_mutex_unlock(&ctrl->mutex);
+	if (prepared) submit_motion_update(ctrl, &update);
 }
 
 bool
@@ -1137,7 +1168,12 @@ handle_imu_update(struct rift_s_controller *ctrl,
 		ctrl->last_imu_capture_ns = capture_ns;
 		if (ctrl->world_accel_valid) {
 			rift_s_position_filter_imu(&ctrl->position_filter, capture_ns, &ctrl->world_accel);
-			rift_s_controller_update_motion(ctrl, capture_ns);
+			struct motion_update update;
+			if (prepare_motion_update(ctrl, capture_ns, &update)) {
+				os_mutex_unlock(&ctrl->mutex);
+				submit_motion_update(ctrl, &update);
+				os_mutex_lock(&ctrl->mutex);
+			}
 		}
 	}
 	if (log_imu) {

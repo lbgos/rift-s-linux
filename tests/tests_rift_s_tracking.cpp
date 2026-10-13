@@ -2417,3 +2417,97 @@ TEST_CASE("Rift S durable accelerometer bias is device bound and verified at res
 	unlink(path.c_str());
 	rmdir(directory);
 }
+
+TEST_CASE("Rift S motion queries preserve capture samples without holding the controller lock")
+{
+	struct Head {
+		rift_s_hmd hmd{};
+		rift_s_controller *ctrl{};
+		timepoint_ns requested{};
+		bool unlocked{}, reset{}, correct{};
+	};
+	for (bool right : {false, true}) {
+		Head head{};
+		rift_s_system sys{};
+		xrt_atomic_s32_store(&sys.transport_online, 1);
+		sys.hmd = &head.hmd;
+		sys.motion = rift_s_motion_create();
+		REQUIRE(sys.motion != nullptr);
+		rift_s_controller ctrl{};
+		ctrl.sys = &sys;
+		ctrl.base.device_type = right ? XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER : XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER;
+		ctrl.gravity_initialized = true;
+		ctrl.pose.orientation = XRT_QUAT_IDENTITY;
+		ctrl.P_imu_device = ctrl.P_device_aim = ctrl.P_device_grip = XRT_POSE_IDENTITY;
+		os_mutex_init(&ctrl.mutex);
+		head.ctrl = &ctrl;
+		head.hmd.base.get_tracked_pose = [](xrt_device *device, xrt_input_name name, int64_t timestamp,
+		                                  xrt_space_relation *out) {
+			auto &head = *reinterpret_cast<Head *>(device);
+			head.requested = timestamp;
+			head.unlocked = os_mutex_trylock(&head.ctrl->mutex) == 0;
+			if (head.unlocked) {
+				// An optical correction after snapshot must affect the next sample only.
+				if (head.correct) head.ctrl->pose.orientation = {0, .1f, 0, std::sqrt(.99f)};
+				os_mutex_unlock(&head.ctrl->mutex);
+			}
+			if (head.reset && head.unlocked) {
+				rift_s_controller_device_lost(head.ctrl);
+				// The transport supervisor clears the shared model immediately after device_lost.
+				rift_s_motion_reset_hand(head.ctrl->sys->motion,
+				                         head.ctrl->base.device_type == XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER ? 1 : 0);
+			}
+			return get_test_head_pose(device, name, timestamp, out);
+		};
+		const xrt_vec3 position = {right ? 1.3f : .7f, 1.1f, 2.5f}, variance = {1e-5f, 1e-5f, 1e-5f};
+		const timepoint_ns start = 1000000000;
+		rift_s_position_filter_reset(&ctrl.position_filter);
+		rift_s_position_filter_fix(&ctrl.position_filter, start, &position, &variance, .15f);
+		ctrl.last_fix_ns = start;
+		ctrl.track_vision_updates = 3;
+		auto *reference = rift_s_motion_create();
+		REQUIRE(reference != nullptr);
+		unsigned hand = right ? 1 : 0;
+		timepoint_ns timestamp = start;
+		for (int i = 0; i < 1200; ++i) {
+			timestamp += (i % 17 == 0 ? 7 : i % 3 + 1) * U_TIME_1MS_IN_NS;
+			ctrl.last_fix_ns = timestamp;
+			ctrl.last_imu_capture_ns = timestamp;
+			const xrt_vec3 acceleration = {.01f * std::sin(i * .01f), 0, .02f * std::cos(i * .02f)};
+			rift_s_position_filter_imu(&ctrl.position_filter, timestamp, &acceleration);
+			ctrl.world_accel = acceleration;
+			ctrl.fusion.last.gyro = {0, .01f, 0};
+			rift_s_motion_sample sample{};
+			sample.timestamp_ns = timestamp;
+			sample.pose.orientation = ctrl.pose.orientation;
+			rift_s_position_filter_predict(&ctrl.position_filter, timestamp, 0, &sample.pose.position,
+			                               &sample.linear_velocity);
+			sample.linear_acceleration = ctrl.world_accel;
+			sample.angular_velocity = ctrl.fusion.last.gyro;
+			for (int axis = 0; axis < 3; ++axis) sample.position_variance[axis] = ctrl.position_filter.state.P[axis][0][0];
+			xrt_space_relation head_relation{};
+			get_test_head_pose(&head.hmd.base, XRT_INPUT_GENERIC_HEAD_POSE, timestamp, &head_relation);
+			rift_s_motion_update(reference, hand, &sample, &head_relation.pose);
+			head.correct = i == 500;
+			rift_s_controller_update_motion(&ctrl, timestamp);
+			REQUIRE(head.unlocked);
+			REQUIRE(head.requested == timestamp);
+			for (time_duration_ns ahead : {time_duration_ns{0}, time_duration_ns{25000000}}) {
+				xrt_space_relation actual{}, expected{};
+				CHECK(rift_s_motion_get(sys.motion, hand, timestamp + ahead, &actual) ==
+				      rift_s_motion_get(reference, hand, timestamp + ahead, &expected));
+				CHECK(std::memcmp(&actual, &expected, sizeof(actual)) == 0);
+			}
+		}
+		// Device loss during the unlocked query clears the cache. The staged sample must not revive it.
+		head.reset = true;
+		rift_s_controller_update_motion(&ctrl, timestamp + U_TIME_1MS_IN_NS);
+		REQUIRE(head.unlocked);
+		xrt_space_relation relation{};
+		CHECK(rift_s_motion_get(sys.motion, hand, timestamp + U_TIME_1MS_IN_NS, &relation) == RIFT_S_MOTION_NONE);
+		CHECK_FALSE(ctrl.position_filter.initialized);
+		rift_s_motion_destroy(&reference);
+		rift_s_motion_destroy(&sys.motion);
+		os_mutex_destroy(&ctrl.mutex);
+	}
+}

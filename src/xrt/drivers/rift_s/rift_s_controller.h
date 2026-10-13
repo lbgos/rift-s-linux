@@ -203,6 +203,8 @@ struct rift_s_controller
 	timepoint_ns last_fix_ns;
 	//! Host capture time and world-frame acceleration (gravity removed) of the newest IMU sample.
 	timepoint_ns last_imu_capture_ns;
+	//! Invalidates motion snapshots across clock resets, device loss and replacement.
+	uint64_t motion_generation;
 	struct xrt_vec3 world_accel;
 	bool world_accel_valid;
 	//! Last reported aim/grip position source, for logging transitions.
@@ -407,8 +409,8 @@ rift_s_controller_get_led_model(struct xrt_device *xdev, struct t_constellation_
 bool
 rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_constellation_pose_observation *obs);
 
-// Feed motion models from the current capture-time filter state. Caller holds the controller mutex
-// and keeps the system devices alive, as the radio dispatch does.
+// Feed motion models from a capture-time snapshot. Locks the controller only for snapshot/commit;
+// the caller keeps the system devices alive and serializes IMU updates, as radio dispatch does.
 void
 rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns);
 
