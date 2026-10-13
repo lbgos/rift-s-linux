@@ -180,6 +180,17 @@ extern "C" void rifts_shutdown() {
     library=nullptr; vr_system=nullptr; compositor=nullptr; settings=nullptr; chaperone=nullptr; setup=nullptr; overlay=nullptr; display=nullptr;
 }
 
+// OpenVR lock held. Drains this client's event queue and reports VREvent_Quit.
+// vrserver sends it to every client when it quits (also when vrmonitor dies)
+// and kills clients still connected ~5 s later, so the caller must disconnect.
+extern "C" bool rifts_quit_requested() {
+    if(!vr_system) return false;
+    vr::VREvent_t event;
+    bool quit=false;
+    while(vr_system->PollNextEvent(&event, sizeof event)) quit |= event.eventType==vr::VREvent_Quit;
+    return quit;
+}
+
 // Preview thread, OpenVR lock held. Uses the connection the snapshot poll
 // keeps; never connects or spawns anything itself.
 extern "C" int64_t rifts_preview_step() {

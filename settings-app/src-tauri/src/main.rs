@@ -21,6 +21,7 @@ unsafe extern "C" {
     fn rifts_snapshot(path: *const std::ffi::c_char) -> *const std::ffi::c_char;
     fn rifts_action(action: i32) -> i32;
     fn rifts_shutdown();
+    fn rifts_quit_requested() -> bool;
     fn rifts_surface_place(
         webview: *mut std::ffi::c_void,
         x: i32,
@@ -40,6 +41,9 @@ unsafe extern "C" {
 }
 static VR: Mutex<()> = Mutex::new(());
 static SERVER_PID: AtomicU32 = AtomicU32::new(0);
+// vrserver that sent VREvent_Quit. Settings stays disconnected from it while it
+// shuts down and reconnects once a new vrserver runs.
+static QUIT_PID: AtomicU32 = AtomicU32::new(0);
 
 fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
@@ -100,7 +104,7 @@ fn vr_path() -> Result<Option<CString>, String> {
     if SERVER_PID.swap(pid, Ordering::Relaxed) != pid {
         unsafe { rifts_shutdown() };
     }
-    if pid == 0 {
+    if pid == 0 || pid == QUIT_PID.load(Ordering::Relaxed) {
         unsafe { rifts_shutdown() };
         return Ok(None);
     }
@@ -127,28 +131,39 @@ fn wake_preview() {
         PREVIEW_WAKE.1.notify_one();
     }
 }
+// Also the OpenVR event pump: answers VREvent_Quit by disconnecting within
+// QUIT_POLL, so vrserver never has to kill Settings when SteamVR quits.
+const QUIT_POLL: Duration = Duration::from_millis(250);
 fn preview_thread() {
     let (flag, wake) = &PREVIEW_WAKE;
+    let mut polled = std::time::Instant::now();
     loop {
         let delay = match VR.lock() {
-            Ok(_lock) => unsafe { rifts_preview_step() },
+            Ok(_lock) => {
+                if polled.elapsed() >= QUIT_POLL {
+                    polled = std::time::Instant::now();
+                    if unsafe { rifts_quit_requested() } {
+                        QUIT_PID.store(SERVER_PID.load(Ordering::Relaxed), Ordering::Relaxed);
+                        unsafe { rifts_shutdown() };
+                    }
+                }
+                unsafe { rifts_preview_step() }
+            }
             Err(_) => return,
         };
         let Ok(mut changed) = flag.lock() else {
             return;
         };
-        // Negative: hidden until the next layout change. Early wake-ups are
-        // harmless; the step presents at most once per compositor frame.
-        if delay < 0 {
-            while !*changed {
-                let Ok(guard) = wake.wait(changed) else {
-                    return;
-                };
-                changed = guard;
-            }
-        } else if !*changed {
-            let Ok((guard, _)) = wake.wait_timeout(changed, Duration::from_micros(delay as u64))
-            else {
+        // Negative: hidden until the next layout change, but still polling for
+        // quit. Early wake-ups are harmless; the step presents at most once per
+        // compositor frame.
+        let wait = if delay < 0 {
+            QUIT_POLL
+        } else {
+            Duration::from_micros(delay as u64).min(QUIT_POLL)
+        };
+        if !*changed {
+            let Ok((guard, _)) = wake.wait_timeout(changed, wait) else {
                 return;
             };
             changed = guard;
