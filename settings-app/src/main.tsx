@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
 import './style.css';
@@ -80,25 +80,63 @@ function KeyValues({ rows }: { rows: [string, string][] }) {
 
 function HeadsetPreview({ enabled }: { enabled: boolean }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const [error, setError] = useState('');
+  const [stats, setStats] = useState('');
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const changed = () => setFull(document.fullscreenElement === box.current);
+    document.addEventListener('fullscreenchange', changed);
+    return () => document.removeEventListener('fullscreenchange', changed);
+  }, []);
+  const toggle = useCallback(() => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void box.current?.requestFullscreen();
+  }, []);
+  useEffect(() => {
+    function keys(event: KeyboardEvent) {
+      if (event.key === 'F11') { event.preventDefault(); toggle(); }
+    }
+    addEventListener('keydown', keys);
+    return () => removeEventListener('keydown', keys);
+  }, [toggle]);
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let frames = 0, marked = performance.now(), size = '', latencies: number[] = [];
+    // The full per-frame cost (capture + JPEG + IPC + draw) is ~11 ms, so an
+    // uncapped loop burns a core without ever reaching the display rate.
+    // Pace at 30 fps; slower backend responses back off naturally.
+    const period = 1000 / 30;
     async function poll() {
+      if (cancelled) return;
+      const frameStart = performance.now();
       if (!document.hidden) {
         try {
+          const started = performance.now();
           const frame = await invoke<ArrayBuffer>('preview');
+          latencies.push(performance.now() - started);
           if (cancelled) return;
           const header = new DataView(frame);
           const width = header.getUint32(0, true), height = header.getUint32(4, true);
-          if (!width || !height || width > 512 || height > 512 || frame.byteLength !== 8 + width * height * 4)
+          if (!width || !height || width > 512 || height > 512 || frame.byteLength <= 8 || frame.byteLength > 8 + 512 * 512)
             throw new Error('Headset preview frame invalid');
           const target = canvas.current;
           if (target) {
-            target.width = width; target.height = height;
-            target.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(frame, 8), width, height), 0, 0);
+            // Resetting the size clears the canvas; only do it on change.
+            if (target.width !== width) target.width = width;
+            if (target.height !== height) target.height = height;
+            const context = target.getContext('2d');
+            if (context) {
+              const bitmap = await createImageBitmap(new Blob([frame.slice(8)], { type: 'image/jpeg' }));
+              if (cancelled) { bitmap.close(); return; }
+              context.drawImage(bitmap, 0, 0);
+              bitmap.close();
+            }
           }
+          size = `${width}×${height}`;
+          frames++;
           setError('');
         } catch (failure) {
           if (cancelled) return;
@@ -106,13 +144,34 @@ function HeadsetPreview({ enabled }: { enabled: boolean }) {
           target?.getContext('2d')?.clearRect(0, 0, target.width, target.height);
           setError(String(failure));
         }
+        const now = performance.now();
+        if (now - marked >= 1000) {
+          const avg = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
+          setStats(`${Math.round(frames * 1000 / (now - marked))} fps · ${size || '—'} · ${avg.toFixed(1)} ms`);
+          frames = 0; marked = now; latencies = [];
+        }
       }
-      if (!cancelled) timer = setTimeout(poll, 200);
+      // Pace at 30 fps with setTimeout chaining: sleeping the full period
+      // and then waiting for the next vsync overshoots to ~21 fps, so the
+      // next poll is scheduled directly. Slower backend responses back off
+      // naturally since the next frame starts only after this one finishes.
+      if (!cancelled) {
+        let wait = period - (performance.now() - frameStart);
+        if (document.hidden) wait = Math.max(wait, 1000);
+        if (wait > 0)
+          await new Promise<void>(resolve => { timer = setTimeout(resolve, wait); });
+        if (!cancelled) timer = setTimeout(poll, 0);
+      }
     }
-    void poll();
+    timer = setTimeout(poll, 0);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [enabled]);
-  return <div className="well preview"><canvas ref={canvas} aria-label="Live headset view"/>{error && <output role="status">{error}</output>}</div>;
+  return <div className="well preview" ref={box} onDoubleClick={toggle}>
+    <canvas ref={canvas} aria-label="Live headset view"/>
+    <button className="btn sm fs" onClick={toggle} aria-label={full ? 'Exit fullscreen preview' : 'Fullscreen preview'}>{full ? 'Exit' : 'Fullscreen'}</button>
+    {stats && !error && <span className="meta" aria-label="Preview rate">{stats}</span>}
+    {error && <output role="status">{error}</output>}
+  </div>;
 }
 
 function App() {

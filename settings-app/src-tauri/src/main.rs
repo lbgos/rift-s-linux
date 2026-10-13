@@ -58,6 +58,24 @@ fn process_pid(name: &str) -> Option<String> {
 fn server_pid() -> Option<String> {
     process_pid("vrserver")
 }
+// pgrep costs ~9 ms on this machine. The preview polls at display rate, so
+// the hot path uses a 1 s TTL cache. Restart/change detection only slips by
+// up to a second; restart_steamvr keeps the uncached check.
+static PID_CACHE: Mutex<(Option<String>, Option<std::time::Instant>)> = Mutex::new((None, None));
+fn server_pid_fast() -> Option<String> {
+    if let Ok(guard) = PID_CACHE.lock() {
+        if let (value, Some(when)) = (&guard.0, &guard.1) {
+            if when.elapsed() < Duration::from_secs(1) {
+                return value.clone();
+            }
+        }
+    }
+    let value = server_pid();
+    if let Ok(mut guard) = PID_CACHE.lock() {
+        *guard = (value.clone(), Some(std::time::Instant::now()));
+    }
+    value
+}
 // Avoid matching another user's SteamVR session.
 unsafe fn libc_uid() -> u32 {
     unsafe extern "C" {
@@ -67,7 +85,7 @@ unsafe fn libc_uid() -> u32 {
 }
 // The caller holds VR for the complete native call and any borrowed pixel copy.
 fn vr_path() -> Result<Option<CString>, String> {
-    let pid = server_pid()
+    let pid = server_pid_fast()
         .and_then(|p| p.parse::<u32>().ok())
         .unwrap_or(0);
     if SERVER_PID.swap(pid, Ordering::Relaxed) != pid {
@@ -121,10 +139,24 @@ async fn preview() -> Result<tauri::ipc::Response, String> {
         {
             return Err("Headset preview frame invalid".into());
         }
-        let mut frame = Vec::with_capacity(8 + bytes);
+        // JPEG at quality 80 shrinks a 256 KiB RGBA frame to a few KiB, so
+        // the Tauri IPC round-trip stops dominating the frame budget. The
+        // response is the 8-byte little-endian width/height header followed
+        // by the JPEG bytes.
+        let pixels = unsafe { std::slice::from_raw_parts(data, bytes) };
+        let mut jpeg = Vec::with_capacity(bytes / 8);
+        jpeg_encoder::Encoder::new(&mut jpeg, 80)
+            .encode(
+                pixels,
+                width as u16,
+                height as u16,
+                jpeg_encoder::ColorType::Rgba,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut frame = Vec::with_capacity(8 + jpeg.len());
         frame.extend_from_slice(&width.to_le_bytes());
         frame.extend_from_slice(&height.to_le_bytes());
-        frame.extend_from_slice(unsafe { std::slice::from_raw_parts(data, bytes) });
+        frame.extend_from_slice(&jpeg);
         Ok(tauri::ipc::Response::new(frame))
     })
     .await

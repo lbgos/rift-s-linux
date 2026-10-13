@@ -213,6 +213,11 @@ struct Preview {
     view = {};
     return result == vr::VROverlayError_None;
   }
+  // True once the Vulkan device and sampling pipeline are built. A fully
+  // initialized device is kept across transient per-frame failures so a
+  // persistent compositor stall does not become a device reinit every poll.
+  bool ready{};
+  void mark_ready() { ready = true; }
   void clear_buffers() {
     if (buffer)
       vkDestroyBuffer(device, buffer, nullptr);
@@ -369,6 +374,12 @@ struct Preview {
 };
 std::unique_ptr<Preview> preview;
 std::string error;
+// The headset-view overlay and its viewing permission are stable while the
+// session lives. Resolving them once per process avoids two OpenVR IPC
+// round-trips per frame; any acquire/release failure drops the cache so the
+// next poll re-resolves (overlay closed, permission revoked, restart).
+vr::VROverlayHandle_t cached_handle{};
+bool have_handle{};
 } // namespace
 const char *rifts_overlay_frame(vr::IVRSystem *system,
                                 vr::IVRCompositor *compositor,
@@ -380,17 +391,27 @@ const char *rifts_overlay_frame(vr::IVRSystem *system,
   *w = *h = 0;
   if (!system || !compositor || !overlay || !api)
     return "Headset preview unavailable";
-  vr::VROverlayHandle_t handle{};
-  if (overlay->FindOverlay(vr::k_pchHeadsetViewOverlayKey, &handle) !=
-      vr::VROverlayError_None)
-    return "Open VR View to preview";
-  if (!api->IsViewingPermitted(handle))
-    return "Headset preview access unavailable";
+  if (!have_handle) {
+    vr::VROverlayHandle_t handle{};
+    if (overlay->FindOverlay(vr::k_pchHeadsetViewOverlayKey, &handle) !=
+        vr::VROverlayError_None)
+      return "Open VR View to preview";
+    if (!api->IsViewingPermitted(handle))
+      return "Headset preview access unavailable";
+    cached_handle = handle;
+    have_handle = true;
+  }
+  vr::VROverlayHandle_t handle = cached_handle;
   try {
     if (!preview) {
-      preview = std::make_unique<Preview>();
-      preview->initialize(system, compositor);
-      preview->initialize_sampling();
+      // A device that fails to initialize is discarded so the next poll
+      // retries from scratch. Once built, the device is retained; per-frame
+      // failures below release their view but keep the device.
+      auto fresh = std::make_unique<Preview>();
+      fresh->initialize(system, compositor);
+      fresh->initialize_sampling();
+      fresh->mark_ready();
+      preview = std::move(fresh);
     }
     preview->api = api;
     vr::VRVulkanDevice_t vulkan{preview->instance, preview->device,
@@ -402,9 +423,12 @@ const char *rifts_overlay_frame(vr::IVRSystem *system,
     // Even a view with no queued frame owns native resources and must be
     // released.
     preview->acquired = true;
-    if (acquired != vr::VROverlayError_None)
+    if (acquired != vr::VROverlayError_None) {
+      preview->release();
+      have_handle = false;
       throw std::runtime_error("Headset preview acquisition error " +
                                std::to_string(acquired));
+    }
     if (!preview->view.texture.handle) {
       if (!preview->release())
         throw std::runtime_error("Headset preview release failed");
@@ -418,8 +442,10 @@ const char *rifts_overlay_frame(vr::IVRSystem *system,
     preview->copy(
         *static_cast<vr::VRVulkanTextureData_t *>(preview->view.texture.handle),
         preview->view.textureBounds);
-    if (!preview->release())
+    if (!preview->release()) {
+      have_handle = false;
       throw std::runtime_error("Headset preview release failed");
+    }
     *data = preview->pixels.data();
     *bytes = preview->pixels.size();
     *w = preview->width;
@@ -427,8 +453,15 @@ const char *rifts_overlay_frame(vr::IVRSystem *system,
     return nullptr;
   } catch (const std::exception &failure) {
     error = failure.what();
-    preview.reset();
+    // Drop a half-initialized device so the next poll rebuilds it. A ready
+    // device survives transient frame errors; it is torn down explicitly on
+    // SteamVR restart/exit via rifts_overlay_shutdown.
+    if (!preview || !preview->ready)
+      preview.reset();
     return error.c_str();
   }
 }
-void rifts_overlay_shutdown() { preview.reset(); }
+void rifts_overlay_shutdown() {
+  preview.reset();
+  have_handle = false;
+}
