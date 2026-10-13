@@ -578,6 +578,10 @@ stop_haptics(struct rift_s_system *sys)
 	for (unsigned i = 0; i < count; ++i)
 		rift_s_radio_queue_report(&sys->radio_state, RIFT_S_RADIO_REPORT_WRITE, ids[i], packet, sizeof(packet),
 		                          NULL, NULL);
+	// A wedged radio blocks all updates, but zero-amplitude stops are idempotent:
+	// misattributing a reply pops a stop without corrupting other state, and the
+	// transport is being torn down anyway. Bypass recovery so shutdown still tries.
+	sys->radio_state.recovery_required = false;
 	timepoint_ns deadline = os_monotonic_get_ns() + 100 * U_TIME_1MS_IN_NS;
 	while (sys->radio_state.pending_commands != NULL && os_monotonic_get_ns() < deadline) {
 		rift_s_radio_update(&sys->radio_state, sys->handles[HMD_HID]);
