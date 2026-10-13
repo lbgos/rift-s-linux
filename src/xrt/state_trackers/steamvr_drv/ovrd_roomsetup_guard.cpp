@@ -243,9 +243,16 @@ public:
 		bool stable = display_health.update(connected && !exited(compositor), vsync_age, vsync, now);
 		if (connected) {
 			connected_once = true;
-			if (!lost && exited(compositor)) {
-				if (compositor >= 0) close(compositor);
-				compositor = unique_runtime_process(runtime / "vrcompositor");
+			if (exited(compositor)) {
+				// Adopt a replacement compositor if SteamVR already respawned
+				// one: killing the session then would destroy a self-healed
+				// display. Keep the dead handle as evidence while no
+				// replacement exists so the trigger below still fires.
+				int replacement = unique_runtime_process(runtime / "vrcompositor");
+				if (replacement >= 0) {
+					if (compositor >= 0) close(compositor);
+					compositor = replacement;
+				}
 			}
 			// A watchdog can exit well after USB returns. Disarm only after native
 			// vsync advances continuously, never merely because the process lives.
