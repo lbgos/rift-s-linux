@@ -1019,11 +1019,17 @@ public:
 
 		ovrd_log("Controller %d activated\n", m_unObjectId);
 
-		m_poseUpdating = true;
-		m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado_Controller::PoseUpdateThreadFunction, this);
-		if (!m_poseUpdateThread) {
-			ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
-			return vr::VRInitError_Driver_Failed;
+		// Activate can run again on the same driver object without an
+		// intervening Deactivate. A live thread keeps publishing poses, so
+		// reuse it instead of leaking it behind a second thread that races
+		// on m_pose.
+		if (m_poseUpdateThread == NULL) {
+			m_poseUpdating = true;
+			m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado_Controller::PoseUpdateThreadFunction, this);
+			if (!m_poseUpdateThread) {
+				ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
+				return vr::VRInitError_Driver_Failed;
+			}
 		}
 
 		return vr::VRInitError_None;
@@ -1635,11 +1641,15 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRServerDriverHost()->SetDisplayEyeToHead(m_trackedDeviceIndex, left, right);
 
 
-	m_poseUpdating = true;
-	m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado::PoseUpdateThreadFunction, this);
-	if (!m_poseUpdateThread) {
-		ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
-		return vr::VRInitError_Driver_Failed;
+	// See the controller Activate reuse note above: never strand a live
+	// pose thread behind a second one on repeated Activate.
+	if (m_poseUpdateThread == NULL) {
+		m_poseUpdating = true;
+		m_poseUpdateThread = new std::thread(&CDeviceDriver_Monado::PoseUpdateThreadFunction, this);
+		if (!m_poseUpdateThread) {
+			ovrd_log("Unable to create pose updated thread for %s\n", m_xdev->str);
+			return vr::VRInitError_Driver_Failed;
+		}
 	}
 
 	return vr::VRInitError_None;
