@@ -1417,7 +1417,11 @@ world_read_command(struct rift_s_tracker *t)
 		    rift_s_world_anchor_has_map(t->world_anchor) || rift_s_world_anchor_has_boundary(t->world_anchor);
 		os_mutex_lock(&t->mutex);
 		t->world_storage_failed = !saved;
-		t->slam_guard.boundary_confirmed = saved && rift_s_world_anchor_has_map(t->world_anchor);
+		// A SLAM restart between the last recorded keyframe and Save leaves the guard without a
+		// live world frame. Confirming then would publish saved bounds in a session-derived
+		// frame until the verifier revokes them, so stay unconfirmed and relocalize instead.
+		t->slam_guard.boundary_confirmed = saved && t->slam_guard.world_valid &&
+		                                   rift_s_world_anchor_has_map(t->world_anchor);
 		t->world_setup = false;
 		t->world_map_available = rift_s_world_anchor_has_map(t->world_anchor);
 		t->slam_guard.require_relocalization = requires_relocalization;
