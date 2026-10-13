@@ -213,6 +213,10 @@ enter_diverged(struct rift_s_slam_guard *g,
 {
 	g->state = RIFT_S_SLAM_GUARD_DIVERGED;
 	g->stable_samples = 0;
+	// A held pose is still useful, but saved bounds need fresh visual confirmation
+	// after tracking loss. Do not publish a stale binding during recovery.
+	g->boundary_confirmed = false;
+	g->world_transition = false;
 
 	// Continue the 3DoF orientation in the heading SLAM last showed.
 	struct xrt_quat inv_fusion;
@@ -234,9 +238,29 @@ enter_diverged(struct rift_s_slam_guard *g,
 void
 rift_s_slam_guard_suspend(struct rift_s_slam_guard *g, const struct xrt_quat *fusion_orientation)
 {
+	g->boundary_confirmed = false;
+	g->world_transition = false;
 	if (g->state == RIFT_S_SLAM_GUARD_TRACKING) {
 		enter_diverged(g, 0, fusion_orientation, false, 0.0f, 0.0f);
 	}
+}
+
+bool
+rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam)
+{
+	float dot = fabsf(g->align.orientation.x * world_from_slam->orientation.x +
+	                  g->align.orientation.y * world_from_slam->orientation.y +
+	                  g->align.orientation.z * world_from_slam->orientation.z +
+	                  g->align.orientation.w * world_from_slam->orientation.w);
+	float angle = 2 * acosf(fminf(1, dot));
+	bool agrees = pose_is_finite(world_from_slam) &&
+	              m_vec3_len(m_vec3_sub(g->align.position, world_from_slam->position)) < 0.04f &&
+	              angle < DEG_TO_RAD(3);
+	if (!agrees) {
+		g->boundary_confirmed = false;
+		g->world_transition = false;
+	}
+	return agrees;
 }
 
 //! Feeds a raw sample into the stability run used while acquiring or diverged.

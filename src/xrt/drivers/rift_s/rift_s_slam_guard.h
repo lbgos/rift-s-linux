@@ -52,7 +52,7 @@ struct rift_s_slam_guard
 {
 	//! Saved world alignment is usable only until the backend changes its map.
 	bool world_valid;
-	//! Saved-boundary confirmation is independent of temporary SLAM tracking.
+	//! Saved bounds require fresh visual confirmation after tracking is lost or suspended.
 	bool boundary_confirmed;
 	bool world_transition;
 	struct xrt_pose transition_from, transition_to;
@@ -165,6 +165,10 @@ rift_s_slam_guard_fallback_pose(const struct rift_s_slam_guard *g,
  */
 void
 rift_s_slam_guard_suspend(struct rift_s_slam_guard *g, const struct xrt_quat *fusion_orientation);
+
+//! Compare a fresh visual match with the current alignment; revoke saved bounds on disagreement.
+bool
+rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam);
 
 //! Start the replacement backend's recovery interval without changing the held world pose.
 void

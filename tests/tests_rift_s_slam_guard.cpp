@@ -505,3 +505,50 @@ TEST_CASE("A fresh backend gets a full recovery interval without moving the worl
 	CHECK(s.resets == resets + 1);
 	CHECK(dist(out.position, held.position) < 1e-6f);
 }
+
+TEST_CASE("Saved bounds are revoked on suspend or source tracking loss")
+{
+	Sim s;
+	xrt_pose raw = {yaw_quat(.2f), {.1f, .05f, -.2f}}, out;
+	REQUIRE(s.settle(raw) > 0);
+	xrt_pose saved = s.g.align;
+	rift_s_slam_guard_set_world(&s.g, &saved);
+	REQUIRE(s.g.boundary_confirmed);
+	const xrt_pose held = s.g.good;
+	SECTION("Short off-head interval") { rift_s_slam_guard_suspend(&s.g, &s.fusion); }
+	SECTION("Missing source pose") { CHECK_FALSE(s.step(false, raw, &out)); }
+	CHECK_FALSE(s.g.boundary_confirmed);
+	CHECK_FALSE(s.g.world_transition);
+	CHECK(dist(s.g.good.position, held.position) < 1e-6f);
+	REQUIRE(s.settle(raw) > 0);
+	CHECK_FALSE(s.g.boundary_confirmed);
+	rift_s_slam_guard_set_world(&s.g, &saved);
+	CHECK(s.g.boundary_confirmed);
+}
+
+TEST_CASE("A fresh visual match detects saved boundary translation and yaw drift")
+{
+	Sim s;
+	xrt_pose raw = {yaw_quat(.2f), {.1f, .05f, -.2f}};
+	REQUIRE(s.settle(raw) > 0);
+	const xrt_pose saved = s.g.align;
+	rift_s_slam_guard_set_world(&s.g, &saved);
+	REQUIRE(s.g.boundary_confirmed);
+	xrt_pose candidate = saved;
+	SECTION("Near alignment remains confirmed") {
+		candidate.position.x += .03f;
+		CHECK(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK(s.g.boundary_confirmed);
+	}
+	SECTION("Translation drift hides bounds without moving the held pose") {
+		candidate.position.x += .05f;
+		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK_FALSE(s.g.boundary_confirmed);
+	}
+	SECTION("Yaw drift hides bounds") {
+		candidate.orientation = yaw_quat(yaw_of(saved.orientation) + .06f);
+		CHECK_FALSE(rift_s_slam_guard_verify_world(&s.g, &candidate));
+		CHECK_FALSE(s.g.boundary_confirmed);
+	}
+	CHECK(dist(s.g.align.position, saved.position) < 1e-6f);
+}

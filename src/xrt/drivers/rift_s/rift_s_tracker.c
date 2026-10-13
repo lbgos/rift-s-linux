@@ -664,6 +664,7 @@ rift_s_tracker_device_lost(struct rift_s_tracker *t)
 	t->world_confirmations = 0;
 	t->world_candidate_generation = t->slam_generation;
 	t->world_candidate_ns = 0;
+	t->world_last_verify_ns = 0;
 	os_mutex_unlock(&t->mutex);
 	// Release backend-owned camera buffers immediately even while off-head. The
 	// next fresh frame uses the existing restart path if recreation is unavailable.
@@ -783,6 +784,8 @@ pause_slam_locked(struct rift_s_tracker *t)
 	t->slam_restart_pending = t->tracking.slam_enabled && t->last_camera_arrival_ns != 0;
 	// SLAM is realigned onto the held pose once it is consistent again.
 	rift_s_slam_guard_suspend(&t->slam_guard, &t->pose.orientation);
+	t->world_confirmations = 0;
+	t->world_last_verify_ns = 0;
 	RIFT_S_INFO("Head tracking paused (%s); holding last pose", t->standby ? "standby" : "camera timeout");
 }
 
@@ -801,6 +804,8 @@ rift_s_tracker_set_standby(struct rift_s_tracker *t, bool standby)
 	os_mutex_lock(&t->mutex);
 	if (standby != t->standby) {
 		t->standby = standby;
+		t->world_last_verify_ns = 0;
+		t->world_confirmations = 0;
 		if (standby) {
 			pause_slam_locked(t);
 		} else {
@@ -943,6 +948,8 @@ rift_s_tracker_push_slam_frames(struct rift_s_tracker *t,
 	bool restart = submit && t->tracking.slam_enabled && t->slam_restart_pending;
 	if (restart) {
 		t->slam_generation++;
+		t->world_confirmations = 0;
+		t->world_last_verify_ns = 0;
 		t->slam_min_sample_ns = frame_mono_ns;
 		t->slam_guard.world_valid = false;
 		t->slam_guard.boundary_confirmed = false;
@@ -1394,6 +1401,7 @@ world_read_command(struct rift_s_tracker *t)
 		t->slam_guard.boundary_confirmed = false;
 		t->slam_guard.require_relocalization = false;
 		t->world_confirmations = 0;
+		t->world_last_verify_ns = 0;
 		os_mutex_unlock(&t->mutex);
 		RIFT_S_INFO("New room setup may establish a world; saved anchors retained until Accept");
 	} else if (strcmp(command, "save") == 0) {
@@ -1416,6 +1424,8 @@ world_read_command(struct rift_s_tracker *t)
 		if (!saved || !t->world_map_available)
 			t->slam_guard.boundary_confirmed = false;
 		t->slam_guard.world_transition = false;
+		t->world_confirmations = 0;
+		t->world_last_verify_ns = 0;
 		os_mutex_unlock(&t->mutex);
 		RIFT_S_INFO("Boundary world anchors saved=%d map_available=%d", saved, t->world_map_available);
 	} else if (strcmp(command, "cancel") == 0) {
@@ -1433,6 +1443,7 @@ world_read_command(struct rift_s_tracker *t)
 		t->world_map_available = rift_s_world_anchor_has_map(t->world_anchor);
 		t->slam_guard.require_relocalization = requires_relocalization;
 		t->world_confirmations = 0;
+		t->world_last_verify_ns = 0;
 		os_mutex_unlock(&t->mutex);
 	}
 }
@@ -1461,7 +1472,23 @@ rift_s_world_thread(void *ptr)
 			timepoint_ns source_ns = 0;
 			os_mutex_lock(&t->mutex);
 			uint64_t generation = t->slam_generation;
+			bool skip = t->standby ||
+			            (!t->world_setup && t->slam_guard.boundary_confirmed &&
+			             t->slam_guard.state == RIFT_S_SLAM_GUARD_TRACKING &&
+			             !t->slam_guard.world_transition && !t->slam_restart_pending &&
+			             !t->feature_gate.lost &&
+			             capture_ns - t->world_last_verify_ns < U_TIME_1S_IN_NS);
+			if (!skip)
+				t->world_last_verify_ns = capture_ns;
 			os_mutex_unlock(&t->mutex);
+			if (skip) {
+				for (int eye = 0; eye < RIFT_S_CAMERA_COUNT; eye++)
+					xrt_frame_reference(&frames[eye], NULL);
+				world_write_status(t);
+				os_nanosleep(20 * U_TIME_1MS_IN_NS);
+				os_thread_helper_lock(&t->world_thread);
+				continue;
+			}
 			bool sample_ok = false;
 #ifdef XRT_FEATURE_SLAM
 			// Wait for this exposure's SLAM sample, rather than triangulate against a prediction. The
@@ -1485,7 +1512,8 @@ rift_s_world_thread(void *ptr)
 				fusion = fusion_capture.pose.orientation;
 			// A worn room is recognized from rare usable samples. Count the first failing gate so the
 			// next session shows which capture/sample condition dominates instead of only usable=0.
-			bool settled = !t->standby && !t->slam_paused && !t->slam_restart_pending;
+			bool settled = !t->standby && !t->slam_paused && !t->slam_restart_pending &&
+			               !t->feature_gate.lost;
 			bool gap_ok = source_ns >= capture_ns && source_ns - capture_ns <= 250 * U_TIME_1MS_IN_NS;
 			bool flags_ok = (capture.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0;
 			bool session_ok = capture_ns >= t->slam_min_sample_ns && generation == t->slam_generation;
@@ -1510,22 +1538,13 @@ rift_s_world_thread(void *ptr)
 			struct xrt_vec3 no_pose_position = rift_s_slam_guard_no_pose_position(
 			    t->base.tracking_origin ? t->base.tracking_origin->initial_offset.position.y : 0.0f);
 			// Recording must pass the same displacement/gravity checks as a displayed pose.
-			bool record = valid && (t->world_setup || t->slam_guard.boundary_confirmed) &&
+			// Saved landmarks must remain independent of VIO drift. Only explicit room setup
+			// changes the map; normal operation verifies against those saved landmarks.
+			bool record = valid && t->world_setup &&
 			              !t->slam_guard.world_transition &&
 			              rift_s_slam_guard_query(&t->slam_guard, &capture.pose, capture_ns, &fusion,
 			                                      &no_pose_position, &world_capture);
-			// Off-head the SLAM samples recognition needs are invalid by construction, so skip the
-			// matcher instead of burning the room-matching thread. Once localized, verify at a low
-			// rate; while searching, match every queued pair.
-			bool match_now = true;
-			if (t->standby) {
-				match_now = false;
-			} else if (!record && t->slam_guard.boundary_confirmed && !t->slam_guard.world_transition &&
-			           !t->world_setup) {
-				match_now = capture_ns - t->world_last_verify_ns >= 5LL * U_TIME_1S_IN_NS;
-				if (match_now)
-					t->world_last_verify_ns = capture_ns;
-			}
+			bool match_now = !t->standby;
 			os_mutex_unlock(&t->mutex);
 			if (!match_now) {
 				// Frozen attempts/diagnostics show the skip; the shared loop tail still releases the
@@ -1596,12 +1615,19 @@ rift_s_world_thread(void *ptr)
 				struct xrt_vec3 up = {0, 1, 0}, world_up;
 				math_quat_rotate_vec3(&candidate.orientation, &up, &world_up);
 				os_mutex_lock(&t->mutex);
-				if (generation == t->slam_generation && !t->standby && !t->slam_restart_pending &&
+				if (generation == t->slam_generation && !t->standby && !t->slam_paused &&
+				    !t->slam_restart_pending && !t->feature_gate.lost &&
 				    world_up.y > 0.9961947f) {
 					rift_s_slam_guard_yaw_of(&candidate.orientation, &candidate.orientation);
 					struct xrt_vec3 rotated;
 					math_quat_rotate_vec3(&candidate.orientation, &capture.pose.position, &rotated);
 					candidate.position = m_vec3_sub(result.world_from_imu.position, rotated);
+					if (t->slam_guard.boundary_confirmed &&
+					    !rift_s_slam_guard_verify_world(&t->slam_guard, &candidate)) {
+						t->world_confirmations = 0;
+						t->world_last_verify_ns = 0;
+						RIFT_S_WARN("Saved room alignment changed; boundary unavailable until reconfirmed");
+					}
 					bool consistent =
 					    t->world_confirmations > 0 && t->world_candidate_generation == generation &&
 					    capture_ns > t->world_candidate_ns &&
@@ -1622,16 +1648,16 @@ rift_s_world_thread(void *ptr)
 						    result.inliers[0], result.inliers[1], result.max_reprojection_px,
 						    candidate.position.x, candidate.position.y, candidate.position.z);
 					}
+				} else {
+					t->world_confirmations = 0;
 				}
 				os_mutex_unlock(&t->mutex);
 			} else if (!record) {
-				// Hold partial confirmations across invalid samples: usable SLAM samples are rare
-				// while searching, and one missed sample must not discard agreeing votes. The
-				// candidate still drops when stale or from an older SLAM session, so a transient
-				// wrong match cannot accumulate votes across minutes. Vote agreement (4 cm, 3
-				// degrees, chained 3 s) and the 3-confirmation bar are unchanged.
+				// Missing samples can retain agreeing votes for 3 seconds. A usable sample
+				// rejecting the room, a bad pose or a paused/replaced session breaks the run.
 				os_mutex_lock(&t->mutex);
-				if (t->world_candidate_generation != t->slam_generation ||
+				if (valid || !settled || !session_ok || (sample_ok && flags_ok && !guard_ok) ||
+				    t->world_candidate_generation != t->slam_generation ||
 				    capture_ns - t->world_candidate_ns > 3LL * U_TIME_1S_IN_NS)
 					t->world_confirmations = 0;
 				os_mutex_unlock(&t->mutex);
