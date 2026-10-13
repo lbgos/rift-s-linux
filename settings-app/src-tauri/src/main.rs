@@ -853,6 +853,16 @@ mod tests {
         assert!(dimensions(&[[f64::NAN; 3]; 4], &[]).is_none());
     }
     #[test]
+    fn process_lookup_matches_exact_name() {
+        let comm = fs::read_to_string("/proc/self/comm").unwrap();
+        let own = comm.trim_end();
+        let pid: u32 = process_pid(own).unwrap().parse().unwrap();
+        assert!(pid <= std::process::id());
+        // Cached hit is revalidated, prefixes never match.
+        assert_eq!(process_pid(own), Some(pid.to_string()));
+        assert_eq!(process_pid(&own[..own.len() - 1]), None);
+    }
+    #[test]
     fn lighthouse_version_prefers_latest_startup() {
         let log =
             "Tue Oct 13 lighthouse: version 2.9.3\nnoise\nWed Oct 14 lighthouse: version 2.10.1 \n";

@@ -176,6 +176,8 @@ struct Renderer {
   VkSurfaceKHR surface{};
   VkSwapchainKHR swapchain{};
   VkExtent2D extent{};
+  // Layout size the swapchain was made for; extent may be clamped by caps.
+  VkExtent2D requested{};
   int scale{1};
   bool stale{};
   bool mapped{};
@@ -496,8 +498,8 @@ struct Renderer {
   bool ensure_swapchain(const Layout &target) {
     VkExtent2D want{uint32_t(target.width * target.scale),
                     uint32_t(target.height * target.scale)};
-    if (swapchain && !stale && want.width == extent.width &&
-        want.height == extent.height && target.scale == scale)
+    if (swapchain && !stale && want.width == requested.width &&
+        want.height == requested.height && target.scale == scale)
       return false;
     if (!surface) {
       VkWaylandSurfaceCreateInfoKHR create{
@@ -551,6 +553,7 @@ struct Renderer {
         mode = preferred;
         break;
       }
+    requested = want;
     if (caps.currentExtent.width != UINT32_MAX)
       want = caps.currentExtent;
     want.width = std::clamp(want.width, caps.minImageExtent.width,
@@ -685,8 +688,8 @@ struct Renderer {
     uint64_t frame = 0;
     bool timed = system->GetTimeSinceLastVsync(&since, &frame);
     bool resized = !swapchain || stale ||
-                   extent.width != uint32_t(target.width * target.scale) ||
-                   extent.height != uint32_t(target.height * target.scale);
+                   requested.width != uint32_t(target.width * target.scale) ||
+                   requested.height != uint32_t(target.height * target.scale);
     // One present per compositor frame. Layout wake-ups mid-frame only
     // present when the surface changed.
     if (timed && frame == last_frame && !resized)
