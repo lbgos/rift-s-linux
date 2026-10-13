@@ -47,23 +47,35 @@ rift_s_slam_guard_pose_usable(const struct xrt_pose *p, const struct xrt_quat *f
 void
 rift_s_slam_guard_set_world(struct rift_s_slam_guard *g, const struct xrt_pose *world_from_slam)
 {
-	bool confirmed = g->boundary_confirmed;
-	g->boundary_confirmed = true;
-	g->world_transition = confirmed && g->world_valid && g->have_good &&
+	// Evaluate the correction at the head, not at the SLAM origin. A reset can put
+	// that origin anywhere while the recovered head still agrees with the room.
+	struct xrt_pose corrected = g->good;
+	if (g->world_valid && g->have_good) {
+		struct xrt_pose inverse, raw_good;
+		math_pose_invert(&g->align, &inverse);
+		math_pose_transform(&inverse, &g->good, &raw_good);
+		math_pose_transform(world_from_slam, &raw_good, &corrected);
+	}
+	float dot = fabsf(g->good.orientation.x * corrected.orientation.x +
+	                  g->good.orientation.y * corrected.orientation.y +
+	                  g->good.orientation.z * corrected.orientation.z +
+	                  g->good.orientation.w * corrected.orientation.w);
+	float distance = m_vec3_len(m_vec3_sub(corrected.position, g->good.position));
+	float angle = 2 * acosf(fminf(1, dot));
+	bool small = distance <= 0.5f && angle <= DEG_TO_RAD(15);
+	bool changed = distance > 1e-5f || angle > DEG_TO_RAD(0.01);
+	g->world_transition = g->room_continuous && small && changed && g->world_valid && g->have_good &&
 	                      g->state == RIFT_S_SLAM_GUARD_TRACKING;
 	if (g->world_transition) {
 		g->transition_from = g->align;
 		g->transition_to = *world_from_slam;
 		g->transition_start_ns = g->good_ns;
 	} else {
-		if (g->world_valid && g->have_good) {
-			struct xrt_pose inverse, raw_good;
-			math_pose_invert(&g->align, &inverse);
-			math_pose_transform(&inverse, &g->good, &raw_good);
-			math_pose_transform(world_from_slam, &raw_good, &g->good);
-		}
+		g->good = corrected;
 		g->align = *world_from_slam;
 	}
+	g->boundary_confirmed = true;
+	g->room_continuous = true;
 	g->world_valid = true;
 }
 
@@ -250,13 +262,14 @@ rift_s_slam_guard_verify_world(struct rift_s_slam_guard *g, const struct xrt_pos
                                uint32_t confirmations)
 {
 	if (confirmations < 3) return true;
-	float dot = fabsf(g->align.orientation.x * world_from_slam->orientation.x +
-	                  g->align.orientation.y * world_from_slam->orientation.y +
-	                  g->align.orientation.z * world_from_slam->orientation.z +
-	                  g->align.orientation.w * world_from_slam->orientation.w);
+	const struct xrt_pose *alignment = g->world_transition ? &g->transition_to : &g->align;
+	float dot = fabsf(alignment->orientation.x * world_from_slam->orientation.x +
+	                  alignment->orientation.y * world_from_slam->orientation.y +
+	                  alignment->orientation.z * world_from_slam->orientation.z +
+	                  alignment->orientation.w * world_from_slam->orientation.w);
 	float angle = 2 * acosf(fminf(1, dot));
 	bool agrees = pose_is_finite(world_from_slam) &&
-	              m_vec3_len(m_vec3_sub(g->align.position, world_from_slam->position)) < 0.04f &&
+	              m_vec3_len(m_vec3_sub(alignment->position, world_from_slam->position)) < 0.04f &&
 	              angle < DEG_TO_RAD(3);
 	if (!agrees) {
 		g->boundary_confirmed = false;
@@ -411,9 +424,10 @@ rift_s_slam_guard_update(struct rift_s_slam_guard *g,
 		return false;
 	}
 
-	if (!g->world_valid) {
-		// Track in a session frame while matching the saved room. SteamVR must keep
-		// its saved bounds in a separate universe until boundary_confirmed is true.
+	if (!g->world_valid || g->have_good) {
+		// Recovery reanchors even an unannounced backend frame change onto the held pose.
+		// Before first room admission this is an uncalibrated session frame. After
+		// admission, room_continuous keeps the floor calibration through recovery.
 		struct xrt_quat inv_raw, delta;
 		math_quat_invert(&slam_pose->orientation, &inv_raw);
 		math_quat_rotate(&fallback.orientation, &inv_raw, &delta);

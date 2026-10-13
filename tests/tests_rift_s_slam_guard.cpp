@@ -6,6 +6,7 @@
 #include "math/m_api.h"
 #include "math/m_vec3.h"
 #include <cmath>
+#include <cstring>
 
 static constexpr int64_t MS = 1000 * 1000;
 static constexpr int64_t FRAME = 11 * MS; // ~90 Hz pose queries
@@ -649,4 +650,62 @@ TEST_CASE("SteamVR room admission needs complete live tracking metadata")
 	RiftSWorldUniverse selection;
 	CHECK(selection.update("setup", start, start, "tracking=1 world_valid=1 paused=0", 3) == 2);
 	CHECK(selection.update("localized", start + MS, start + MS, "restart=1", 2) == 3);
+}
+
+TEST_CASE("Continuous room recovery also handles a replacement frame without an announced reset")
+{
+	Sim s;
+	xrt_pose raw = XRT_POSE_IDENTITY, out;
+	REQUIRE(s.settle(raw) > 0);
+	xrt_pose room = XRT_POSE_IDENTITY;
+	room.position = {.7f, .1f, -.5f};
+	rift_s_slam_guard_set_world(&s.g, &room);
+	REQUIRE(s.step(true, raw, &out));
+	const xrt_pose held = out;
+	CHECK_FALSE(s.step(false, raw, &out));
+	raw.position = {-.2f, .1f, .2f};
+	raw.orientation = yaw_quat(.7f);
+	REQUIRE(s.settle(raw) > 0);
+	CHECK(dist(s.g.good.position, held.position) < 1e-6f);
+	CHECK(yaw_of(s.g.good.orientation) == Catch::Approx(yaw_of(held.orientation)).margin(1e-6));
+	// Normal source updates use exactly the existing transform operations.
+	for (int i = 0; i < 100; ++i) {
+		raw.position.x += .001f;
+		REQUIRE(s.step(true, raw, &out));
+		xrt_pose expected;
+		math_quat_rotate(&s.g.align.orientation, &raw.orientation, &expected.orientation);
+		math_quat_normalize(&expected.orientation);
+		math_quat_rotate_vec3(&s.g.align.orientation, &raw.position, &expected.position);
+		expected.position = m_vec3_add(expected.position, s.g.align.position);
+		CHECK(std::memcmp(&out, &expected, sizeof(out)) == 0);
+	}
+	SECTION("small room correction blends after loss")
+	{
+		room = s.g.align;
+		room.position.x += .2f;
+		rift_s_slam_guard_set_world(&s.g, &room);
+		CHECK(s.g.world_transition);
+		CHECK(rift_s_slam_guard_verify_world(&s.g, &room, 3));
+	}
+	SECTION("large confirmed correction may jump")
+	{
+		room = s.g.align;
+		room.position.x += 1;
+		rift_s_slam_guard_set_world(&s.g, &room);
+		CHECK_FALSE(s.g.world_transition);
+	}
+}
+
+TEST_CASE("Continuous native poses retain admitted calibration through long worn reset but not standby")
+{
+	RiftSWorldUniverse selector;
+	constexpr int64_t start = 10000000000LL;
+	REQUIRE(selector.update("localized", start, start, "tracking=1 world_valid=1 paused=0 generation=1", 3) == 2);
+	CHECK(selector.update("relocalizing", start + MS, start + MS,
+	                      "pose_continuous=1 generation=2 world_valid=0 restart=1 tracking=0", 2) == 2);
+	CHECK(selector.update("relocalizing", start + 10000 * MS, start + 10000 * MS,
+	                      "pose_continuous=1 generation=3 world_valid=0 tracking=0", 2) == 2);
+	CHECK(selector.update("relocalizing", start + 10001 * MS, start + 10001 * MS, "pose_continuous=1 standby=1",
+	                      2) == 3);
+	CHECK(selector.update("relocalizing", start + 10002 * MS, start + 10002 * MS, "pose_continuous=1", 3) == 3);
 }

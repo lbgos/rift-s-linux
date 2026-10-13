@@ -16,7 +16,8 @@ rift_s_world_universe(std::string_view status, int64_t stamp, int64_t now, int64
 }
 
 // Keep an admitted room through visual-matching misses in the same tracked frame.
-// Coordinate-frame replacement is immediate; continuous tracking/status loss gets five seconds.
+// A native continuous-pose guarantee retains admitted calibration across worn loss/reset.
+// Without that guarantee, coordinate-frame replacement is immediate and loss gets five seconds.
 class RiftSWorldUniverse
 {
 	int64_t started = 0;
@@ -56,9 +57,16 @@ public:
 				generation = static_cast<uint64_t>(next_generation);
 				have_generation = true;
 			}
-			if (replaced || field(details, "standby") == 1 || field(details, "restart") == 1 ||
-			    field(details, "world_valid") == 0 || field(details, "alignment_changed") == 1 ||
-			    status == "unanchored" || status == "save_failed") {
+			if (field(details, "standby") == 1 || status == "unanchored" || status == "save_failed") {
+				lost_since = 0;
+				return 3;
+			}
+			if (current == 2 && field(details, "pose_continuous") == 1) {
+				lost_since = 0;
+				return current;
+			}
+			if (replaced || field(details, "restart") == 1 ||
+			    field(details, "world_valid") == 0 || field(details, "alignment_changed") == 1) {
 				lost_since = 0;
 				return 3;
 			}

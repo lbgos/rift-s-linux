@@ -54,6 +54,8 @@ struct rift_s_slam_guard
 	bool world_valid;
 	//! Saved bounds require fresh visual confirmation after tracking is lost or suspended.
 	bool boundary_confirmed;
+	//! Published coordinates still belong to the admitted room through worn tracking loss/reset.
+	bool room_continuous;
 	bool world_transition;
 	struct xrt_pose transition_from, transition_to;
 	int64_t transition_start_ns;

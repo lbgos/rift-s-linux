@@ -2579,3 +2579,124 @@ TEST_CASE("Rift S IMU batches query the head at each accepted capture without bl
 	os_mutex_destroy(&ctrl.mutex);
 	os_mutex_destroy(&sys.dev_mutex);
 }
+
+#ifdef TEST_RIFT_S_STEAMVR_POSE
+#include "ovrd_world_universe.hpp"
+#include <string>
+
+TEST_CASE("Rift S loss and replacement SLAM replay keeps the SteamVR room pose continuous")
+{
+	rift_s_slam_guard guard;
+	rift_s_slam_guard_init(&guard);
+	xrt_pose raw = XRT_POSE_IDENTITY, out;
+	xrt_quat fusion = XRT_QUAT_IDENTITY;
+	const xrt_vec3 no_pose = {0, 0, 0};
+	int64_t now = 10000000000LL;
+	constexpr int64_t frame = 33333333;
+	rift_s_slam_guard_reason reason;
+	auto sample = [&](bool valid) {
+		now += frame;
+		return rift_s_slam_guard_update(&guard, valid, &raw, now, &fusion, &no_pose, &out, &reason);
+	};
+	for (int i = 0; i < 40; ++i)
+		sample(true);
+	REQUIRE(guard.have_good);
+	xrt_pose room = XRT_POSE_IDENTITY;
+	room.position = {1.2f, .25f, -.7f};
+	rift_s_slam_guard_set_world(&guard, &room);
+	REQUIRE(sample(true));
+	RiftSWorldUniverse selector;
+	uint64_t universe = selector.update("localized", now, now, "generation=1 tracking=1 world_valid=1 paused=0", 3);
+	REQUIRE(universe == 2);
+	xrt_vec3 previous = out.position;
+	previous.y += 1.6f - .493819f;
+	float max_jump = 0;
+	int invalid_loss_poses = 0;
+	auto observe = [&](bool tracked, const char *metadata) {
+		std::string details = std::string(metadata) + " pose_continuous=" +
+		                      (guard.room_continuous && guard.have_good ? "1" : "0");
+		universe = selector.update(
+		    tracked && guard.boundary_confirmed && !guard.world_transition ? "localized" : "relocalizing", now,
+		    now, details, universe);
+		xrt_space_relation relation{};
+		relation.pose = out;
+		relation.relation_flags = static_cast<xrt_space_relation_flags>(
+		    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
+		    XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+		    (tracked ? XRT_SPACE_RELATION_POSITION_TRACKED_BIT : 0));
+		vr::DriverPose_t pose{};
+		pose.result = vr::TrackingResult_Running_OK;
+		apply_head_pose(&relation, &pose, true);
+		if (!tracked) {
+			if (!pose.poseIsValid || pose.result != vr::TrackingResult_Running_OutOfRange)
+				++invalid_loss_poses;
+			CHECK(pose.vecVelocity[0] == 0);
+		}
+		xrt_vec3 position = out.position;
+		position.y += 1.6f - (universe == 2 ? .493819f : 0);
+		float dx = position.x - previous.x, dy = position.y - previous.y, dz = position.z - previous.z;
+		max_jump = std::max(max_jump, std::sqrt(dx * dx + dy * dy + dz * dz));
+		previous = position;
+	};
+	// Eight seconds without camera poses, including the backend reset protocol.
+	for (int i = 0; i < 240; ++i) {
+		bool tracked = sample(false);
+		rift_s_slam_guard_take_reset(&guard, now);
+		observe(tracked, i < 65 ? "generation=1 tracking=0 world_valid=1 paused=0"
+		                        : "generation=2 tracking=0 world_valid=0 paused=1 restart=1");
+	}
+	fusion = {0, .1f, 0, std::sqrt(.99f)};
+	raw.orientation = {0, .4f, 0, std::sqrt(.84f)};
+	raw.position = {.01f, .03f, 0};
+	for (int i = 0; i < 40; ++i) {
+		bool tracked = sample(true);
+		observe(tracked, "generation=2 tracking=1 world_valid=1 paused=0");
+	}
+	REQUIRE(guard.state == RIFT_S_SLAM_GUARD_TRACKING);
+	// Three agreeing visual matches restore the room, 20 cm from the held session pose.
+	xrt_pose target = guard.good, inverse, correction;
+	target.position.x += .2f;
+	math_pose_invert(&raw, &inverse);
+	math_pose_transform(&target, &inverse, &correction);
+	rift_s_slam_guard_set_world(&guard, &correction);
+	for (int i = 0; i < 70; ++i) {
+		bool tracked = sample(true);
+		observe(tracked, "generation=2 tracking=1 world_valid=1 paused=0");
+	}
+	std::fprintf(stderr, "tracking-hold replay max_jump_m=%.6f invalid_loss_poses=%d final_universe=%llu\n",
+	             max_jump, invalid_loss_poses, static_cast<unsigned long long>(universe));
+	CHECK(max_jump < .015f);
+	CHECK(invalid_loss_poses == 0);
+	CHECK(universe == 2);
+	CHECK(out.position.x == Catch::Approx(target.position.x).margin(1e-5));
+}
+#endif
+
+TEST_CASE("Rift S worn camera hold keeps the displayed position and follows IMU orientation")
+{
+	rift_s_tracker tracker{};
+	os_mutex_init(&tracker.mutex);
+	tracker.ready_for_data = true;
+	tracker.tracking.slam_enabled = true;
+	tracker.slam_paused = true;
+	tracker.device_from_imu = XRT_POSE_IDENTITY;
+	tracker.pose.orientation = {0, .2f, 0, std::sqrt(.96f)};
+	tracker.published_imu_pose = {XRT_QUAT_IDENTITY, {1.2f, .3f, -.7f}};
+	tracker.have_published_imu_pose = true;
+	rift_s_slam_guard_init(&tracker.slam_guard);
+	tracker.slam_guard.have_good = true;
+	tracker.slam_guard.good = tracker.published_imu_pose;
+	xrt_space_relation relation;
+	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &relation);
+	CHECK(relation.pose.position.x == tracker.published_imu_pose.position.x);
+	CHECK(relation.pose.position.y == tracker.published_imu_pose.position.y);
+	CHECK(relation.pose.position.z == tracker.published_imu_pose.position.z);
+	CHECK(relation.pose.orientation.y == Catch::Approx(.2f));
+	CHECK((relation.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) == 0);
+	CHECK((relation.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0);
+	CHECK((relation.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
+	tracker.standby = true;
+	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &relation);
+	CHECK(relation.pose.orientation.y == 0);
+	os_mutex_destroy(&tracker.mutex);
+}

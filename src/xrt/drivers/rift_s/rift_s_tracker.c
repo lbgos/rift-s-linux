@@ -635,6 +635,7 @@ rift_s_tracker_device_lost(struct rift_s_tracker *t)
 	os_mutex_lock(&t->slam_mutex);
 	os_mutex_lock(&t->mutex);
 	t->ready_for_data = false;
+	t->slam_guard.room_continuous = false;
 	pause_slam_locked(t);
 	t->slam_restart_pending = t->tracking.slam_enabled;
 	// The reconnected device restarts its counters: drop the clock map and all device-epoch state so
@@ -807,6 +808,7 @@ rift_s_tracker_set_standby(struct rift_s_tracker *t, bool standby)
 		t->world_last_verify_ns = 0;
 		t->world_confirmations = 0;
 		if (standby) {
+			t->slam_guard.room_continuous = false;
 			pause_slam_locked(t);
 		} else {
 			RIFT_S_INFO("Headset awake; waiting for fresh camera frames");
@@ -1206,7 +1208,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	}
 
 	if (hold) {
-		// Freeze the head where it was last shown: untracked, no motion.
+		// Hold the last displayed position. Worn tracking loss still follows the IMU.
 		if (!t->have_published_imu_pose) {
 			rift_s_slam_guard_fallback_pose(g, &t->pose.orientation, &no_pose_position,
 			                                &t->published_imu_pose);
@@ -1214,6 +1216,16 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 		}
 		imu_relation.pose = t->published_imu_pose;
 		imu_relation.relation_flags = held_flags;
+		if (!t->standby) {
+			struct xrt_pose fallback;
+			rift_s_slam_guard_fallback_pose(g, &query_fusion, &no_pose_position, &fallback);
+			imu_relation.pose.orientation = fallback.orientation;
+			math_quat_rotate_derivative(&imu_relation.pose.orientation, &t->fusion.last_angular_velocity,
+			                            &imu_relation.angular_velocity);
+			imu_relation.relation_flags |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+			                               XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
+		}
+		if (g->have_good) g->good = imu_relation.pose;
 	} else {
 		bool use_slam = false;
 		if (query_slam) {
@@ -1239,6 +1251,10 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 			                                    XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 		} else {
 			rift_s_slam_guard_fallback_pose(g, &query_fusion, &no_pose_position, &imu_relation.pose);
+			if (t->have_published_imu_pose) {
+				imu_relation.pose.position = t->published_imu_pose.position;
+				if (g->have_good) g->good.position = imu_relation.pose.position;
+			}
 			imu_relation.angular_velocity = t->fusion.last_angular_velocity;
 			imu_relation.relation_flags =
 			    (enum xrt_space_relation_flags)(held_flags | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
@@ -1323,6 +1339,7 @@ world_write_status(struct rift_s_tracker *t)
 	bool tracking = t->slam_guard.state == RIFT_S_SLAM_GUARD_TRACKING;
 	bool world_valid = t->slam_guard.world_valid;
 	bool alignment_changed = t->world_alignment_changed;
+	bool pose_continuous = t->slam_guard.room_continuous && t->slam_guard.have_good;
 	uint64_t generation = t->slam_generation;
 	uint32_t confirmations = t->world_confirmations;
 	os_mutex_unlock(&t->mutex);
@@ -1366,14 +1383,14 @@ world_write_status(struct rift_s_tracker *t)
 	// available without a debug launch or stopping tracking with a debugger.
 	fprintf(file, "%lld %s attempts=%" PRIu64 " usable=%" PRIu64
 	              " capture_ns=%lld sample_ns=%lld pose_valid=%d flags=%u history=%d standby=%d paused=%d restart=%d"
-	              " tracking=%d world_valid=%d alignment_changed=%d generation=%" PRIu64 " confirmations=%u keyframes=%u"
+	              " tracking=%d world_valid=%d alignment_changed=%d pose_continuous=%d generation=%" PRIu64 " confirmations=%u keyframes=%u"
 	              " features=%u/%u/%u/%u/%u matches=%u/%u/%u/%u/%u inliers=%u/%u/%u/%u/%u"
 	              " matched=%d rejection=%s"
 	              " fail_paused=%" PRIu64 " fail_sample=%" PRIu64 " fail_gap=%" PRIu64 " fail_flags=%" PRIu64
 	              " fail_generation=%" PRIu64 " fail_guard=%" PRIu64 "\n",
 	        (long long)os_monotonic_get_ns(), state, diagnostics.attempts, diagnostics.usable,
 	        (long long)diagnostics.capture_ns, (long long)diagnostics.sample_ns, diagnostics.pose_valid,
-	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, tracking, world_valid, alignment_changed, generation, confirmations, result->keyframes,
+	        diagnostics.pose_flags, diagnostics.history_result, standby, paused, restarting, tracking, world_valid, alignment_changed, pose_continuous, generation, confirmations, result->keyframes,
 	        result->features[0], result->features[1], result->features[2], result->features[3], result->features[4],
 	        result->matches[0], result->matches[1], result->matches[2], result->matches[3], result->matches[4],
 	        result->inliers[0], result->inliers[1], result->inliers[2], result->inliers[3], result->inliers[4],
@@ -1401,6 +1418,7 @@ world_read_command(struct rift_s_tracker *t)
 		rift_s_world_anchor_clear(t->world_anchor);
 		os_mutex_lock(&t->mutex);
 		t->world_setup = true;
+		t->slam_guard.room_continuous = false;
 		t->world_alignment_changed = false;
 		t->slam_guard.boundary_confirmed = false;
 		t->slam_guard.require_relocalization = false;
@@ -1443,6 +1461,7 @@ world_read_command(struct rift_s_tracker *t)
 		    rift_s_world_anchor_has_map(t->world_anchor) || rift_s_world_anchor_has_boundary(t->world_anchor);
 		os_mutex_lock(&t->mutex);
 		if (t->world_setup) {
+			t->slam_guard.room_continuous = false;
 			t->slam_guard.world_valid = false;
 			t->slam_guard.boundary_confirmed = false;
 			t->slam_guard.world_transition = false;
@@ -1653,7 +1672,8 @@ rift_s_world_thread(void *ptr)
 							RIFT_S_WARN("Saved room alignment changed across three votes; boundary unavailable until reconfirmed");
 						}
 						if (t->world_confirmations >= 3) t->world_confirmations = 0;
-					} else if (t->world_confirmations >= 3) {
+					} else if (t->world_confirmations >= 3 &&
+					           t->slam_guard.state == RIFT_S_SLAM_GUARD_TRACKING) {
 						rift_s_slam_guard_set_world(&t->slam_guard, &candidate);
 						t->world_alignment_changed = false;
 						RIFT_S_INFO(
