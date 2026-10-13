@@ -229,3 +229,34 @@ TEST_CASE("Native session origin has no geometry and preserves the saved room")
     CHECK_FALSE(rift_s_prepare_session_origin(fixture.path.string()));
     CHECK(read_file(fixture.path) == "broken json");
 }
+
+TEST_CASE("Display recovery requires one exact runtime process and the expected server PID")
+{
+	auto executable = fs::read_symlink("/proc/self/exe");
+	int process = unique_runtime_process(executable, getpid());
+	REQUIRE(process >= 0);
+	CHECK_FALSE(exited(process));
+	close(process);
+	CHECK(unique_runtime_process(executable, getpid() + 1) == -1);
+	CHECK(unique_runtime_process(executable.parent_path() / "missing-vr-runtime") == -1);
+
+	// A second session with the same executable must make recovery refuse it.
+	int hold[2];
+	REQUIRE(pipe2(hold, O_CLOEXEC) == 0);
+	pid_t child = fork();
+	REQUIRE(child >= 0);
+	if (child == 0) {
+		close(hold[1]);
+		char value;
+		while (read(hold[0], &value, 1) < 0 && errno == EINTR) {}
+		_exit(0);
+	}
+	close(hold[0]);
+	CHECK(unique_runtime_process(executable) == -1);
+	CHECK(unique_runtime_process(executable, getpid()) == -1);
+	close(hold[1]);
+	while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {}
+	process = unique_runtime_process(executable, getpid());
+	REQUIRE(process >= 0);
+	close(process);
+}

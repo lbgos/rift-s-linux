@@ -3,6 +3,7 @@
 #pragma once
 #ifdef __linux__
 #include <dlfcn.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -14,6 +15,12 @@
 
 extern char **environ;
 static void roomsetup_guard_module() {}
+static pid_t roomsetup_wait_child(pid_t pid, int options)
+{
+	pid_t result;
+	do { result = waitpid(pid, nullptr, options); } while (result < 0 && errno == EINTR);
+	return result;
+}
 
 // Native setup is advertised only after the session-owned guard acknowledges readiness.
 class RoomSetupGuardProcess
@@ -25,9 +32,9 @@ public:
 	~RoomSetupGuardProcess()
 	{
 		if (acknowledgement >= 0) close(acknowledgement);
-		if (pid > 0 && waitpid(pid, nullptr, WNOHANG) == 0) {
+		if (pid > 0 && roomsetup_wait_child(pid, WNOHANG) == 0) {
 			kill(pid, SIGTERM);
-			waitpid(pid, nullptr, 0);
+			roomsetup_wait_child(pid, 0);
 		}
 	}
 	bool start()
@@ -35,7 +42,7 @@ public:
 		if (pid > 0) {
 			// Activate can run again on the same driver object. Reuse the live
 			// guard instead of orphaning it behind a second child.
-			if (waitpid(pid, nullptr, WNOHANG) == 0) return true;
+			if (roomsetup_wait_child(pid, WNOHANG) == 0) return true;
 			pid = -1;
 			acknowledged = false;
 			if (acknowledgement >= 0) { close(acknowledgement); acknowledgement = -1; }
@@ -53,9 +60,12 @@ public:
 		if (pipe2(descriptors, O_CLOEXEC | O_NONBLOCK) != 0) return false;
 		posix_spawn_file_actions_t actions;
 		posix_spawn_file_actions_init(&actions);
-		constexpr int child_acknowledgement = 198;
+		constexpr int child_acknowledgement = 3;
 		posix_spawn_file_actions_adddup2(&actions, descriptors[1], child_acknowledgement);
-		char destination[] = "198";
+		// SteamVR also owns IPC descriptors without CLOEXEC. The guard must not
+		// retain those connections or shared buffers after a compositor exits.
+		posix_spawn_file_actions_addclosefrom_np(&actions, child_acknowledgement + 1);
+		char destination[] = "3";
 		char *arguments[] = {executable.data(), library.data(), parent.data(), destination, nullptr};
 		int error = posix_spawn(&pid, executable.c_str(), &actions, nullptr, arguments, environ);
 		posix_spawn_file_actions_destroy(&actions);
@@ -67,7 +77,7 @@ public:
 	bool ready()
 	{
 		if (pid <= 0) return false;
-		if (waitpid(pid, nullptr, WNOHANG) == pid) { pid = -1; acknowledged = false; }
+		if (roomsetup_wait_child(pid, WNOHANG) == pid) { pid = -1; acknowledged = false; }
 		if (acknowledgement >= 0) {
 			char value = 0;
 			ssize_t count = read(acknowledgement, &value, 1);

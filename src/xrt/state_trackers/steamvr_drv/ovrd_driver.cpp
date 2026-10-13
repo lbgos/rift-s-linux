@@ -1578,7 +1578,8 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
         constexpr auto supports_setup = static_cast<vr::ETrackedDeviceProperty>(11003);
         constexpr auto supports_vrlink_requests = static_cast<vr::ETrackedDeviceProperty>(11004);
         m_nativeSetupRequested = native_setup;
-        if (native_setup && !m_roomSetupGuard.start()) ovrd_log("Native room setup guard could not start\n");
+        if ((native_setup || strcmp(m_xdev->str, "Oculus Rift S") == 0) && !m_roomSetupGuard.start())
+            ovrd_log("Native room setup and display recovery guard could not start\n");
         properties->SetBoolProperty(m_ulPropertyContainer, supports_setup, false);
         properties->SetBoolProperty(m_ulPropertyContainer, supports_vrlink_requests, false);
         vr::EVRSettingsError flag_error = vr::VRSettingsError_None;

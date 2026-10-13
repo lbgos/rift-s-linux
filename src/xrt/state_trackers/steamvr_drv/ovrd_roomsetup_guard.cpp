@@ -6,6 +6,8 @@
 #include "../../drivers/rift_s/rift_s_world_control.h"
 #include <cjson/cJSON.h>
 #include <chrono>
+#include <cerrno>
+#include <fcntl.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -16,13 +18,17 @@
 #include <optional>
 #include <memory>
 #include <poll.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
+extern char **environ;
 
 static std::string read_file(const fs::path &path)
 {
@@ -135,6 +141,143 @@ static bool exited(int fd)
 	pollfd process{fd, POLLIN, 0};
 	return poll(&process, 1, 0) > 0;
 }
+
+// SteamVR daemons detach from their parent/session. Its per-user runtime lock
+// normally permits one session; require exactly one matching executable anyway.
+static int unique_runtime_process(const fs::path &executable, pid_t expected = 0)
+{
+	int result = -1;
+	unsigned matches = 0;
+	std::error_code error;
+	for (const auto &entry : fs::directory_iterator("/proc", error)) {
+		auto name = entry.path().filename().string();
+		if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) continue;
+		pid_t pid = std::stoi(name);
+		int candidate = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+		if (candidate < 0) continue;
+		struct stat state{};
+		auto path = fs::read_symlink(entry.path() / "exe", error);
+		if (!error && path == executable && stat(entry.path().c_str(), &state) == 0 &&
+		    state.st_uid == getuid() && !exited(candidate)) {
+			++matches;
+			if (result < 0 && (!expected || pid == expected)) { result = candidate; continue; }
+		}
+		close(candidate);
+	}
+	if (matches != 1 && result >= 0) { close(result); result = -1; }
+	return result;
+}
+
+// Replacement compositors can retain a broken direct-display session and grow
+// NVIDIA/SteamVR descriptors. Refresh the whole session after transport returns.
+// This bounded helper deliberately outlives the old server during shutdown.
+static int recover_display()
+{
+	if (syscall(SYS_pidfd_send_signal, 4, SIGTERM, nullptr, 0) != 0) return 1;
+	auto wait_session = [](std::chrono::seconds duration) {
+		auto deadline = std::chrono::steady_clock::now() + duration;
+		while (!exited(3) || !exited(4) || !exited(5)) {
+			if (std::chrono::steady_clock::now() >= deadline) return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+		return true;
+	};
+	if (!wait_session(std::chrono::seconds(10))) {
+		// A wedged old server must not leave an already-stopped monitor without
+		// a replacement. Signal only the pinned old session generations.
+		for (int fd : {3, 4, 5})
+			if (!exited(fd)) syscall(SYS_pidfd_send_signal, fd, SIGTERM, nullptr, 0);
+		if (!wait_session(std::chrono::seconds(5))) {
+			for (int fd : {3, 4, 5})
+				if (!exited(fd)) syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0);
+			if (!wait_session(std::chrono::seconds(5))) return 1;
+		}
+	}
+	close(3); close(4); close(5);
+	execlp("steam", "steam", "steam://rungameid/250820", nullptr);
+	return 1;
+}
+
+class DisplayRecovery
+{
+	int compositor = -1;
+	pid_t requester = -1;
+	bool connected_once = false, lost = false;
+	std::chrono::steady_clock::time_point next_request{}, reconnected{};
+public:
+	~DisplayRecovery()
+	{
+		if (compositor >= 0) close(compositor);
+		// The session restart helper must survive this guard/server's shutdown.
+		if (requester > 0) waitpid(requester, nullptr, WNOHANG);
+	}
+	void update(bool connected, int server, pid_t server_pid, const char *library)
+	{
+		auto now = std::chrono::steady_clock::now();
+		if (requester > 0) {
+			int status = 0;
+			pid_t result = waitpid(requester, &status, WNOHANG);
+			if (result == requester || (result < 0 && errno == ECHILD)) {
+				requester = -1;
+				next_request = now + std::chrono::seconds(5);
+				fprintf(stderr, "monado-roomsetup-guard: session restart did not complete; retry in 5 seconds\n");
+			}
+		}
+		fs::path runtime = fs::path(library).parent_path();
+		if (connected) {
+			connected_once = true;
+			if (!lost && exited(compositor)) {
+				if (compositor >= 0) close(compositor);
+				compositor = unique_runtime_process(runtime / "vrcompositor");
+			}
+			if (lost && reconnected == std::chrono::steady_clock::time_point{}) reconnected = now;
+			// A short USB flap with a surviving compositor needs no session restart.
+			if (lost && !exited(compositor) && now - reconnected >= std::chrono::seconds(10)) {
+				lost = false;
+				reconnected = {};
+			}
+		} else if (connected_once) {
+			lost = true;
+			reconnected = {};
+		}
+		if (!connected || !lost || compositor < 0 || !exited(compositor) || requester > 0 ||
+		    now < next_request) return;
+		next_request = now + std::chrono::seconds(5);
+		int current_server = unique_runtime_process(runtime / "vrserver", server_pid);
+		if (current_server < 0) return;
+		close(current_server);
+		int monitor = unique_runtime_process(runtime / "vrmonitor");
+		if (monitor < 0) return;
+		char executable[4096];
+		ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+		if (length <= 0) { close(monitor); return; }
+		executable[length] = 0;
+		char mode[] = "--recover-display";
+		char *arguments[] = {executable, mode, nullptr};
+		// Keep sources above the fixed child slots, even if a caller's fd is 3/4/5.
+		int server_child = fcntl(server, F_DUPFD_CLOEXEC, 6);
+		int monitor_child = fcntl(monitor, F_DUPFD_CLOEXEC, 6);
+		int compositor_child = fcntl(compositor, F_DUPFD_CLOEXEC, 6);
+		close(monitor);
+		if (server_child < 0 || monitor_child < 0 || compositor_child < 0) {
+			if (server_child >= 0) close(server_child);
+			if (monitor_child >= 0) close(monitor_child);
+			if (compositor_child >= 0) close(compositor_child);
+			return;
+		}
+		posix_spawn_file_actions_t actions;
+		posix_spawn_file_actions_init(&actions);
+		posix_spawn_file_actions_adddup2(&actions, server_child, 3);
+		posix_spawn_file_actions_adddup2(&actions, monitor_child, 4);
+		posix_spawn_file_actions_adddup2(&actions, compositor_child, 5);
+		posix_spawn_file_actions_addclosefrom_np(&actions, 6);
+		int spawned = posix_spawn(&requester, executable, &actions, nullptr, arguments, environ);
+		posix_spawn_file_actions_destroy(&actions);
+		close(server_child); close(monitor_child); close(compositor_child);
+		if (spawned) requester = -1;
+		else fprintf(stderr, "monado-roomsetup-guard: automatically restarting SteamVR after display loss\n");
+	}
+};
 
 // Read only new compositor diagnostics for this setup attempt. The assertion is
 // visible before the process finishes crash handling and its pidfd becomes ready.
@@ -251,6 +394,7 @@ static void log_coordinates(vr::IVRSystem &system, vr::IVRChaperoneSetup &setup,
 
 int main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--recover-display") == 0) return recover_display();
 	if (argc != 4) return 1;
 	int parent = static_cast<int>(syscall(SYS_pidfd_open, std::atoi(argv[2]), 0));
 	int ready = std::atoi(argv[3]);
@@ -274,14 +418,15 @@ int main(int argc, char **argv)
 	fs::path log_path;
 	fs::path path = calibration_path(log_path);
 	OverflowLog diagnostics(log_path);
-	if (!system || !setup || path.empty() || !snapshot(*setup, path)) { shutdown(); return 1; }
+	if (!system) { shutdown(); return 1; }
+	const bool setup_available = setup && !path.empty() && snapshot(*setup, path).has_value();
 	char model[128] = {};
 	system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_ModelNumber_String,
 	                                     model, sizeof(model));
 	const bool is_rift_s = std::strstr(model, "Oculus Rift S") != nullptr;
 	vr::VROverlayHandle_t overlay = vr::k_ulOverlayHandleInvalid;
 	if (overlays) overlays->CreateOverlay("monado.roomsetup.guard", "Monado playspace setup", &overlay);
-	if (write(ready, "1", 1) != 1) { shutdown(); return 1; }
+	if (write(ready, setup_available ? "1" : "0", 1) != 1) { shutdown(); return 1; }
 	fprintf(stderr, "monado-roomsetup-guard: ready\n");
 	std::optional<Snapshot> saved;
 	int compositor = -1;
@@ -313,8 +458,10 @@ int main(int argc, char **argv)
 	auto *mailbox = static_cast<roomsetup::Mailbox *>(interface("IVRMailbox_001", &error));
 	auto *paths = static_cast<roomsetup::Paths *>(interface("IVRPaths_001", &error));
 	auto floor = std::make_unique<roomsetup::SavedFloor>(mailbox, paths);
-	floor->publish();
-	log_coordinates(*system, *setup, 0, step);
+	if (setup_available) {
+		floor->publish();
+		log_coordinates(*system, *setup, 0, step);
+	}
 	bool floor_pending = false;
 	auto floor_deadline = std::chrono::steady_clock::time_point{};
 	bool running = true;
@@ -324,6 +471,8 @@ int main(int argc, char **argv)
 	std::string world_warning;
 	vr::VRNotificationId world_notification = 0;
 	auto next_notification_attempt = std::chrono::steady_clock::time_point{};
+	DisplayRecovery display_recovery;
+	auto next_display_check = std::chrono::steady_clock::time_point{};
 	while (running && !exited(parent)) {
 		// Test before consuming Accept's events, including a compositor that exits immediately before Accept.
 		bool recent_exit = std::chrono::steady_clock::now() <= exit_deadline;
@@ -336,7 +485,7 @@ int main(int argc, char **argv)
 		}
 		vr::VREvent_t event{};
 		while (system->PollNextEvent(&event, sizeof(event))) {
-			if (event.eventType == 809) {
+			if (setup_available && event.eventType == 809) {
 				// SteamVR 2.17's native setup step event is reserved in the public header.
 				uint32_t next = 0;
 				memcpy(&next, &event.data, sizeof(next));
@@ -389,14 +538,15 @@ int main(int argc, char **argv)
 					world_cancel_deadline = {};
 				}
 			}
-			if (event.eventType == 809 || event.eventType == vr::VREvent_ChaperoneUniverseHasChanged ||
+			if (setup_available && (event.eventType == 809 || event.eventType == vr::VREvent_ChaperoneUniverseHasChanged ||
 			    event.eventType == vr::VREvent_ChaperoneDataHasChanged || event.eventType == vr::VREvent_ChaperoneRoomSetupFinished ||
 			    event.eventType == vr::VREvent_StandingZeroPoseReset || event.eventType == vr::VREvent_SeatedZeroPoseReset ||
 			    event.eventType == vr::VREvent_RoomViewShown || event.eventType == vr::VREvent_RoomViewHidden ||
-			    event.eventType == vr::VREvent_DashboardActivated || event.eventType == vr::VREvent_DashboardDeactivated)
+			    event.eventType == vr::VREvent_DashboardActivated || event.eventType == vr::VREvent_DashboardDeactivated))
 				log_coordinates(*system, *setup, event.eventType, step);
 			if (event.eventType == vr::VREvent_Quit) running = false;
 		}
+		if (!running) break;
 		if (world_setup && world_cancel_deadline != std::chrono::steady_clock::time_point{} &&
 		    std::chrono::steady_clock::now() >= world_cancel_deadline) {
 			world_command("cancel");
@@ -423,6 +573,12 @@ int main(int argc, char **argv)
 			if (step == 0 || floor->publish(step == 2, saved_plane_trusted) ||
 			    std::chrono::steady_clock::now() > floor_deadline)
 				floor_pending = false;
+		}
+		if (is_rift_s && now >= next_display_check) {
+			next_display_check = now + std::chrono::milliseconds(100);
+			vr::TrackedDevicePose_t head{};
+			system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0, &head, 1);
+			display_recovery.update(head.bDeviceIsConnected, parent, std::atoi(argv[2]), argv[1]);
 		}
 		floor->update_frame(step == 2 || step == 3 || step == 4 || step == 5 || step == 7);
 		std::this_thread::sleep_for(std::chrono::milliseconds(20));
