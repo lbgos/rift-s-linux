@@ -7,7 +7,7 @@
       "is_dashboard_overlay": true,
       "strings": {
         "en_us": {
-          "name": "Linux Desktop",
+          "name": "Desktop",
           "description": "Use the Linux desktop from the SteamVR dashboard"
         }
       }

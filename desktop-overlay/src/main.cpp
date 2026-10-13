@@ -142,24 +142,33 @@ utf8_codepoints(const char *s, size_t max)
 	return out;
 }
 
-//! 64x64 white monitor outline for the dashboard thumbnail.
+//! Original white monitor silhouette, antialiased for the dashboard's small icons.
 std::vector<uint8_t>
 thumbnail_icon()
 {
 	std::vector<uint8_t> px(64 * 64 * 4, 0);
-	auto fill = [&](int x0, int y0, int x1, int y1) {
-		for (int y = y0; y <= y1; y++) {
-			for (int x = x0; x <= x1; x++) {
-				memset(&px[size_t(y * 64 + x) * 4], 255, 4);
-			}
-		}
+	auto rounded = [](float x, float y, float x0, float y0, float x1, float y1, float r) {
+		float dx = x - std::clamp(x, x0 + r, x1 - r);
+		float dy = y - std::clamp(y, y0 + r, y1 - r);
+		return dx * dx + dy * dy <= r * r;
 	};
-	fill(4, 8, 59, 11);
-	fill(4, 42, 59, 45);
-	fill(4, 8, 7, 45);
-	fill(56, 8, 59, 45);
-	fill(29, 46, 34, 52);
-	fill(18, 53, 45, 56);
+	for (int y = 0; y < 64; y++) {
+		for (int x = 0; x < 64; x++) {
+			unsigned coverage = 0;
+			for (int sy = 0; sy < 4; sy++) {
+				for (int sx = 0; sx < 4; sx++) {
+					float u = x + (sx + 0.5f) / 4, v = y + (sy + 0.5f) / 4;
+					bool bezel = rounded(u, v, 8, 11, 56, 43, 3) &&
+					             !rounded(u, v, 11, 14, 53, 37, 1);
+					bool stand = u >= 29 && u <= 35 && v >= 43 && v <= 49;
+					coverage += bezel || stand || rounded(u, v, 22, 48, 42, 52, 1);
+				}
+			}
+			uint8_t *p = &px[size_t(y * 64 + x) * 4];
+			p[0] = p[1] = p[2] = 255;
+			p[3] = uint8_t((coverage * 255 + 8) / 16);
+		}
+	}
 	return px;
 }
 
@@ -245,6 +254,7 @@ public:
 	~App()
 	{
 		tabs_.clear(); // captures before their PipeWire core
+		set_native_desktop_hidden(false);
 		vr_disconnect();
 		desktop_.reset();
 		if (context_) {
@@ -398,6 +408,7 @@ private:
 			vr_.overlay->DestroyOverlay(t->main);
 		}
 		tabs_.clear();
+		set_native_desktop_hidden(false);
 		vr_disconnect();
 		return 0;
 	}
@@ -463,7 +474,7 @@ private:
 			auto t = std::make_unique<Tab>();
 			t->screen = s;
 			std::string key = std::string(kAppKey) + "." + s.name;
-			auto e = vr_.overlay->CreateDashboardOverlay(key.c_str(), "Linux Desktop", &t->main, &t->thumb);
+			auto e = vr_.overlay->CreateDashboardOverlay(key.c_str(), "Desktop", &t->main, &t->thumb);
 			if (e != vr::VROverlayError_None) {
 				fprintf(stderr, "rifts-desktop: dashboard overlay %s: %s\n", key.c_str(),
 				        vr_.overlay->GetOverlayErrorNameFromEnum(e));
@@ -483,9 +494,31 @@ private:
 		}
 		// Primary screen first; numbered only when there is more than one.
 		for (size_t i = 0; i < tabs_.size(); i++) {
-			std::string name = tabs_.size() == 1 ? "Linux Desktop" : "Desktop " + tabs_[i]->screen.name;
+			std::string name = tabs_.size() == 1 ? "Desktop" : "Desktop " + tabs_[i]->screen.name;
 			vr_.overlay->SetOverlayName(tabs_[i]->main, name.c_str());
+			vr_.overlay->SetOverlayName(tabs_[i]->thumb, name.c_str());
 		}
+		set_native_desktop_hidden(!tabs_.empty() && !strcmp(desktop_->name(), "kwin"));
+	}
+
+	void
+	set_native_desktop_hidden(bool hidden)
+	{
+		if (!vr_.settings || (!hidden && !native_desktop_hidden_)) return;
+		// Public SteamVR advanced setting "Show Desktop Views". The SDK has no key constant.
+		vr::EVRSettingsError error = vr::VRSettingsError_None;
+		bool shown = vr_.settings->GetBool(vr::k_pch_Dashboard_Section, "showDesktop", &error);
+		if (error != vr::VRSettingsError_None) return;
+		if (shown == hidden) {
+			vr_.settings->SetBool(vr::k_pch_Dashboard_Section, "showDesktop", !hidden, &error);
+			if (error != vr::VRSettingsError_None) {
+				fprintf(stderr, "rifts-desktop: could not change dashboard.showDesktop\n");
+				return;
+			}
+			native_desktop_hidden_ = hidden;
+		}
+		// Preserve an existing disabled preference; restore only a value we changed.
+		if (!hidden) native_desktop_hidden_ = false;
 	}
 
 	void
@@ -699,6 +732,7 @@ private:
 	std::vector<std::unique_ptr<Tab>> tabs_;
 	int timer_fd_ = -1, signal_fd_ = -1, server_fd_ = -1;
 	bool running_ = true, fast_tick_ = false, screens_dirty_ = false, dumped_ = false;
+	bool native_desktop_hidden_ = false;
 	Clock::time_point stats_at_;
 	rusage stats_usage_ = {};
 };

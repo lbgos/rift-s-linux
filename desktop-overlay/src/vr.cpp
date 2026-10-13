@@ -155,6 +155,7 @@ vr_connect(vr::EVRApplicationType type, Vr &out, std::string &error)
 	out.system = static_cast<vr::IVRSystem *>(get(vr::IVRSystem_Version));
 	out.overlay = static_cast<vr::IVROverlay *>(get(vr::IVROverlay_Version));
 	out.apps = static_cast<vr::IVRApplications *>(get(vr::IVRApplications_Version));
+	out.settings = static_cast<vr::IVRSettings *>(get(vr::IVRSettings_Version));
 	out.compositor = static_cast<vr::IVRCompositor *>(get(vr::IVRCompositor_Version));
 	if (!out.apps || (type != vr::VRApplication_Utility && (!out.system || !out.overlay))) {
 		error = "SteamVR is missing a required interface version";

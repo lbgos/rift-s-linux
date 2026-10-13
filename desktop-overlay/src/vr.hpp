@@ -15,6 +15,7 @@ struct Vr
 	vr::IVRSystem *system = nullptr;
 	vr::IVROverlay *overlay = nullptr;
 	vr::IVRApplications *apps = nullptr;
+	vr::IVRSettings *settings = nullptr;
 	vr::IVRCompositor *compositor = nullptr; // Vulkan requirements only; never submits.
 };
 
