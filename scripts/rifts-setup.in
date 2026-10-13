@@ -13,6 +13,7 @@ import sys
 import time
 
 DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
+DESKTOP = Path('@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop')
 
 
 def read_registry(path):
@@ -87,6 +88,26 @@ def register(home, registry_path, uninstall=False):
     return True, roots, libraries
 
 
+def desktop_server_pid():
+    # Only comm and ownership, never process arguments or environments.
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid == os.getuid() and (entry / 'comm').read_text().strip() == 'vrserver':
+                return int(entry.name)
+        except (OSError, ProcessLookupError):
+            pass
+    return None
+
+
+def launch_desktop():
+    # The client registers its manifest and preserves the user's autolaunch choice.
+    # It also locks out duplicates when SteamVR has already started it.
+    subprocess.Popen([str(DESKTOP), '--autolaunch'], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 class DirectoryEvents:
     def __init__(self):
         self.libc = ctypes.CDLL(None, use_errno=True)
@@ -134,6 +155,7 @@ def main():
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     events = DirectoryEvents()
     last_error = None
+    last_desktop_server = None
     with (state / 'registration.lock').open('w') as lock:
         while True:
             with_lock = False
@@ -153,6 +175,17 @@ def main():
             finally:
                 if with_lock:
                     fcntl.flock(lock, fcntl.LOCK_UN)
+            if done and DESKTOP.is_file():
+                server = desktop_server_pid()
+                if args.action == 'uninstall':
+                    if server:
+                        subprocess.run([str(DESKTOP), '--unregister'], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, timeout=20)
+                elif server and server != last_desktop_server:
+                    launch_desktop()
+                    last_desktop_server = server
+                elif not server:
+                    last_desktop_server = None
             if args.action != 'watch':
                 print('Rift S registered.' if done else 'Rift S registration will complete when SteamVR is installed.')
                 return
