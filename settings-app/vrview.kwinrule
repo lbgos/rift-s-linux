@@ -1,0 +1,8 @@
+[rifts-settings-vrview]
+Description=Rift S preview: keep VR View minimized
+wmclass=vrmonitor
+wmclassmatch=1
+title=VR View
+titlematch=1
+minimize=true
+minimizerule=2

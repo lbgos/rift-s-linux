@@ -20,6 +20,7 @@ use tungstenite::{client::IntoClientRequest, Message};
 unsafe extern "C" {
     fn rifts_snapshot(path: *const std::ffi::c_char) -> *const std::ffi::c_char;
     fn rifts_action(action: i32) -> i32;
+    fn rifts_mirror_preference(enabled: i32) -> i32;
     fn rifts_shutdown();
     fn rifts_quit_requested() -> bool;
     fn rifts_surface_place(
@@ -193,6 +194,27 @@ fn preview_layout(
             wake_preview();
         })
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn preview_preference(app: tauri::AppHandle, enabled: Option<bool>) -> Result<bool, String> {
+    let _lock = VR.lock().map_err(|e| e.to_string())?;
+    vr_snapshot()?;
+    let directory = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let marker = directory.join("preview-initialized");
+    // Opt in only on the first preview. Later SteamVR or checkbox changes,
+    // including disabling VR View, must survive tab changes and app restarts.
+    let first = !marker.try_exists().map_err(|e| e.to_string())?;
+    let requested = enabled.or(first.then_some(true));
+    let value = unsafe { rifts_mirror_preference(requested.map_or(-1, i32::from)) };
+    if value < 0 {
+        return Err("SteamVR preview preference unavailable".into());
+    }
+    if first {
+        fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        fs::write(marker, b"").map_err(|e| e.to_string())?;
+    }
+    Ok(value != 0)
 }
 
 #[tauri::command]
@@ -522,7 +544,6 @@ fn vr_action(action: &str) -> Result<String, String> {
             return Err("Unavailable while SteamVR is in bench mode".into());
         }
         let (id, response) = match action {
-            "mirror" => (1, "SteamVR VR View opened."),
             "room" => (2, "Room setup is running in the headset."),
             "recenter" => (3, "Recentered."),
             _ => return Err("Unknown action".into()),
@@ -818,6 +839,7 @@ fn main() {
             snapshot,
             preview_layout,
             preview_status,
+            preview_preference,
             set_ipd,
             vr_action,
             export_logs,

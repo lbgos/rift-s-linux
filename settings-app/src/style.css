@@ -72,6 +72,7 @@ input[type=range]::-moz-range-thumb{width:.625rem;height:1.375rem;border-radius:
 h2.pv{margin-top:1.25rem;margin-bottom:.5rem}
 h2.pv>span{display:flex;align-items:center;gap:1rem}
 h2.pv .meta{color:var(--mut);font-size:.75rem;font-weight:400;letter-spacing:0;text-transform:none}
+.preview-preference{display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem;font-size:.8125rem}
 .stats{display:flex;gap:2.5rem;margin-top:.75rem;font-size:.9rem;min-height:1.5rem}
 .stats span{color:var(--mut)}
 .stats b{font-weight:600;margin-left:.5rem}

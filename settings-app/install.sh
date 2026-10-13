@@ -23,6 +23,9 @@ sudo install -Dm644 "$desktop" /usr/local/share/applications/rifts-settings.desk
 # A per-user entry shadows the system entry, including older development builds.
 install -Dm644 "$desktop" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/applications/rifts-settings.desktop"
+if command -v qdbus6 >/dev/null && qdbus6 org.kde.KWin /KWin >/dev/null 2>&1; then
+    bash "$settings_dir/install-vrview-rule.sh"
+fi
 if command -v kbuildsycoca6 >/dev/null; then
     kbuildsycoca6 --noincremental >/dev/null
 fi

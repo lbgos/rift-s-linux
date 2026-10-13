@@ -28,6 +28,7 @@ interface Snapshot {
   journalSize?: number | null;
   driver?: string | null;
   steamVersion?: string | null;
+  mirrorOnStartup?: boolean | null;
 }
 
 const missing = '—';
@@ -82,11 +83,19 @@ interface PreviewStatus { presented: number; width: number; height: number; erro
 // side covers the preview box and receives GPU frames at the headset refresh
 // rate. This component only reports where the box is and shows status text
 // in the box while no frame covers it.
-function HeadsetPreview({ enabled }: { enabled: boolean }) {
+function HeadsetPreview({ enabled, mirrorOnStartup }: { enabled: boolean; mirrorOnStartup?: boolean | null }) {
   const box = useRef<HTMLDivElement>(null);
   const [error, setError] = useState('');
   const [stats, setStats] = useState('');
   const [full, setFull] = useState(false);
+  const initialized = useRef(false);
+  const [saving, setSaving] = useState(false);
+  async function savePreference(value: boolean) {
+    setSaving(true);
+    try { await invoke('preview_preference', { enabled: value }); }
+    catch (failure) { setError(String(failure)); }
+    finally { setSaving(false); }
+  }
   useEffect(() => {
     const changed = () => setFull(document.fullscreenElement === box.current);
     document.addEventListener('fullscreenchange', changed);
@@ -133,6 +142,10 @@ function HeadsetPreview({ enabled }: { enabled: boolean }) {
     let previous: { presented: number; at: number } | null = null;
     async function poll() {
       try {
+        if (!initialized.current) {
+          await invoke('preview_preference');
+          initialized.current = true;
+        }
         const status = await invoke<PreviewStatus>('preview_status');
         const now = performance.now();
         setError(status.error ?? '');
@@ -149,6 +162,7 @@ function HeadsetPreview({ enabled }: { enabled: boolean }) {
   }, [enabled]);
   return <>
     <h2 className="pv">Preview <span><span className="meta" aria-label="Preview rate">{stats}</span><button className="btn sm" onClick={toggle} aria-label={full ? 'Exit fullscreen preview' : 'Fullscreen preview'}>{full ? 'Exit' : 'Fullscreen'}</button></span></h2>
+    <label className="preview-preference"><input type="checkbox" checked={mirrorOnStartup === true} disabled={mirrorOnStartup == null || saving} onChange={event => void savePreference(event.target.checked)}/>Full resolution after next SteamVR start</label>
     <div className="well preview" ref={box} onDoubleClick={toggle} aria-label="Live headset view">
       {error && <output role="status">{error}</output>}
     </div>
@@ -202,15 +216,14 @@ function App() {
     <main>
       <section className={`view${view === 'headset' ? ' on' : ''}`} id="headset">
         <div className="col">
-          <h2>Display <button className="btn sm" disabled={busy !== null} onClick={() => void action('mirror', 'vr_action', { action: 'mirror' })}>Open VR View</button></h2>
+          <h2>Display</h2>
           <KeyValues rows={[
             ['Resolution', data.display?.join(' × ') ?? missing],
             ['Refresh', format(data.refresh, ' Hz')],
             ['Frame time', format(data.frameTime, ' ms', 1)],
             ['Dropped frames', data.dropped == null ? missing : String(data.dropped)],
           ]}/>
-          {feedback.mirror && fb('mirror')}
-          <HeadsetPreview enabled={view === 'headset'}/>
+          <HeadsetPreview enabled={view === 'headset'} mirrorOnStartup={data.mirrorOnStartup}/>
         </div>
         <div className="col">
           <div className="sec"><h2>Devices</h2><div className="t dev">

@@ -157,16 +157,25 @@ extern "C" const char *rifts_snapshot(const char *path) {
         previous_sequence=frame.nFrameSequence; previous_time=now; previous_frame=true;
     } else previous_frame=false;
     o << ",\"cameraExport\":" << (has_camera ? "true":"false") << ",\"cameraActive\":" << (fresh ? "true":"false") << ",\"cameraRate\":"; number(o,rate,fresh && rate>0 && rate<100);
+    o << ",\"mirrorOnStartup\":";
+    vr::EVRSettingsError mirror_error = vr::VRSettingsError_None;
+    bool mirror = settings && settings->GetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_MirrorViewVisibility_Bool, &mirror_error);
+    if(settings && mirror_error == vr::VRSettingsError_None) o << (mirror ? "true" : "false"); else o << "null";
     o << '}'; output=o.str(); return output.c_str();
+}
+
+// vrmonitor reads this public preference at startup, not when it changes.
+extern "C" int rifts_mirror_preference(int enabled) {
+    if(!settings) return -1;
+    vr::EVRSettingsError error = vr::VRSettingsError_None;
+    if(enabled >= 0) settings->SetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_MirrorViewVisibility_Bool, enabled != 0, &error);
+    if(error != vr::VRSettingsError_None) return -1;
+    bool value = settings->GetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_MirrorViewVisibility_Bool, &error);
+    return error == vr::VRSettingsError_None ? int(value) : -1;
 }
 
 extern "C" int rifts_action(int action) {
     if(!vr_system) return 0;
-    if(action==1 && settings) {
-        vr::EVRSettingsError error = vr::VRSettingsError_None;
-        settings->SetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_MirrorViewVisibility_Bool, true, &error);
-        return error == vr::VRSettingsError_None;
-    }
     if(action==2 && overlay) { overlay->ShowDashboard(""); return 1; }
     if(action==3 && chaperone) { chaperone->ResetZeroPose(vr::TrackingUniverseStanding); return 1; }
     return 0;
