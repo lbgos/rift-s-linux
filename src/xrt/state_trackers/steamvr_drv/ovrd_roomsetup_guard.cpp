@@ -198,12 +198,28 @@ static int recover_display()
 	return 1;
 }
 
+class DisplayHealth
+{
+	std::chrono::steady_clock::time_point healthy{};
+	uint64_t last_vsync = 0;
+public:
+	bool update(bool available, float age, uint64_t vsync, std::chrono::steady_clock::time_point now)
+	{
+		bool advancing = available && age >= 0 && age < .1f && vsync > last_vsync;
+		last_vsync = vsync;
+		if (!advancing) { healthy = {}; return false; }
+		if (healthy == std::chrono::steady_clock::time_point{}) healthy = now;
+		return now - healthy >= std::chrono::seconds(2);
+	}
+};
+
 class DisplayRecovery
 {
 	int compositor = -1;
 	pid_t requester = -1;
 	bool connected_once = false, lost = false;
-	std::chrono::steady_clock::time_point next_request{}, reconnected{};
+	std::chrono::steady_clock::time_point next_request{};
+	DisplayHealth display_health;
 public:
 	~DisplayRecovery()
 	{
@@ -211,7 +227,7 @@ public:
 		// The session restart helper must survive this guard/server's shutdown.
 		if (requester > 0) waitpid(requester, nullptr, WNOHANG);
 	}
-	void update(bool connected, int server, pid_t server_pid, const char *library)
+	void update(bool connected, float vsync_age, uint64_t vsync, int server, pid_t server_pid, const char *library)
 	{
 		auto now = std::chrono::steady_clock::now();
 		if (requester > 0) {
@@ -224,21 +240,18 @@ public:
 			}
 		}
 		fs::path runtime = fs::path(library).parent_path();
+		bool stable = display_health.update(connected && !exited(compositor), vsync_age, vsync, now);
 		if (connected) {
 			connected_once = true;
 			if (!lost && exited(compositor)) {
 				if (compositor >= 0) close(compositor);
 				compositor = unique_runtime_process(runtime / "vrcompositor");
 			}
-			if (lost && reconnected == std::chrono::steady_clock::time_point{}) reconnected = now;
-			// A short USB flap with a surviving compositor needs no session restart.
-			if (lost && !exited(compositor) && now - reconnected >= std::chrono::seconds(10)) {
-				lost = false;
-				reconnected = {};
-			}
+			// A watchdog can exit well after USB returns. Disarm only after native
+			// vsync advances continuously, never merely because the process lives.
+			if (lost && stable) lost = false;
 		} else if (connected_once) {
 			lost = true;
-			reconnected = {};
 		}
 		if (!connected || !lost || compositor < 0 || !exited(compositor) || requester > 0 ||
 		    now < next_request) return;
@@ -578,7 +591,10 @@ int main(int argc, char **argv)
 			next_display_check = now + std::chrono::milliseconds(100);
 			vr::TrackedDevicePose_t head{};
 			system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0, &head, 1);
-			display_recovery.update(head.bDeviceIsConnected, parent, std::atoi(argv[2]), argv[1]);
+			float vsync_age = -1;
+			uint64_t vsync = 0;
+			if (!system->GetTimeSinceLastVsync(&vsync_age, &vsync)) vsync_age = -1;
+			display_recovery.update(head.bDeviceIsConnected, vsync_age, vsync, parent, std::atoi(argv[2]), argv[1]);
 		}
 		floor->update_frame(step == 2 || step == 3 || step == 4 || step == 5 || step == 7);
 		std::this_thread::sleep_for(std::chrono::milliseconds(20));

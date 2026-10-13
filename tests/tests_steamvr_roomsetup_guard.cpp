@@ -260,3 +260,23 @@ TEST_CASE("Display recovery requires one exact runtime process and the expected 
 	REQUIRE(process >= 0);
 	close(process);
 }
+
+TEST_CASE("Late display watchdog remains armed until native vsync really resumes")
+{
+	using namespace std::chrono;
+	DisplayHealth health;
+	auto start = steady_clock::time_point{seconds(100)};
+	CHECK_FALSE(health.update(false, .01f, 1000, start));
+	// USB/poses and the process can return while native presentation is frozen.
+	for (int second = 1; second <= 30; ++second)
+		CHECK_FALSE(health.update(true, float(second), 1000, start + seconds(second)));
+	CHECK_FALSE(health.update(true, .01f, 1001, start + seconds(31)));
+	CHECK_FALSE(health.update(true, .01f, 1002, start + seconds(32)));
+	CHECK(health.update(true, .01f, 1003, start + seconds(33)));
+	// A fresh freeze/disconnection breaks that run rather than retaining health.
+	CHECK_FALSE(health.update(true, .01f, 1003, start + seconds(34)));
+	CHECK_FALSE(health.update(true, .01f, 1004, start + seconds(35)));
+	CHECK_FALSE(health.update(false, .01f, 1005, start + seconds(36)));
+	CHECK_FALSE(health.update(true, -1, 1006, start + seconds(37)));
+	CHECK_FALSE(health.update(true, .01f, 0, start + seconds(38)));
+}
