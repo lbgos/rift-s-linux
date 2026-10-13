@@ -1,0 +1,33 @@
+# Steam's 32-bit desktop capture needs NVIDIA's 32-bit EGL GBM external platform.
+pkgbase=rifts-steamvr-wayland
+pkgname=(lib32-egl-gbm rifts-steamvr-wayland)
+pkgver=1.1.4
+pkgrel=1
+arch=(x86_64)
+url=https://github.com/NVIDIA/egl-gbm
+license=(MIT)
+makedepends=(git meson ninja gcc lib32-libdrm lib32-mesa eglexternalplatform)
+source=('egl-gbm::git+https://github.com/NVIDIA/egl-gbm.git#commit=012b356ddb47d1f5203fc68c55b10eb2e23d1dfb')
+sha256sums=('SKIP')
+
+build() {
+    export CC='gcc -m32'
+    export PKG_CONFIG_LIBDIR=/usr/lib32/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig
+    meson setup egl-gbm build --prefix=/usr --libdir=lib32 --buildtype=release
+    meson compile -C build -j 2
+}
+
+package_lib32-egl-gbm() {
+    pkgdesc='32-bit NVIDIA EGL GBM external platform for Steam Wayland capture'
+    depends=(egl-gbm lib32-libdrm lib32-mesa)
+    DESTDIR="$pkgdir" meson install -C build
+    # The 64-bit egl-gbm package owns the shared loader JSON and license.
+    rm -rf "$pkgdir/usr/share"
+    install -Dm644 egl-gbm/COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+}
+
+package_rifts-steamvr-wayland() {
+    pkgdesc='Native Wayland desktop capture dependencies for the Rift S SteamVR launcher'
+    depends=(monado-rifts-git steam pipewire xdg-desktop-portal lib32-egl-gbm)
+    # Dependency-only package. monado-rifts-git installs the desktop entry and launcher.
+}

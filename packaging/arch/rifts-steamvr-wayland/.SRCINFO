@@ -1,0 +1,29 @@
+pkgbase = rifts-steamvr-wayland
+	pkgver = 1.1.4
+	pkgrel = 1
+	url = https://github.com/NVIDIA/egl-gbm
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = meson
+	makedepends = ninja
+	makedepends = gcc
+	makedepends = lib32-libdrm
+	makedepends = lib32-mesa
+	makedepends = eglexternalplatform
+	source = egl-gbm::git+https://github.com/NVIDIA/egl-gbm.git#commit=012b356ddb47d1f5203fc68c55b10eb2e23d1dfb
+	sha256sums = SKIP
+
+pkgname = lib32-egl-gbm
+	pkgdesc = 32-bit NVIDIA EGL GBM external platform for Steam Wayland capture
+	depends = egl-gbm
+	depends = lib32-libdrm
+	depends = lib32-mesa
+
+pkgname = rifts-steamvr-wayland
+	pkgdesc = Native Wayland desktop capture dependencies for the Rift S SteamVR launcher
+	depends = monado-rifts-git
+	depends = steam
+	depends = pipewire
+	depends = xdg-desktop-portal
+	depends = lib32-egl-gbm
