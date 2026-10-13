@@ -3,6 +3,7 @@
 #include "catch_amalgamated.hpp"
 extern "C" {
 #include "rift_s/rift_s_radio.h"
+#include "rift_s/rift_s_haptics.h"
 #include "rift_s/rift_s_protocol.h"
 #include "util/u_time.h"
 #include "util/u_logging.h"
@@ -365,4 +366,28 @@ TEST_CASE("Radio with no device keeps the queue until the deadline")
 	CHECK_FALSE(a.last_success);
 	CHECK(st.pending_commands == nullptr);
 	rift_s_radio_state_clear(&st);
+}
+
+TEST_CASE("Haptic latched stop survives a transport reset")
+{
+	// close_transport clears the request side but keeps the latched motor identity.
+	struct rift_s_haptic_radio h = {};
+	h.hand = 0;
+	h.device_id = 0;
+	h.amplitude = 0;
+	h.end_ns = 0;
+	h.applied_device_id = 0x13001101;
+	h.applied_amplitude = 200;
+
+	uint64_t id = 0;
+	uint8_t amp = 0xFF;
+	CHECK(rift_s_haptic_next(&h, T0, &id, &amp));
+	CHECK(id == 0x13001101);
+	CHECK(amp == 0);
+
+	// Nothing ever latched: no spurious stop, no pairing-list probe needed.
+	struct rift_s_haptic_radio idle = {};
+	id = 0xDEAD;
+	amp = 0xFF;
+	CHECK_FALSE(rift_s_haptic_next(&idle, T0, &id, &amp));
 }
