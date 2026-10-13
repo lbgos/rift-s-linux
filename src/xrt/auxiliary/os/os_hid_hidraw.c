@@ -148,7 +148,7 @@ os_hid_open_hidraw(const char *path, struct os_hid_device **out_hid)
 	hrdev->base.set_feature = os_hidraw_set_feature;
 	hrdev->base.get_physical_address = os_hidraw_get_physical_address;
 	hrdev->base.destroy = os_hidraw_destroy;
-	hrdev->fd = open(path, O_RDWR);
+	hrdev->fd = open(path, O_RDWR | O_CLOEXEC);
 	if (hrdev->fd < 0) {
 		free(hrdev);
 		return -errno;

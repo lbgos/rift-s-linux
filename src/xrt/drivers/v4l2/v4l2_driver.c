@@ -811,7 +811,7 @@ v4l2_fs_create(struct xrt_frame_context *xfctx,
 	snprintf(vid->base.manufacturer, sizeof(vid->base.manufacturer), "%s", manufacturer);
 	snprintf(vid->base.serial, sizeof(vid->base.serial), "%s", serial);
 
-	int fd = open(path, O_RDWR | O_NONBLOCK, 0);
+	int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC, 0);
 	if (fd < 0) {
 		V4L2_ERROR(vid, "Cannot open '%s'", path);
 		pthread_mutex_destroy(&vid->stream_lock);
