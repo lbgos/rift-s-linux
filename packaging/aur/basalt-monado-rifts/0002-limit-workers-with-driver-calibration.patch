@@ -1,0 +1,12 @@
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -170,6 +170,9 @@
+     calib_data_ready.cam.resize(cam_count, false);
+ 
+     if (config->file == nullptr) {
++      // Driver-provided calibration still uses the default one-thread CPU budget.
++      tbb_global_control =
++          std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, num_threads);
+       // For the pipeline to work now, the user will need to use add_cam/imu_calibration
+       return;
+     }

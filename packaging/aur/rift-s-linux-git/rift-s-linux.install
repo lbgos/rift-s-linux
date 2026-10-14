@@ -1,0 +1,31 @@
+post_install() {
+  /usr/lib/rifts-session-install || return 1
+  udevadm control --reload-rules || true
+  echo 'Reconnect the Rift S, then open Steam and start SteamVR.'
+  echo 'Driver registration runs automatically in desktop user sessions.'
+}
+
+post_upgrade() { post_install; }
+
+pre_remove() {
+  # Stop the watcher before removing registration, or it would add the driver back.
+  loginctl list-users --no-legend 2>/dev/null | while read -r uid username rest; do
+    case "$uid" in ''|*[!0-9]*) continue ;; esac
+    [ "$uid" -ge 1000 ] && [ -S "/run/user/$uid/bus" ] || continue
+    runuser -u "$username" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      systemctl --user stop rifts-steamvr-registration.service || continue
+    runuser -u "$username" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      /usr/bin/rifts-setup uninstall || true
+  done
+}
+
+post_remove() {
+  udevadm control --reload-rules || true
+  loginctl list-users --no-legend 2>/dev/null | while read -r uid username rest; do
+    case "$uid" in ''|*[!0-9]*) continue ;; esac
+    [ "$uid" -ge 1000 ] && [ -S "/run/user/$uid/bus" ] || continue
+    runuser -u "$username" -- env "XDG_RUNTIME_DIR=/run/user/$uid" systemctl --user daemon-reload
+  done
+  echo 'Users without a reachable user session may retain a stale SteamVR driver path.'
+  echo 'Remove /usr/share/steamvr-monado with SteamVR vrpathreg removedriver if needed.'
+}

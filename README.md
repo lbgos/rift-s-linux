@@ -24,12 +24,23 @@ Free and open source, built on Monado and Basalt. Steam and SteamVR are installe
 - An x86-64 Linux desktop with a systemd user session and local USB seat access.
 - Native Steam with SteamVR installed from the Steam library.
 - A Vulkan-capable GPU and drivers supported by SteamVR's direct display mode. Current testing uses an NVIDIA RTX 3090.
-- The patched Basalt build below. An unpatched Basalt lacks the required reconnect support.
+- The patched Basalt build. The Arch packages include it; an unpatched Basalt lacks the required reconnect support.
 - KDE Plasma Wayland for the Desktop overlay.
 
-## Install from source
+## Install
 
-AUR packages are planned and have not been published. Build from source for now. Close SteamVR and Settings before installing or upgrading.
+Close SteamVR and Settings before installing or upgrading.
+
+On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
+
+```sh
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r28/rift-s-linux-bin-28-1-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-28-1-x86_64.pkg.tar.zst
+```
+
+To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending. Other distributions build from source.
+
+## Build from source
 
 Install a C/C++ toolchain, CMake, Ninja, Eigen, TBB, fmt, OpenCV, Vulkan headers and loader, glslang, libusb, SDL2, cJSON, libcap, systemd and the X11, Wayland and DRM development libraries. The Desktop overlay also needs PipeWire development files, wayland-scanner, wayland-protocols and plasma-wayland-protocols. Settings needs Rust/Cargo, Node.js, pnpm, GTK3, WebKitGTK 4.1, shaderc's `glslc` and desktop-file-utils.
 

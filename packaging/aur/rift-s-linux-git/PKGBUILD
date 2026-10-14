@@ -1,0 +1,119 @@
+# Maintainer: lbgos <285507185+lbgos@users.noreply.github.com>
+pkgname=rift-s-linux-git
+pkgver=25.1.0.r8702.gd82b8cbda
+pkgrel=1
+pkgdesc='Oculus Rift S on Linux SteamVR: driver, Room Setup, Settings app and in-headset desktop'
+arch=('x86_64')
+url='https://github.com/lbgos/rift-s-linux'
+license=('BSL-1.0' 'MIT' 'BSD-2-Clause' 'BSD-3-Clause' 'OFL-1.1' 'Apache-2.0' 'CC-BY-4.0'
+         'CC0-1.0' 'Unlicense' 'Zlib' 'ISC' 'MPL-2.0' 'Unicode-3.0'
+         'Apache-2.0 WITH LLVM-exception' 'LicenseRef-Khronos-Free-Use-License-for-Software-and-Documentation')
+depends=('glibc' 'libgcc' 'libstdc++' 'libusb' 'opencv' 'sdl2' 'libglvnd'
+         'vulkan-icd-loader' 'libx11' 'libxcb' 'libxrandr' 'wayland' 'libdrm'
+         'systemd-libs' 'libpipewire' 'cjson' 'python' 'libcap' 'systemd' 'util-linux' 'procps-ng' 'coreutils' 'tar'
+         'basalt-monado-rifts' 'webkit2gtk-4.1' 'gtk3' 'cairo'
+         'libsoup3' 'gdk-pixbuf2' 'glib2' 'dbus' 'hicolor-icon-theme')
+optdepends=('steam: install and run SteamVR from the Steam library (native installation)'
+            'kwin: in-headset Desktop overlay and minimized VR View preview source'
+            'kconfig: write the VR View window rule (kwriteconfig6)'
+            'qt6-tools: apply the VR View window rule (qdbus6)')
+makedepends=('git' 'cmake' 'ninja' 'eigen' 'glslang' 'vulkan-headers'
+             'wayland-protocols' 'plasma-wayland-protocols' 'pipewire' 'cargo' 'pnpm' 'nodejs' 'pkgconf' 'shaderc'
+             'desktop-file-utils')
+provides=('rift-s-linux' 'monado' 'monado-git' 'rifts-settings')
+conflicts=('rift-s-linux' 'monado' 'monado-git' 'rifts-settings' 'monado-rifts-git')
+install=rift-s-linux.install
+options=('!debug' '!lto')
+source=('monado::git+https://github.com/lbgos/rift-s-linux.git#branch=main'
+        '70-monado-rifts.rules' 'settings-licenses.py' 'settings-license-fallbacks.json')
+sha256sums=('SKIP' '3fbda3da3bb6fdd909d6a507a1a49ede88479ab47e5b7bf88aba6d5365005ba6' 'f3eaa7437858d201c5e48c6ec62e38a28c5286112d6a994a695821db78462c2b' '2093d3111612e01f10ea0d0478d100faea010edaa738997d2e4866a7072c1e06')
+
+pkgver() {
+  cd monado
+  printf '25.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=9 HEAD)"
+}
+
+prepare() {
+  cd monado/settings-app
+  # Fetch locked dependencies before the build; both compilers then run offline.
+  pnpm fetch --frozen-lockfile --store-dir "$srcdir/pnpm-store"
+  cargo fetch --manifest-path src-tauri/Cargo.toml --locked --target x86_64-unknown-linux-gnu
+}
+
+build() {
+  local drivers=() option
+  # Keep optional host libraries from enabling unrelated hardware drivers.
+  while read -r option; do drivers+=("-D${option}=OFF"); done < <(
+    sed -n 's/.*(\(XRT_BUILD_DRIVER_[A-Z0-9_]*\) .*/\1/p' monado/CMakeLists.txt)
+  cmake -S monado -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=ON -DXRT_BUILD_SAMPLES=OFF "${drivers[@]}" \
+    -DXRT_BUILD_DRIVER_RIFT_S=ON -DXRT_BUILD_DRIVER_SIMULATED=ON \
+    -DXRT_FEATURE_STEAMVR_PLUGIN=ON -DXRT_FEATURE_SLAM=ON \
+    -DXRT_HAVE_SYSTEM_CJSON=ON -DXRT_HAVE_GST=OFF -DXRT_HAVE_BLUETOOTH=OFF \
+    -DXRT_HAVE_DBUS=OFF -DXRT_HAVE_HIDAPI=OFF -DXRT_HAVE_JPEG=OFF -DXRT_HAVE_LIBBSD=OFF \
+    -DXRT_HAVE_LIBUVC=OFF -DXRT_HAVE_OPENVR=OFF -DXRT_MODULE_MERCURY_HANDTRACKING=OFF \
+    -DRIFTS_DESKTOP_OVERLAY=ON
+  cmake --build build --parallel 2
+
+  cd monado/settings-app
+  pnpm install --offline --frozen-lockfile --store-dir "$srcdir/pnpm-store"
+  pnpm build
+  # custom-protocol embeds the built frontend instead of using the dev server.
+  cargo build --manifest-path src-tauri/Cargo.toml --release --frozen --features custom-protocol -j2
+  cargo metadata --manifest-path src-tauri/Cargo.toml --frozen --features custom-protocol --format-version 1 \
+    --filter-platform x86_64-unknown-linux-gnu > "$srcdir/settings-rust-metadata.json"
+  pnpm licenses list --prod --json > "$srcdir/settings-js-metadata.json"
+  python "$srcdir/settings-licenses.py" "$srcdir/settings-rust-metadata.json" \
+    "$srcdir/settings-js-metadata.json" "$srcdir/settings-license-fallbacks.json" > "$srcdir/settings-third-party-notices.txt"
+}
+
+check() {
+  VIT_SYSTEM_LIBRARY_PATH=/usr/lib/libbasalt.so ctest --test-dir build --output-on-failure
+  cd monado/settings-app
+  cargo test --manifest-path src-tauri/Cargo.toml --release --frozen --features custom-protocol -j2
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  # CMake skips the overlay with only a warning when its dependencies are missing.
+  test -x "$pkgdir/usr/bin/rifts-desktop"
+  # SteamVR needs this layout; executable code belongs under /usr/lib on Arch.
+  install -d "$pkgdir/usr/lib/steamvr-monado"
+  mv "$pkgdir/usr/share/steamvr-monado/bin" "$pkgdir/usr/lib/steamvr-monado/bin"
+  ln -s ../../lib/steamvr-monado/bin "$pkgdir/usr/share/steamvr-monado/bin"
+  sed -i 's|/usr/share/steamvr-monado/bin/|/usr/lib/steamvr-monado/bin/|' \
+    "$pkgdir/usr/share/vulkan/implicit_layer.d/monado_roomsetup_vulkan.json"
+  install -Dm644 "$srcdir/70-monado-rifts.rules" "$pkgdir/usr/lib/udev/rules.d/70-monado-rifts.rules"
+
+  local app=monado/settings-app
+  install -Dm755 "$app/src-tauri/target/release/rifts-settings" "$pkgdir/usr/bin/rifts-settings"
+  install -Dm644 "$app/rifts-settings.desktop" "$pkgdir/usr/share/applications/rifts-settings.desktop"
+  sed -i -e 's|^Exec=.*|Exec=/usr/bin/rifts-settings|' -e 's|^Icon=.*|Icon=rifts-settings|' \
+    "$pkgdir/usr/share/applications/rifts-settings.desktop"
+  desktop-file-validate "$pkgdir/usr/share/applications/rifts-settings.desktop"
+  install -Dm644 "$app/src-tauri/icons/icon.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/rifts-settings.png"
+  # Settings applies this per-user KWin rule when the full-resolution preview is enabled.
+  install -Dm755 "$app/install-vrview-rule.sh" "$pkgdir/usr/share/rifts-settings/install-vrview-rule.sh"
+  install -Dm644 "$app/vrview.kwinrule" "$pkgdir/usr/share/rifts-settings/vrview.kwinrule"
+
+  install -Dm644 monado/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -d "$pkgdir/usr/share/licenses/$pkgname/Monado"
+  install -m644 monado/LICENSES/*.txt "$pkgdir/usr/share/licenses/$pkgname/Monado/"
+  local notice
+  while IFS= read -r -d '' notice; do
+    install -Dm644 "$notice" "$pkgdir/usr/share/licenses/$pkgname/${notice#monado/}"
+  done < <(find monado/src/external -type f \( -iname LICENSE -o -iname LICENSE.txt -o -iname COPYING -o -iname '*.license' \) -print0)
+  # These single-file libraries keep their grants and copyright notices inline.
+  for notice in monado/src/external/bcdec/bcdec.h monado/src/external/stb/stb_image_write.h \
+                monado/src/external/imgui/imgui/imstb*.h \
+                monado/src/external/glad/include/{KHR/khrplatform,EGL/eglplatform}.h; do
+    install -Dm644 "$notice" "$pkgdir/usr/share/licenses/$pkgname/${notice#monado/}"
+  done
+  install -Dm644 monado/src/external/openvr_includes/LICENSE "$pkgdir/usr/share/licenses/$pkgname/OpenVR"
+  install -Dm644 "$app/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/Settings-MIT"
+  install -Dm644 "$app/src/fonts/OFL.txt" "$pkgdir/usr/share/licenses/$pkgname/OpenSans-OFL"
+  install -Dm644 "$app/src-tauri/native/OpenVR-LICENSE" "$pkgdir/usr/share/licenses/$pkgname/Settings-OpenVR"
+  install -Dm644 "$srcdir/settings-third-party-notices.txt" "$pkgdir/usr/share/licenses/$pkgname/Settings-third-party-notices.txt"
+}

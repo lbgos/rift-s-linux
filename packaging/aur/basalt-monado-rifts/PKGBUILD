@@ -1,0 +1,81 @@
+# Maintainer: lbgos <285507185+lbgos@users.noreply.github.com>
+pkgname=basalt-monado-rifts
+pkgver=0.1.r544.gdf6e970
+pkgrel=1
+pkgdesc='Basalt tracking library with Rift S lifecycle and worker defaults'
+arch=('x86_64')
+url='https://gitlab.freedesktop.org/mateosss/basalt'
+license=('BSD-2-Clause' 'BSD-3-Clause' 'MIT' 'BSL-1.0')
+depends=('glibc' 'libgcc' 'libstdc++' 'opencv' 'onetbb' 'fmt')
+makedepends=('cmake' 'ninja' 'git' 'eigen' 'boost')
+provides=('basalt-monado' 'basalt-monado-git')
+conflicts=('basalt-monado' 'basalt-monado-git')
+options=('!debug' '!lto')
+source=('basalt::git+https://gitlab.freedesktop.org/mateosss/basalt.git#commit=df6e970c8da7636eb401a09e3317fbeaaf829b9a'
+        'CLI11::git+https://github.com/CLIUtils/CLI11.git#commit=37bb6edc5317e99af72ef48405e65d9ca5218861'
+        'basalt-headers::git+https://gitlab.freedesktop.org/mateosss/basalt-headers.git#commit=e6db0fb84c69614bc4923fde6c52154c221c1768'
+        'opengv::git+https://github.com/laurentkneip/opengv.git#commit=91f4b19c73450833a40e463ad3648aae80b3a7f3'
+        'magic_enum::git+https://github.com/Neargye/magic_enum.git#commit=e046b69a3736d314fad813e159b1c192eaef92cd'
+        'Sophus::git+https://github.com/strasdat/Sophus.git#commit=d0b7315a0d90fc6143defa54596a3a95d9fa10ec'
+        'cereal::git+https://github.com/USCiLab/cereal.git#commit=ebef1e929807629befafbb2918ea1a08c7194554'
+        '0001-keep-imu-frequency-per-tracker.patch'
+        '0002-limit-workers-with-driver-calibration.patch'
+        '0003-safe-recreation-and-realtime-worker-budget.patch')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+            'a0bc2a766ad6ae5fdfa33cd80d45d12798d43efa4c34605ee6cf20bae157d18d' '607d53dadbd8ca5b0978d10378e631539bc8047ca0fce317b90d68a52f785a52' 'a434e76c66c129aa3a900ed151dd2dd9bc98b671451dda26855a438cff08b2ac')
+
+prepare() {
+  cd basalt
+  # Only the shared-library dependencies are needed. Use makepkg's pinned sources
+  # instead of fetching unrelated ROS/Pangolin/test submodules during prepare.
+  local module
+  for module in CLI11 basalt-headers opengv magic_enum; do
+    git submodule init "thirdparty/$module"
+    git config "submodule.thirdparty/$module.url" "$srcdir/$module"
+  done
+  git -c protocol.file.allow=always submodule update --no-fetch thirdparty/{CLI11,basalt-headers,opengv,magic_enum}
+  cd thirdparty/basalt-headers
+  for module in Sophus cereal; do
+    git submodule init "thirdparty/$module"
+    git config "submodule.thirdparty/$module.url" "$srcdir/$module"
+  done
+  git -c protocol.file.allow=always submodule update --no-fetch thirdparty/{Sophus,cereal}
+  cd ../..
+  local patchfile
+  for patchfile in "$srcdir"/000*.patch; do patch -Np1 -i "$patchfile"; done
+}
+
+build() {
+  cmake -S basalt -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+    -DBASALT_INSTANTIATIONS_DOUBLE=OFF -DBASALT_BUILTIN_EIGEN=OFF \
+    -DEIGEN_ROOT=/usr/include/eigen3 -DBASALT_BUILD_SHARED_LIBRARY_ONLY=ON \
+    -DBASALT_ENABLE_ROSBAG2=OFF -DBASALT_BUILD_VISUALIZATION=OFF \
+    -DCXX_MARCH=x86-64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  cmake --build build --parallel 1
+}
+
+check() {
+  # Reconnect requires this capability; an unpatched Basalt build is insufficient.
+  nm -D build/libbasalt.so | grep -Eq ' T vit_tracker_supports_safe_recreation(@|$)'
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 basalt/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  local item
+  for item in thirdparty/basalt-headers/LICENSE \
+              thirdparty/basalt-headers/thirdparty/Sophus/LICENSE.txt \
+              thirdparty/basalt-headers/thirdparty/cereal/LICENSE \
+              thirdparty/CLI11/LICENSE thirdparty/magic_enum/LICENSE \
+              thirdparty/basalt-headers/thirdparty/cereal/include/cereal/external/LICENSE \
+              thirdparty/basalt-headers/thirdparty/cereal/include/cereal/external/rapidxml/license.txt \
+              thirdparty/basalt-headers/thirdparty/cereal/include/cereal/external/rapidjson/LICENSE \
+              thirdparty/basalt-headers/thirdparty/cereal/include/cereal/external/rapidjson/msinttypes/LICENSE \
+              thirdparty/opengv/License.txt thirdparty/vit/LICENSE; do
+    install -Dm644 "basalt/$item" "$pkgdir/usr/share/licenses/$pkgname/$item"
+  done
+  # The amalgamated header contains the JSON library and embedded-code notices.
+  install -Dm644 basalt/thirdparty/json/nlohmann/json.hpp \
+    "$pkgdir/usr/share/licenses/$pkgname/json-source-notices.hpp"
+}

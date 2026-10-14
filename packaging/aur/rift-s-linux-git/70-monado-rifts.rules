@@ -1,0 +1,4 @@
+# Oculus USB devices, including Rift S HMD/cameras and hidraw interfaces.
+# Seat access only; do not grant all users world-writable USB access.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2833", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="2833", TAG+="uaccess"
