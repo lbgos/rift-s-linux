@@ -214,7 +214,27 @@ fn preview_preference(app: tauri::AppHandle, enabled: Option<bool>) -> Result<bo
         fs::create_dir_all(directory).map_err(|e| e.to_string())?;
         fs::write(marker, b"").map_err(|e| e.to_string())?;
     }
+    if requested == Some(true) && value != 0 {
+        install_vrview_rule();
+    }
     Ok(value != 0)
+}
+
+/// Packages ship the KWin rule that keeps the VR View source minimized; apply it
+/// for the current user when the full-resolution preview is enabled.
+fn install_vrview_rule() {
+    let Some(script) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("share/rifts-settings/install-vrview-rule.sh")))
+        .filter(|path| path.is_file())
+    else {
+        return;
+    };
+    let _ = Command::new("bash")
+        .arg(script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[tauri::command]
