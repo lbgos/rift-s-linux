@@ -934,7 +934,15 @@ rift_s_tracker_push_slam_frames(struct rift_s_tracker *t,
 
 	timepoint_ns now_ns = os_monotonic_get_ns();
 	timepoint_ns frame_mono_ns = raw_frame_ts_to_mono_ts(t, frame_ts_ns);
-	if (frame_mono_ns < t->last_frame_time) {
+	if (t->last_frame_time - frame_mono_ns > (timepoint_ns)U_TIME_1S_IN_NS) {
+		/* A clock discontinuity, not jitter. At startup IMU samples are ignored until the
+		 * first frame is accepted, so the first frame's epoch offset is computed without
+		 * IMU time; when the IMU clock is a 2^32 us epoch ahead that frame maps far into
+		 * the past (or before 0). Rejecting it would keep last_frame_time at 0, keep IMU
+		 * ignored and the epoch uncorrected, so every later frame would be rejected too. */
+		RIFT_S_WARN("Camera clock discontinuity of %" PRId64 " ns; resyncing frame time",
+		            frame_mono_ns - t->last_frame_time);
+	} else if (frame_mono_ns < t->last_frame_time) {
 		RIFT_S_WARN("Camera frame time went backward by %" PRId64 " ns", frame_mono_ns - t->last_frame_time);
 		os_mutex_unlock(&t->mutex);
 		os_mutex_unlock(&t->slam_mutex);
