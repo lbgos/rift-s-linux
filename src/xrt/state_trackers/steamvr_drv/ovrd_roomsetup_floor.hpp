@@ -86,12 +86,16 @@ public:
 	bool
 	publish(bool initialize_manual = false, bool saved_plane_trusted = true)
 	{
-		if (!saved_plane_trusted || !handle || !paths)
+		if (!handle || !paths)
 			return false;
 		vr::HmdMatrix34_t standing{}, setup{};
 		if (!transforms(standing, setup))
 			return false;
-		auto y = saved_floor(standing, setup);
+		// An untrusted saved plane belongs to another tracking session. Offer this
+		// session's nominal floor instead (raw Y=0, where the unanchored universe
+		// puts it): without any result the native step shows no floor to adjust.
+		const vr::HmdMatrix34_t session_origin{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+		auto y = saved_floor(saved_plane_trusted ? standing : session_origin, setup);
 		if (!y)
 			return false;
 		char message[128];
@@ -99,11 +103,12 @@ public:
 		bool sent = mailbox->Send(handle, "vrcompositor_systemlayer", message) == 0;
 		// The native manual step starts at tracking-origin Y=0. Seed it from the
 		// saved plane once; the first stick/laser adjustment selects Manual again.
-		if (sent && initialize_manual)
+		if (sent && initialize_manual && saved_plane_trusted)
 			sent = mailbox->Send(handle, "vrcompositor_systemlayer",
 			                     "{\"type\":\"reset_playspace_floorheight\",\"value_"
 			                     "source\":2}") == 0;
-		fprintf(stderr, "monado-roomsetup-floor: saved_floor_setup_y=%.6f sent=%d\n", *y, sent);
+		fprintf(stderr, "monado-roomsetup-floor: %s_floor_setup_y=%.6f sent=%d\n",
+		        saved_plane_trusted ? "saved" : "session", *y, sent);
 		return sent;
 	}
 };
