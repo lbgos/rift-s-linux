@@ -14,6 +14,12 @@ import time
 
 DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
 DESKTOP = Path('@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop')
+STEAMVR_APP = '250820'
+# Steam starts SteamVR inside the Steam Linux Runtime container, which cannot see the
+# host's /usr: the driver and its libraries would be missing. vrmonitor.sh starts
+# SteamVR on the host instead.
+LAUNCH_SUFFIX = '/bin/vrmonitor.sh %command%'
+LAUNCH_PATH = ['UserLocalConfigStore', 'Software', 'Valve', 'Steam', 'apps', STEAMVR_APP]
 
 
 def read_registry(path):
@@ -66,39 +72,173 @@ def register(home, registry_path, uninstall=False):
     registry = read_registry(registry_path)
     tool, roots, libraries = find_runtime(home, registry)
     if tool is None:
-        return False, roots, libraries
+        return False, roots, libraries, None
+    runtime = tool.parents[2]
     drivers = registry.get('external_drivers') or []
     if uninstall:
         if str(DRIVER) in drivers:
             pathreg(tool, 'removedriver', str(DRIVER))
-        return True, roots, libraries
+        return True, roots, libraries, host_launch(roots, runtime, uninstall=True)
     if not (DRIVER / 'driver.vrdrivermanifest').is_file():
         raise RuntimeError('Installed Rift S driver manifest is missing.')
-    if str(DRIVER) in drivers:
-        return True, roots, libraries
-    # Bootstrap only missing native paths. Existing runtime/config/log paths remain intact.
-    if not registry.get('runtime'):
-        pathreg(tool, 'setthis')
-    root = roots[0] if roots else home / '.local/share/Steam'
-    if not registry.get('config'):
-        pathreg(tool, 'setconfig', str(root / 'config'))
-    if not registry.get('log'):
-        pathreg(tool, 'setlog', str(root / 'logs'))
-    pathreg(tool, 'adddriver', str(DRIVER))
-    return True, roots, libraries
+    if str(DRIVER) not in drivers:
+        # Bootstrap only missing native paths. Existing runtime/config/log paths remain intact.
+        if not registry.get('runtime'):
+            pathreg(tool, 'setthis')
+        root = roots[0] if roots else home / '.local/share/Steam'
+        if not registry.get('config'):
+            pathreg(tool, 'setconfig', str(root / 'config'))
+        if not registry.get('log'):
+            pathreg(tool, 'setlog', str(root / 'logs'))
+        pathreg(tool, 'adddriver', str(DRIVER))
+    return True, roots, libraries, host_launch(roots, runtime)
 
 
-def desktop_server_pid():
+def vdf_tokens(text):
+    """Return (kind, start, end, value) for the quoted strings and braces of Steam KeyValues text."""
+    tokens, i = [], 0
+    while i < len(text):
+        if text[i] == '"':
+            j, value = i + 1, []
+            while j < len(text) and text[j] != '"':
+                if text[j] == '\\' and j + 1 < len(text):
+                    j += 1
+                value.append(text[j])
+                j += 1
+            if j >= len(text):
+                raise ValueError('unterminated string')
+            tokens.append(('str', i, j + 1, ''.join(value)))
+            i = j + 1
+        elif text[i] in '{}':
+            tokens.append((text[i], i, i + 1, text[i]))
+            i += 1
+        elif text.startswith('//', i):
+            end = text.find('\n', i)
+            i = len(text) if end < 0 else end
+        else:
+            i += 1
+    return tokens
+
+
+def vdf_block(tokens, i=0, close=None):
+    """Parse items into {'items': [(key, value_token | block)], 'close': offset of the closing brace}."""
+    items = []
+    while i < len(tokens):
+        kind, start, _, key = tokens[i]
+        if kind == '}':
+            return {'items': items, 'close': start}, i + 1
+        if kind != 'str' or i + 1 >= len(tokens):
+            raise ValueError('expected key')
+        if tokens[i + 1][0] == 'str':
+            items.append((key, tokens[i + 1]))
+            i += 2
+        elif tokens[i + 1][0] == '{':
+            child, i = vdf_block(tokens, i + 2)
+            items.append((key, child))
+        else:
+            raise ValueError('expected value')
+    if close is None:
+        raise ValueError('unterminated block')
+    return {'items': items, 'close': close}, i
+
+
+def vdf_quote(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def with_launch_options(text, value):
+    """Return text with SteamVR's LaunchOptions set to value (None removes ours), or None if the
+    user has custom options. Only the one line changes, so the rest of Steam's file stays byte-identical."""
+    block, _ = vdf_block(vdf_tokens(text), close=len(text))
+    for depth, key in enumerate(LAUNCH_PATH):
+        child = next((v for k, v in block['items'] if k.lower() == key.lower() and isinstance(v, dict)), None)
+        if child is None:
+            if value is None:
+                return text
+            # Insert the missing blocks before this block's closing brace, one level deeper.
+            at = text.rfind('\n', 0, block['close']) + 1
+            indent = '\t' * depth
+            lines = []
+            for level, missing in enumerate(LAUNCH_PATH[depth:]):
+                pad = indent + '\t' * level
+                lines += [f'{pad}{vdf_quote(missing)}\n', f'{pad}{{\n']
+            pad = indent + '\t' * (len(LAUNCH_PATH) - depth)
+            lines.append(f'{pad}"LaunchOptions"\t\t{vdf_quote(value)}\n')
+            lines += [f'{indent}{chr(9) * level}}}\n' for level in reversed(range(len(LAUNCH_PATH) - depth))]
+            return text[:at] + ''.join(lines) + text[at:]
+        block = child
+    current = next((v for k, v in block['items'] if k.lower() == 'launchoptions' and isinstance(v, tuple)), None)
+    ours = current is not None and current[3].replace('"', '').endswith(LAUNCH_SUFFIX)
+    if current is not None and current[3].strip() and not ours:
+        return None
+    if value is None:
+        if not ours:
+            return text
+        # Drop our whole line, keeping Steam's own entries.
+        start = text.rfind('\n', 0, current[1]) + 1
+        end = text.find('\n', current[2])
+        return text[:start] + text[end + 1 if end >= 0 else len(text):]
+    if current is not None:
+        return text[:current[1]] + vdf_quote(value) + text[current[2]:]
+    at = text.rfind('\n', 0, block['close']) + 1
+    pad = '\t' * len(LAUNCH_PATH)
+    return text[:at] + f'{pad}"LaunchOptions"\t\t{vdf_quote(value)}\n' + text[at:]
+
+
+def user_process(name):
     # Only comm and ownership, never process arguments or environments.
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            if entry.stat().st_uid == os.getuid() and (entry / 'comm').read_text().strip() == 'vrserver':
+            if entry.stat().st_uid == os.getuid() and (entry / 'comm').read_text().strip() == name:
                 return int(entry.name)
         except (OSError, ProcessLookupError):
             pass
     return None
+
+
+def host_launch(roots, runtime, uninstall=False):
+    """Set (or on uninstall remove) the SteamVR launch option that keeps SteamVR on the host.
+    Steam rewrites localconfig.vdf on exit, so it is edited only while Steam is closed.
+    Returns a notice for the journal when the option cannot be applied yet."""
+    command = str(runtime) + LAUNCH_SUFFIX
+    if any(c.isspace() for c in str(runtime)):
+        command = vdf_quote(str(runtime) + LAUNCH_SUFFIX[:-len(' %command%')]) + ' %command%'
+    configs = sorted({path.resolve() for root in roots for path in root.glob('userdata/*/config/localconfig.vdf')})
+    if user_process('steam'):
+        if uninstall:
+            # A leftover vrmonitor.sh option still starts SteamVR normally.
+            return None
+        pending = []
+        for config in configs:
+            try:
+                text = config.read_text()
+                if with_launch_options(text, None if uninstall else command) not in (text, None):
+                    pending.append(config)
+            except (OSError, ValueError):
+                pass
+        if pending:
+            return 'Restart Steam once so SteamVR starts with the Rift S driver.'
+        return None
+    notice = None
+    for config in configs:
+        try:
+            text = config.read_text()
+            updated = with_launch_options(text, None if uninstall else command)
+        except (OSError, ValueError):
+            continue
+        if updated is None:
+            if not uninstall:
+                notice = f'SteamVR has custom launch options. Add {command} to start it with the Rift S driver.'
+            continue
+        if updated == text:
+            continue
+        temporary = config.with_name(config.name + '.rifts-tmp')
+        temporary.write_text(updated)
+        os.chmod(temporary, config.stat().st_mode & 0o777)
+        os.replace(temporary, config)
+    return notice
 
 
 def launch_desktop():
@@ -156,14 +296,18 @@ def main():
     events = DirectoryEvents()
     last_error = None
     last_desktop_server = None
+    last_notice = None
     with (state / 'registration.lock').open('w') as lock:
         while True:
             with_lock = False
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 with_lock = True
-                done, roots, libraries = register(home, registry_path, args.action == 'uninstall')
+                done, roots, libraries, notice = register(home, registry_path, args.action == 'uninstall')
                 last_error = None
+                if notice and notice != last_notice:
+                    print(notice, file=sys.stderr, flush=True)
+                last_notice = notice
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 if args.action != 'watch':
                     raise SystemExit(str(error))
@@ -176,7 +320,7 @@ def main():
                 if with_lock:
                     fcntl.flock(lock, fcntl.LOCK_UN)
             if done and DESKTOP.is_file():
-                server = desktop_server_pid()
+                server = user_process('vrserver')
                 if args.action == 'uninstall':
                     if server:
                         subprocess.run([str(DESKTOP), '--unregister'], stdout=subprocess.DEVNULL,
@@ -191,7 +335,9 @@ def main():
                 return
             directories = [config / 'openvr', home / '.local/share/Steam', home / '.steam']
             for root in roots:
-                directories.extend([root, root / 'steamapps'])
+                # Steam writes localconfig.vdf on exit; that is when the launch option can be set.
+                directories.extend([root, root / 'steamapps', root / 'userdata'])
+                directories.extend(root.glob('userdata/*/config'))
             for library in libraries:
                 runtime = library / 'steamapps/common/SteamVR'
                 directories.extend([library, library / 'steamapps', library / 'steamapps/common',

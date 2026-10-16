@@ -91,7 +91,7 @@ EOF
 sudo udevadm control --reload-rules
 ```
 
-The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
+The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. The same service sets SteamVR's launch option to `vrmonitor.sh %command%`, because Steam otherwise starts SteamVR in the Steam Linux Runtime container, where the driver is not visible. If SteamVR already has custom launch options, they are left alone and the service logs the command to add. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
 
 Build and install Settings:
 
@@ -105,7 +105,7 @@ pnpm tauri build --no-bundle -- --locked
 ## First run
 
 1. Connect USB and DisplayPort. Reconnect the headset after installation to apply USB access rules.
-2. Open Steam and click SteamVR in the library.
+2. Open Steam and click SteamVR in the library. If Steam was running during the install, restart Steam once first.
 3. Put on the headset and complete Room Setup. Set the floor and draw the boundary for your physical play area.
 4. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
 5. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.

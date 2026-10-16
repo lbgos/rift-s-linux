@@ -1,7 +1,7 @@
 post_install() {
   /usr/lib/rifts-session-install || return 1
   udevadm control --reload-rules || true
-  echo 'Reconnect the Rift S, then open Steam and start SteamVR.'
+  echo 'Reconnect the Rift S. If Steam is running, restart it once, then start SteamVR.'
   echo 'Driver registration runs automatically in desktop user sessions.'
 }
 

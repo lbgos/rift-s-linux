@@ -257,3 +257,12 @@ if(XRT_BUILD_DRIVER_RIFT_S AND XRT_MODULE_CONSTELLATION_TRACKING)
 	target_link_libraries(tests_rift_s_controller_capture PRIVATE xrt-external-catch2 drv_rift_s aux_math aux_tracking aux_util_sink)
 	add_test(NAME tests_rift_s_controller_capture COMMAND tests_rift_s_controller_capture)
 endif()
+
+# rifts-setup edits Steam's own config; cover its KeyValues editing.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	find_package(Python3 COMPONENTS Interpreter)
+	if(Python3_Interpreter_FOUND)
+		add_test(NAME rifts_setup COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/rifts_setup_test.py
+		                                  ${PROJECT_BINARY_DIR}/rifts-setup)
+	endif()
+endif()
