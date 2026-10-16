@@ -228,6 +228,13 @@ TEST_CASE("Native session origin has no geometry and preserves the saved room")
     CHECK(cJSON_GetObjectItemCaseSensitive(origin, "collision_bounds") == nullptr);
     REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
     CHECK(read_file(fixture.path) == bytes);
+    // A Quick Calibrate offset from an earlier session must not survive the re-based origin.
+    fixture.write(R"({"jsonid":"chaperone_info","version":5,"universes":[)" + saved +
+                  R"(,{"universeID":"3","standing":{"translation":[0,-1.6,0],"yaw":0.3}}]})");
+    REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
+    auto calibrated = read_file(fixture.path);
+    CHECK(calibrated.find(saved) != std::string::npos);
+    CHECK(calibrated == bytes);
     fixture.write("broken json");
     CHECK_FALSE(rift_s_prepare_session_origin(fixture.path.string()));
     CHECK(read_file(fixture.path) == "broken json");

@@ -370,6 +370,14 @@ public:
 };
 
 
+static bool same_transform(const vr::HmdMatrix34_t &a, const vr::HmdMatrix34_t &b)
+{
+	for (int row = 0; row < 3; ++row)
+		for (int column = 0; column < 4; ++column)
+			if (std::fabs(a.m[row][column] - b.m[row][column]) > 1e-4f) return false;
+	return true;
+}
+
 struct Snapshot
 {
 	std::string file;
@@ -387,11 +395,14 @@ static std::optional<Snapshot> snapshot(vr::IVRChaperoneSetup &setup, const fs::
 	return saved;
 }
 
-static bool restore(vr::IVRChaperoneSetup &setup, const fs::path &path, const Snapshot &saved)
+// The unbounded Rift S session universe has no perimeter, which CommitWorkingCopy rejects;
+// require_commit=false restores it from the file alone.
+static bool restore(vr::IVRChaperoneSetup &setup, const fs::path &path, const Snapshot &saved, bool require_commit = true)
 {
 	setup.RevertWorkingCopy();
-	if (!setup.ImportFromBufferToWorking(saved.exported.data(), 0) ||
-	    !setup.CommitWorkingCopy(vr::EChaperoneConfigFile_Live)) return false;
+	bool committed = setup.ImportFromBufferToWorking(saved.exported.data(), 0) &&
+	                 setup.CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+	if (!committed && require_commit) return false;
 	// Commit updates the server's live calibration. Restore the complete file too,
 	// including other universes and formatting that OpenVR's export does not retain.
 	auto temporary = path;
@@ -528,6 +539,21 @@ int main(int argc, char **argv)
 	auto next_notification_attempt = std::chrono::steady_clock::time_point{};
 	DisplayRecovery display_recovery(log_path);
 	auto next_display_check = std::chrono::steady_clock::time_point{};
+	// Quick Calibrate puts the floor where the headset is. Off-head the Rift S is in standby
+	// and holds its last head pose, so a calibration made then puts the floor at head height.
+	// Keep the last calibration made while worn and restore it over such a change.
+	const bool guard_standby_calibration = is_rift_s && setup_available;
+	std::optional<Snapshot> worn_calibration;
+	vr::HmdMatrix34_t worn_standing{};
+	uint64_t worn_universe = 0;
+	auto remember_calibration = [&] {
+		worn_calibration = snapshot(*setup, path);
+		worn_standing = system->GetRawZeroPoseToStandingAbsoluteTrackingPose();
+		worn_universe = system->GetUint64TrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
+		                                                       vr::Prop_CurrentUniverseId_Uint64);
+	};
+	if (guard_standby_calibration) remember_calibration();
+	bool calibration_changed = false;
 	while (running && !exited(parent)) {
 		// Test before consuming Accept's events, including a compositor that exits immediately before Accept.
 		bool recent_exit = std::chrono::steady_clock::now() <= exit_deadline;
@@ -599,9 +625,37 @@ int main(int argc, char **argv)
 			    event.eventType == vr::VREvent_RoomViewShown || event.eventType == vr::VREvent_RoomViewHidden ||
 			    event.eventType == vr::VREvent_DashboardActivated || event.eventType == vr::VREvent_DashboardDeactivated))
 				log_coordinates(*system, *setup, event.eventType, step);
+			if (guard_standby_calibration && (event.eventType == vr::VREvent_ChaperoneUniverseHasChanged ||
+			    event.eventType == vr::VREvent_ChaperoneDataHasChanged ||
+			    event.eventType == vr::VREvent_StandingZeroPoseReset))
+				calibration_changed = true;
 			if (event.eventType == vr::VREvent_Quit) { display_recovery.note_quit(); running = false; }
 		}
 		if (!running) break;
+		if (calibration_changed) {
+			calibration_changed = false;
+			bool standby = system->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd) ==
+			               vr::k_EDeviceActivityLevel_Standby;
+			auto universe = system->GetUint64TrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
+			                                                       vr::Prop_CurrentUniverseId_Uint64);
+			if (standby && step == 0 && worn_calibration && universe == worn_universe &&
+			    !same_transform(system->GetRawZeroPoseToStandingAbsoluteTrackingPose(), worn_standing)) {
+				// SteamVR applies the reload asynchronously; its change event re-checks the result.
+				bool ok = restore(*setup, path, *worn_calibration, false);
+				fprintf(stderr, "monado-roomsetup-guard: standby calibration reverted=%s\n", ok ? "ok" : "FAILED");
+				if (notifications && overlay != vr::k_ulOverlayHandleInvalid) {
+					vr::VRNotificationId id;
+					notifications->CreateNotification(overlay, 0, vr::EVRNotificationType_Transient,
+					    ok ? "Quick Calibrate needs a tracked headset, and the Rift S stops tracking off your head. "
+					         "The previous floor and boundary were kept. Use Room Setup to set the floor."
+					       : "Quick Calibrate ran while the headset was off. Restoring the previous calibration failed. "
+					         "Run Room Setup before playing.",
+					    vr::EVRNotificationStyle_Application, nullptr, &id);
+				}
+			} else if (!standby || universe != worn_universe) {
+				remember_calibration();
+			}
+		}
 		if (world_setup && world_cancel_deadline != std::chrono::steady_clock::time_point{} &&
 		    std::chrono::steady_clock::now() >= world_cancel_deadline) {
 			world_command("cancel");

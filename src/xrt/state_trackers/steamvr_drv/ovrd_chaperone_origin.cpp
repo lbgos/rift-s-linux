@@ -42,14 +42,22 @@ bool rift_s_prepare_session_origin(const std::string &path)
     auto universes = cJSON_GetObjectItemCaseSensitive(document.get(), "universes");
     if (!cJSON_IsString(id) || std::strcmp(id->valuestring, "chaperone_info") || !cJSON_IsArray(universes))
         return false;
-    const cJSON *entry;
+    Json origin(cJSON_Parse("{\"universeID\":\"3\",\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}"), cJSON_Delete);
+    if (!origin) return false;
+    // Each session re-bases tracking, so offsets saved in universe 3 (for example by
+    // Quick Calibrate) would misplace the floor next time. Reset it to the plain origin.
+    int index = 0;
+    cJSON *entry;
     cJSON_ArrayForEach(entry, universes) {
         auto universe = cJSON_GetObjectItemCaseSensitive(entry, "universeID");
-        if (cJSON_IsString(universe) && std::strcmp(universe->valuestring, "3") == 0)
-            return true;
+        if (cJSON_IsString(universe) && std::strcmp(universe->valuestring, "3") == 0) {
+            if (cJSON_Compare(entry, origin.get(), true)) return true;
+            if (!cJSON_ReplaceItemInArray(universes, index, origin.get())) return false;
+            break;
+        }
+        ++index;
     }
-    Json origin(cJSON_Parse("{\"universeID\":\"3\",\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}"), cJSON_Delete);
-    if (!origin || !cJSON_AddItemToArray(universes, origin.get())) return false;
+    if (!entry && !cJSON_AddItemToArray(universes, origin.get())) return false;
     origin.release();
     std::unique_ptr<char, decltype(&cJSON_free)> bytes(cJSON_PrintUnformatted(document.get()), cJSON_free);
     if (!bytes) return false;
