@@ -34,8 +34,8 @@ Close SteamVR and Settings before installing or upgrading.
 On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r28/rift-s-linux-bin-28-1-x86_64.pkg.tar.zst
-sudo pacman -U rift-s-linux-bin-28-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r29/rift-s-linux-bin-29-1-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-29-1-x86_64.pkg.tar.zst
 ```
 
 To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending. Other distributions build from source.
