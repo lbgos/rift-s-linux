@@ -1550,6 +1550,10 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.f);
 	vr::VRProperties()->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DisplayFrequency_Float, m_flDisplayFrequency);
 	vr::VRProperties()->SetFloatProperty( m_ulPropertyContainer, vr::Prop_SecondsFromVsyncToPhotons_Float, m_flSecondsFromVsyncToPhotons);
+	// SteamVR's default steamvr/preferredRefreshRate is 90: the compositor asks for 90 Hz, finds only the Rift S
+	// 80 Hz mode and paces frames for the wrong rate (periodic timed-out frames). The Rift S has one mode.
+	if (strcmp(m_xdev->str, "Oculus Rift S") == 0)
+		vr::VRSettings()->SetFloat(vr::k_pch_SteamVR_Section, "preferredRefreshRate", m_flDisplayFrequency);
 
 	for (uint32_t i = 0; i < m_xdev->input_count; i++) {
 		if (m_xdev->inputs[i].name == XRT_INPUT_GENERIC_HEAD_DETECT)
