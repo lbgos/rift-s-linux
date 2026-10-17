@@ -27,6 +27,13 @@ main{flex:1;min-height:0;padding:1.5rem 2rem;display:flex}
 
 h2{margin:0 0 .75rem;font-size:.8125rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;line-height:2.25rem;display:flex;align-items:center;justify-content:space-between}
 .sec+.sec{margin-top:1.75rem}
+.pairing p{font-size:.8125rem;margin:0 0 .75rem}
+.pairing-controls,.pairing-candidate{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.pairing-controls label{display:flex;align-items:center;gap:.5rem;font-size:.8125rem}
+.pairing select{background:#000;border:1px solid var(--line);padding:.375rem}
+.pairing-candidate{justify-content:space-between;margin-top:.5rem}
+.pairing .pairing-note{margin:.5rem 0 0;color:var(--mut)}
+#headset>.col:last-child{overflow-y:auto}
 
 /* controls */
 .btn{height:2.25rem;padding:0 1rem;border:0;border-radius:3px;background:var(--ctl);font-weight:600;font-size:.9rem;cursor:pointer;display:inline-flex;align-items:center;gap:.5rem;white-space:nowrap}

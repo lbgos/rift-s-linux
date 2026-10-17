@@ -79,6 +79,53 @@ function KeyValues({ rows }: { rows: [string, string][] }) {
 
 interface PreviewStatus { presented: number; width: number; height: number; error: string | null }
 
+interface PairingStatus { stage: string; message: string; candidates: { id: string }[]; hand?: 'left' | 'right' }
+function ControllerPairing() {
+  const [hand, setHand] = useState<'left' | 'right'>('left');
+  const [status, setStatus] = useState<PairingStatus>({ stage: '', message: '', candidates: [] });
+  const [error, setError] = useState('');
+  const [pollError, setPollError] = useState('');
+  const [pending, setPending] = useState(false);
+  const active = ['searching', 'ready', 'pairing'].includes(status.stage);
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const next = await invoke<PairingStatus>('controller_pairing_status');
+        if (!cancelled) {
+          setStatus(next);
+          if (['searching', 'ready', 'pairing'].includes(next.stage) && next.hand) setHand(next.hand);
+          setPollError('');
+        }
+      } catch (failure) { if (!cancelled) setPollError(String(failure)); }
+      if (!cancelled) timer = setTimeout(poll, 500);
+    }
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
+  async function command(name: string, args?: Record<string, string>) {
+    setPending(true); setError('');
+    try {
+      await invoke(name, args);
+      setStatus(await invoke<PairingStatus>('controller_pairing_status'));
+    } catch (failure) { setError(String(failure)); }
+    finally { setPending(false); }
+  }
+  return <div className="sec pairing">
+    <h2>Pair controller</h2>
+    <p>Close SteamVR. Put a battery in the controller, then hold {hand === 'left' ? 'Menu + Y' : 'Oculus + B'} until its light flashes. Remove the old controller's battery when replacing it.</p>
+    <div className="pairing-controls">
+      <label>Hand <select aria-label="Controller hand" value={hand} disabled={active || pending} onChange={event => setHand(event.target.value as 'left' | 'right')}><option value="left">Left</option><option value="right">Right</option></select></label>
+      <button className="btn" disabled={active || pending} onClick={() => void command('controller_pairing_start', { hand })}>Find controller</button>
+      {active && status.stage !== 'pairing' && <button className="btn" disabled={pending} onClick={() => void command('controller_pairing_cancel')}>Cancel</button>}
+    </div>
+    {status.stage === 'ready' && status.candidates.map(candidate => <div className="pairing-candidate" key={candidate.id}><code>{candidate.id}</code><button className="btn sm" disabled={pending} onClick={() => void command('controller_pairing_select', { id: candidate.id })}>Pair {hand} controller</button></div>)}
+    <output className="fb" role="status">{error || pollError || status.message}</output>
+    <p className="pairing-note">Existing pairings stay saved. Firmware is never updated.</p>
+  </div>;
+}
+
 // The headset view is drawn natively: a Wayland subsurface owned by the Rust
 // side covers the preview box and receives GPU frames at the headset refresh
 // rate. This component only reports where the box is and shows status text
@@ -234,6 +281,7 @@ function App() {
               return <div key={name}><b>{name}</b><span>{device?.tracking ?? missing}</span>{i === 0 ? <span className="r">{device?.tracking ? 'Wired' : missing}</span> : <span className="bat">{battery != null && <i style={{ '--v': `${battery * 100}%` } as React.CSSProperties}/>} {format(battery == null ? null : battery * 100, '%')}</span>}</div>;
             })}
           </div></div>
+          <ControllerPairing/>
           <div className="sec"><h2>Cameras</h2><div className="t cam">
             <div className="h"><span>Position</span><span>State</span><span className="r">Rate</span></div>
             {['Front left', 'Front right', 'Top', 'Left', 'Right'].map((name, i) => <div key={name}><b>{name}</b><span>{i < 2 && data.cameraExport ? data.cameraActive ? 'Active' : 'No frames' : missing}</span><span className="r">{format(i < 2 ? data.cameraRate : null, ' Hz', 1)}</span></div>)}

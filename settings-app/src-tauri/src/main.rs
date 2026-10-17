@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod pairing;
+mod pairing_protocol;
+
 use chrono::{DateTime, Local};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -856,6 +859,10 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            pairing::controller_pairing_status,
+            pairing::controller_pairing_start,
+            pairing::controller_pairing_select,
+            pairing::controller_pairing_cancel,
             snapshot,
             preview_layout,
             preview_status,
@@ -869,6 +876,7 @@ fn main() {
         .expect("Unable to start Rift S settings")
         .run(|_, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                pairing::shutdown();
                 if let Ok(_lock) = VR.lock() {
                     unsafe { rifts_shutdown() };
                 }
