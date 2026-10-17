@@ -78,3 +78,7 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now "$service"
 echo 'rift-s-linux installed. Reconnect the Rift S, then start SteamVR from Steam.'
+if ldd "$prefix/bin/rifts-settings" 2>/dev/null | grep -q 'not found'; then
+	echo 'The Settings app needs WebKitGTK 4.1 and glibc 2.35 or newer'
+	echo '(Debian/Ubuntu: libwebkit2gtk-4.1-0, Fedora: webkit2gtk4.1, openSUSE: libwebkit2gtk-4_1-0).'
+fi

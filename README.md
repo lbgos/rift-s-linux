@@ -15,7 +15,7 @@ Free and open source, built on Monado and Basalt. Steam and SteamVR are installe
 - In-headset Room Setup with floor calibration, a persistent boundary and saved-room recognition.
 - A stable dashboard and a held position with IMU rotation when headset tracking is lost.
 - Headset and both Touch controller tracking, with controller haptics.
-- Rift S Settings for device state, software IPD, recentering and Room Setup, with an 80 fps zero-copy headset preview and fullscreen. The preview drops to 1 fps in standby.
+- Rift S Settings for device state, controller pairing, software IPD, recentering and Room Setup, with an 80 fps zero-copy headset preview and fullscreen. The preview drops to 1 fps in standby.
 - An in-headset Desktop overlay with mouse, scrolling and keyboard input on KDE Plasma Wayland.
 
 ## Requirements
@@ -34,11 +34,21 @@ Close SteamVR and Settings before installing or upgrading.
 On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r29/rift-s-linux-bin-29-1-x86_64.pkg.tar.zst
-sudo pacman -U rift-s-linux-bin-29-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r30/rift-s-linux-bin-30-1-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-30-1-x86_64.pkg.tar.zst
 ```
 
-To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending. Other distributions build from source.
+To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending.
+
+On other distributions, install the universal build into your home directory. It needs no SteamVR launch option; the udev rule asks for your password once. Settings needs glibc 2.35 or newer and WebKitGTK 4.1 (Debian/Ubuntu `libwebkit2gtk-4.1-0`, Fedora `webkit2gtk4.1`).
+
+```sh
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r30/rift-s-linux-r30-x86_64.tar.xz
+tar -xf rift-s-linux-r30-x86_64.tar.xz
+./rift-s-linux-r30-x86_64/install.sh
+```
+
+`install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built.
 
 ## Build from source
 
@@ -110,6 +120,8 @@ pnpm tauri build --no-bundle -- --locked
 4. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
 5. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.
 6. Open the dashboard's Desktop tab to use the KDE desktop inside the headset.
+
+To pair a new or replacement Touch controller, close SteamVR and use Pair controller in Settings. Hold Menu + Y (left) or Oculus + B (right) until the controller light flashes, then select it.
 
 ## Known issues
 
