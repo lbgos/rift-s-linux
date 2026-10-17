@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -35,6 +36,9 @@
 
 #ifndef RIFTS_DESKTOP_MANIFEST
 #define RIFTS_DESKTOP_MANIFEST "/usr/share/rifts-desktop/rifts-desktop.vrmanifest"
+#endif
+#ifndef RIFTS_DESKTOP_MANIFEST_FROM_BIN
+#define RIFTS_DESKTOP_MANIFEST_FROM_BIN "../share/rifts-desktop/rifts-desktop.vrmanifest"
 #endif
 
 namespace rd {
@@ -193,11 +197,25 @@ write_ppm(const std::string &path, const std::vector<uint8_t> &bgra, uint32_t w,
 	return fclose(f) == 0;
 }
 
+// The installed manifest, next to this binary when the install was moved to another prefix.
+const std::string &
+manifest_path()
+{
+	static const std::string path = [] {
+		std::error_code error;
+		auto exe = std::filesystem::read_symlink("/proc/self/exe", error);
+		auto local = (exe.parent_path() / RIFTS_DESKTOP_MANIFEST_FROM_BIN).lexically_normal();
+		return !error && std::filesystem::is_regular_file(local, error) ? local.string()
+		                                                                 : std::string(RIFTS_DESKTOP_MANIFEST);
+	}();
+	return path;
+}
+
 bool
 ensure_registered(const Vr &vr)
 {
 	bool installed = vr.apps->IsApplicationInstalled(kAppKey);
-	auto result = vr.apps->AddApplicationManifest(RIFTS_DESKTOP_MANIFEST, false);
+	auto result = vr.apps->AddApplicationManifest(manifest_path().c_str(), false);
 	if (result != vr::VRApplicationError_None) {
 		fprintf(stderr, "rifts-desktop: manifest registration: %s\n", vr.apps->GetApplicationsErrorNameFromEnum(result));
 		return false;
@@ -223,7 +241,7 @@ run_registration(bool remove)
 	// Not LaunchDashboardOverlay: SteamVR identifies this process as the app by its path,
 	// so the overlay would count as running. Callers start it themselves.
 	if (remove) {
-		vr.apps->RemoveApplicationManifest(RIFTS_DESKTOP_MANIFEST);
+		vr.apps->RemoveApplicationManifest(manifest_path().c_str());
 	} else {
 		if (!ensure_registered(vr)) { vr_disconnect(); return 1; }
 	}

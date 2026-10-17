@@ -53,6 +53,8 @@ foreach(_xml ${_protocols})
 endforeach()
 
 set(RIFTS_DESKTOP_MANIFEST "${CMAKE_INSTALL_FULL_DATADIR}/rifts-desktop/rifts-desktop.vrmanifest")
+# Relocated installs find the manifest relative to the binary.
+file(RELATIVE_PATH RIFTS_DESKTOP_MANIFEST_FROM_BIN "${CMAKE_INSTALL_FULL_BINDIR}" "${RIFTS_DESKTOP_MANIFEST}")
 add_executable(rifts-desktop
 	src/capture.cpp
 	src/gpu.cpp
@@ -65,7 +67,8 @@ set_target_properties(rifts-desktop PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQU
 target_include_directories(rifts-desktop PRIVATE
 	"${CMAKE_CURRENT_BINARY_DIR}"
 	"${CMAKE_CURRENT_SOURCE_DIR}/../src/external/openvr_includes")
-target_compile_definitions(rifts-desktop PRIVATE RIFTS_DESKTOP_MANIFEST="${RIFTS_DESKTOP_MANIFEST}")
+target_compile_definitions(rifts-desktop PRIVATE RIFTS_DESKTOP_MANIFEST="${RIFTS_DESKTOP_MANIFEST}"
+                                                  RIFTS_DESKTOP_MANIFEST_FROM_BIN="${RIFTS_DESKTOP_MANIFEST_FROM_BIN}")
 target_link_libraries(rifts-desktop PRIVATE PkgConfig::RIFTS_DESKTOP_DEPS Vulkan::Vulkan ${CMAKE_DL_LIBS})
 
 configure_file(rifts-desktop.desktop.in rifts-desktop.desktop @ONLY)

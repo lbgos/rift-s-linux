@@ -289,7 +289,7 @@ private:
 		auto *self = static_cast<KWinDesktop *>(data);
 		if (strcmp(interface, wl_output_interface.name) == 0 && version >= 4) {
 			auto o = std::make_unique<Output>(Output{self, id});
-			o->output = static_cast<wl_output *>(wl_registry_bind(registry, id, &wl_output_interface, 4));
+			o->output = static_cast<wl_output *>(wl_registry_bind(registry, id, &wl_output_interface, kOutputVersion));
 			wl_output_add_listener(o->output, &kOutput, o.get());
 			self->add_xdg(o.get());
 			self->outputs_.push_back(std::move(o));
@@ -425,14 +425,26 @@ private:
 	    .mode = [](void *, wl_output *, uint32_t, int32_t, int32_t, int32_t) {},
 	    .done = output_done,
 	    .scale = [](void *, wl_output *, int32_t) {},
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
 	    .name = output_name,
 	    .description = [](void *, wl_output *, const char *) {},
+#endif
 	};
+	// Older libwayland headers (the Steam Runtime SDK) stop at version 3; xdg-output
+	// then supplies the same connector name.
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+	static constexpr uint32_t kOutputVersion = 4;
+#else
+	static constexpr uint32_t kOutputVersion = 3;
+#endif
 	static constexpr zxdg_output_v1_listener kXdgOutput = {
 	    .logical_position = xdg_position,
 	    .logical_size = xdg_size,
 	    .done = [](void *, zxdg_output_v1 *) {},
-	    .name = [](void *, zxdg_output_v1 *, const char *) {},
+	    .name = [](void *data, zxdg_output_v1 *, const char *name) {
+		    auto *o = static_cast<Output *>(data);
+		    if (o->name.empty()) o->name = name;
+	    },
 	    .description = [](void *, zxdg_output_v1 *, const char *) {},
 	};
 	static constexpr kde_output_order_v1_listener kOrder = {order_output, order_done};

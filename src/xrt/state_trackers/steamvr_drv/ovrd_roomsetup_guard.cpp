@@ -3,6 +3,7 @@
 // Keep the pre-setup calibration if SteamVR's compositor dies during native drawing.
 #include "openvr.h"
 #include "ovrd_roomsetup_floor.hpp"
+#include "ovrd_spawn_close.hpp"
 #include "../../drivers/rift_s/rift_s_world_control.h"
 #include <cjson/cJSON.h>
 #include <chrono>
@@ -357,7 +358,7 @@ public:
 		posix_spawn_file_actions_adddup2(&actions, server_child, 3);
 		posix_spawn_file_actions_adddup2(&actions, monitor_child, 4);
 		posix_spawn_file_actions_adddup2(&actions, compositor_child, 5);
-		posix_spawn_file_actions_addclosefrom_np(&actions, 6);
+		roomsetup_spawn_close_from(&actions, 6);
 		int spawned = posix_spawn(&requester, executable, &actions, nullptr, arguments, environ);
 		posix_spawn_file_actions_destroy(&actions);
 		close(server_child); close(monitor_child); close(compositor_child);
@@ -460,7 +461,10 @@ static void log_coordinates(vr::IVRSystem &system, vr::IVRChaperoneSetup &setup,
 
 int main(int argc, char **argv)
 {
-	if (argc == 2 && strcmp(argv[1], "--recover-display") == 0) return recover_display();
+	bool recover = argc == 2 && strcmp(argv[1], "--recover-display") == 0;
+	// Spawners pass descriptors 3 (guard) or 3-5 (display recovery); drop the rest.
+	roomsetup_close_inherited(recover ? 6 : 4);
+	if (recover) return recover_display();
 	if (argc != 4) return 1;
 	int parent = static_cast<int>(syscall(SYS_pidfd_open, std::atoi(argv[2]), 0));
 	int ready = std::atoi(argv[3]);

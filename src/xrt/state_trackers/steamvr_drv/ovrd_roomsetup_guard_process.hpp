@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSL-1.0
 #pragma once
 #ifdef __linux__
+#include "ovrd_spawn_close.hpp"
+
 #include <dlfcn.h>
 #include <cerrno>
 #include <cstdio>
@@ -64,7 +66,7 @@ public:
 		posix_spawn_file_actions_adddup2(&actions, descriptors[1], child_acknowledgement);
 		// SteamVR also owns IPC descriptors without CLOEXEC. The guard must not
 		// retain those connections or shared buffers after a compositor exits.
-		posix_spawn_file_actions_addclosefrom_np(&actions, child_acknowledgement + 1);
+		roomsetup_spawn_close_from(&actions, child_acknowledgement + 1);
 		char destination[] = "3";
 		char *arguments[] = {executable.data(), library.data(), parent.data(), destination, nullptr};
 		int error = posix_spawn(&pid, executable.c_str(), &actions, nullptr, arguments, environ);

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run a command inside the Steam Runtime sniper SDK sysroot, with ~/src/universal/work at /work.
+here=$(dirname "$(readlink -f "$0")")
+exec bwrap --bind "$here/sysroot" / --dev /dev --proc /proc --tmpfs /tmp \
+  --bind "$here/work" /work --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --setenv HOME /work/home --setenv PATH /usr/local/bin:/usr/bin:/bin --chdir /work "$@"

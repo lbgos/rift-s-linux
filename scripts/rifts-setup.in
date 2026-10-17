@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import subprocess
 import sys
 import time
@@ -16,8 +17,9 @@ DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
 DESKTOP = Path('@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop')
 STEAMVR_APP = '250820'
 # Steam starts SteamVR inside the Steam Linux Runtime container, which cannot see the
-# host's /usr: the driver and its libraries would be missing. vrmonitor.sh starts
-# SteamVR on the host instead.
+# host's /usr: a system-wide driver and its libraries would be missing. vrmonitor.sh
+# starts SteamVR on the host instead. The universal build installs into the home
+# directory, which the container shares, and needs no launch option.
 LAUNCH_SUFFIX = '/bin/vrmonitor.sh %command%'
 LAUNCH_PATH = ['UserLocalConfigStore', 'Software', 'Valve', 'Steam', 'apps', STEAMVR_APP]
 
@@ -91,7 +93,8 @@ def register(home, registry_path, uninstall=False):
         if not registry.get('log'):
             pathreg(tool, 'setlog', str(root / 'logs'))
         pathreg(tool, 'adddriver', str(DRIVER))
-    return True, roots, libraries, host_launch(roots, runtime)
+    # A home install drops the option a former system-wide install may have set.
+    return True, roots, libraries, host_launch(roots, runtime, uninstall=home in DRIVER.parents)
 
 
 def vdf_tokens(text):
@@ -244,8 +247,13 @@ def host_launch(roots, runtime, uninstall=False):
 def launch_desktop():
     # The client registers its manifest and preserves the user's autolaunch choice.
     # It also locks out duplicates when SteamVR has already started it.
-    subprocess.Popen([str(DESKTOP), '--autolaunch'], stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    command = [str(DESKTOP), '--autolaunch']
+    # Run it in its own unit: this service's memory limit only covers the watcher.
+    if shutil.which('systemd-run'):
+        subprocess.run(['systemd-run', '--user', '--quiet', '--collect', '--', *command],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    else:
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 class DirectoryEvents:
