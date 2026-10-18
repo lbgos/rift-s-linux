@@ -12,6 +12,7 @@
 #include "util/u_pretty_print.h"
 
 #include <pthread.h>
+#include <sys/resource.h>
 #include <assert.h>
 #include <unistd.h>
 #include <sched.h>
@@ -102,6 +103,17 @@ u_linux_try_to_set_realtime_priority_on_thread(enum u_logging_level log_level, c
 	if (name == NULL) {
 		get_name(str, ARRAY_SIZE(str));
 		name = str;
+	}
+
+	/*
+	 * With a zero RLIMIT_RTTIME the kernel kills the whole process at the first
+	 * scheduler tick that lands while a realtime thread runs, even one that sleeps
+	 * every iteration. SteamVR's vrserver runs drivers with this limit.
+	 */
+	struct rlimit rttime;
+	if (getrlimit(RLIMIT_RTTIME, &rttime) == 0 && (rttime.rlim_cur == 0 || rttime.rlim_max == 0)) {
+		LOG_W("Keeping normal priority for thread '%s': RLIMIT_RTTIME is 0", name);
+		return;
 	}
 
 	if (log_level <= U_LOGGING_DEBUG) {
