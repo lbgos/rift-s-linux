@@ -240,6 +240,38 @@ TEST_CASE("Native session origin has no geometry and preserves the saved room")
     CHECK(read_file(fixture.path) == "broken json");
 }
 
+TEST_CASE("First Room Setup switches into a universe 2 with the session origin")
+{
+    LogFixture fixture;
+    // An earlier release left only the session universe; a fresh install has no file at all.
+    const std::string session = R"({"universeID":"3","seated":{"translation":[0,0,0],"yaw":0},"standing":{"translation":[0,0,0],"yaw":0}})";
+    for (bool existing : {true, false}) {
+        if (existing) fixture.write(R"({"jsonid":"chaperone_info","version":5,"universes":[)" + session + "]}");
+        else fs::remove(fixture.path);
+        REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
+        auto bytes = read_file(fixture.path);
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> document(cJSON_Parse(bytes.c_str()), cJSON_Delete);
+        auto universes = cJSON_GetObjectItemCaseSensitive(document.get(), "universes");
+        REQUIRE(cJSON_GetArraySize(universes) == 2);
+        cJSON *room = nullptr, *origin = nullptr, *entry;
+        cJSON_ArrayForEach(entry, universes) {
+            auto id = cJSON_GetObjectItemCaseSensitive(entry, "universeID")->valuestring;
+            (std::string(id) == "2" ? room : origin) = entry;
+        }
+        REQUIRE(room);
+        REQUIRE(origin);
+        // Same frame on both sides of the switch, and no room geometry to bind a world map to.
+        CHECK(cJSON_Compare(cJSON_GetObjectItemCaseSensitive(room, "standing"),
+                            cJSON_GetObjectItemCaseSensitive(origin, "standing"), true));
+        CHECK(cJSON_Compare(cJSON_GetObjectItemCaseSensitive(room, "seated"),
+                            cJSON_GetObjectItemCaseSensitive(origin, "seated"), true));
+        CHECK(cJSON_GetObjectItemCaseSensitive(room, "play_area") == nullptr);
+        CHECK(cJSON_GetObjectItemCaseSensitive(room, "collision_bounds") == nullptr);
+        REQUIRE(rift_s_prepare_session_origin(fixture.path.string()));
+        CHECK(read_file(fixture.path) == bytes);
+    }
+}
+
 TEST_CASE("Display recovery requires one exact runtime process and the expected server PID")
 {
 	auto executable = fs::read_symlink("/proc/self/exe");

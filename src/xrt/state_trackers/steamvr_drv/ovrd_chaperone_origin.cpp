@@ -42,23 +42,42 @@ bool rift_s_prepare_session_origin(const std::string &path)
     auto universes = cJSON_GetObjectItemCaseSensitive(document.get(), "universes");
     if (!cJSON_IsString(id) || std::strcmp(id->valuestring, "chaperone_info") || !cJSON_IsArray(universes))
         return false;
-    Json origin(cJSON_Parse("{\"universeID\":\"3\",\"seated\":{\"translation\":[0,0,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}"), cJSON_Delete);
-    if (!origin) return false;
-    // Each session re-bases tracking, so offsets saved in universe 3 (for example by
-    // Quick Calibrate) would misplace the floor next time. Reset it to the plain origin.
-    int index = 0;
-    cJSON *entry;
+    auto plain = [](const char *id) {
+        return Json(cJSON_Parse((std::string("{\"universeID\":\"") + id +
+                                 "\",\"seated\":{\"translation\":[0,0,0],\"yaw\":0},"
+                                 "\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}").c_str()),
+                    cJSON_Delete);
+    };
+    cJSON *session = nullptr, *room = nullptr, *entry;
     cJSON_ArrayForEach(entry, universes) {
         auto universe = cJSON_GetObjectItemCaseSensitive(entry, "universeID");
-        if (cJSON_IsString(universe) && std::strcmp(universe->valuestring, "3") == 0) {
-            if (cJSON_Compare(entry, origin.get(), true)) return true;
-            if (!cJSON_ReplaceItemInArray(universes, index, origin.get())) return false;
-            break;
-        }
-        ++index;
+        if (!cJSON_IsString(universe)) continue;
+        if (std::strcmp(universe->valuestring, "3") == 0) session = entry;
+        if (std::strcmp(universe->valuestring, "2") == 0) room = entry;
     }
-    if (!entry && !cJSON_AddItemToArray(universes, origin.get())) return false;
-    origin.release();
+    bool changed = false;
+    // Each session re-bases tracking, so offsets saved in universe 3 (for example by
+    // Quick Calibrate) would misplace the floor next time. Reset it to the plain origin.
+    auto origin = plain("3");
+    if (!origin) return false;
+    if (!session || !cJSON_Compare(session, origin.get(), true)) {
+        if (session ? !cJSON_ReplaceItemViaPointer(universes, session, origin.get())
+                    : !cJSON_AddItemToArray(universes, origin.get()))
+            return false;
+        origin.release();
+        changed = true;
+    }
+    // Room Setup moves to universe 2 once tracking is in setup. Without an entry SteamVR has no
+    // calibration for the frame being set up ("Failed to update shared data"), and a first setup
+    // shows no floor and takes no strokes. Seed the same plain origin so the switch keeps the
+    // frame; Accept replaces it with the drawn room. A saved room is never touched.
+    if (!room) {
+        auto seed = plain("2");
+        if (!seed || !cJSON_AddItemToArray(universes, seed.get())) return false;
+        seed.release();
+        changed = true;
+    }
+    if (!changed) return true;
     std::unique_ptr<char, decltype(&cJSON_free)> bytes(cJSON_PrintUnformatted(document.get()), cJSON_free);
     if (!bytes) return false;
     std::string temporary = path + ".monado-XXXXXX";

@@ -92,8 +92,9 @@ public:
 		if (!transforms(standing, setup))
 			return false;
 		// An untrusted saved plane belongs to another tracking session. Offer this
-		// session's nominal floor instead (raw Y=0, where the unanchored universe
-		// puts it): without any result the native step shows no floor to adjust.
+		// session's nominal floor instead (raw Y=0, the plain origin of universe 3 and
+		// of a first-time universe 2): without any result the native step shows no
+		// floor to adjust.
 		const vr::HmdMatrix34_t session_origin{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 		auto y = saved_floor(saved_plane_trusted ? standing : session_origin, setup);
 		if (!y)
