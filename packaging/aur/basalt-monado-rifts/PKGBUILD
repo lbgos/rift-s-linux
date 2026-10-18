@@ -1,7 +1,7 @@
 # Maintainer: lbgos <285507185+lbgos@users.noreply.github.com>
 pkgname=basalt-monado-rifts
 pkgver=0.1.r544.gdf6e970
-pkgrel=1
+pkgrel=2
 pkgdesc='Basalt tracking library with Rift S lifecycle and worker defaults'
 arch=('x86_64')
 url='https://gitlab.freedesktop.org/mateosss/basalt'
@@ -20,9 +20,10 @@ source=('basalt::git+https://gitlab.freedesktop.org/mateosss/basalt.git#commit=d
         'cereal::git+https://github.com/USCiLab/cereal.git#commit=ebef1e929807629befafbb2918ea1a08c7194554'
         '0001-keep-imu-frequency-per-tracker.patch'
         '0002-limit-workers-with-driver-calibration.patch'
-        '0003-safe-recreation-and-realtime-worker-budget.patch')
+        '0003-safe-recreation-and-realtime-worker-budget.patch'
+        '0004-skip-unread-execution-stats.patch')
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
-            'a0bc2a766ad6ae5fdfa33cd80d45d12798d43efa4c34605ee6cf20bae157d18d' '607d53dadbd8ca5b0978d10378e631539bc8047ca0fce317b90d68a52f785a52' 'a434e76c66c129aa3a900ed151dd2dd9bc98b671451dda26855a438cff08b2ac')
+            'a0bc2a766ad6ae5fdfa33cd80d45d12798d43efa4c34605ee6cf20bae157d18d' '607d53dadbd8ca5b0978d10378e631539bc8047ca0fce317b90d68a52f785a52' 'a434e76c66c129aa3a900ed151dd2dd9bc98b671451dda26855a438cff08b2ac' '1f8848384b376addb471add3b9efea8c6effbfe7fe615c2beb3ad5ebdf432290')
 
 prepare() {
   cd basalt

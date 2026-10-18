@@ -1,7 +1,7 @@
 pkgbase = basalt-monado-rifts
 	pkgdesc = Basalt tracking library with Rift S lifecycle and worker defaults
 	pkgver = 0.1.r544.gdf6e970
-	pkgrel = 1
+	pkgrel = 2
 	url = https://gitlab.freedesktop.org/mateosss/basalt
 	arch = x86_64
 	license = BSD-2-Clause
@@ -35,6 +35,7 @@ pkgbase = basalt-monado-rifts
 	source = 0001-keep-imu-frequency-per-tracker.patch
 	source = 0002-limit-workers-with-driver-calibration.patch
 	source = 0003-safe-recreation-and-realtime-worker-budget.patch
+	source = 0004-skip-unread-execution-stats.patch
 	sha256sums = SKIP
 	sha256sums = SKIP
 	sha256sums = SKIP
@@ -45,5 +46,6 @@ pkgbase = basalt-monado-rifts
 	sha256sums = a0bc2a766ad6ae5fdfa33cd80d45d12798d43efa4c34605ee6cf20bae157d18d
 	sha256sums = 607d53dadbd8ca5b0978d10378e631539bc8047ca0fce317b90d68a52f785a52
 	sha256sums = a434e76c66c129aa3a900ed151dd2dd9bc98b671451dda26855a438cff08b2ac
+	sha256sums = 1f8848384b376addb471add3b9efea8c6effbfe7fe615c2beb3ad5ebdf432290
 
 pkgname = basalt-monado-rifts

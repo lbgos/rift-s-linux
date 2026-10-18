@@ -54,7 +54,7 @@ tar -xf rift-s-linux-r30-x86_64.tar.xz
 
 Install a C/C++ toolchain, CMake, Ninja, Eigen, TBB, fmt, OpenCV, Vulkan headers and loader, glslang, libusb, SDL2, cJSON, libcap, systemd and the X11, Wayland and DRM development libraries. The Desktop overlay also needs PipeWire development files, wayland-scanner, wayland-protocols and plasma-wayland-protocols. Settings needs Rust/Cargo, Node.js, pnpm, GTK3, WebKitGTK 4.1, shaderc's `glslc` and desktop-file-utils.
 
-Build Basalt at the supported revision, applying all three patches in order:
+Build Basalt at the supported revision, applying all four patches in order:
 
 ```sh
 git clone https://github.com/lbgos/rift-s-linux.git

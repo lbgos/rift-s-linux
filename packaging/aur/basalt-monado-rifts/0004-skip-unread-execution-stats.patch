@@ -1,0 +1,135 @@
+--- a/include/basalt/utils/time_utils.hpp
++++ b/include/basalt/utils/time_utils.hpp
+@@ -124,6 +124,9 @@ class ExecutionStats {
+     std::string format_;
+   };
+ 
++  //! Live trackers never read the history, so a disabled instance keeps no values.
++  bool enabled = true;
++
+   Meta& add(const std::string& name, double value);
+   Meta& add(const std::string& name, const Eigen::VectorXd& value);
+   Meta& add(const std::string& name, const Eigen::VectorXf& value);
+@@ -139,6 +142,7 @@ class ExecutionStats {
+  private:
+   std::unordered_map<std::string, Meta> stats_;
+   std::vector<std::string> order_;
++  Meta discarded_;  // returned by add() while disabled
+ };
+ 
+ }  // namespace basalt
+--- a/include/basalt/vi_estimator/sqrt_keypoint_vio.h
++++ b/include/basalt/vi_estimator/sqrt_keypoint_vio.h
+@@ -130,6 +130,7 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase, public SqrtBundleAdjus
+   bool show_uimat(UIMAT m) const;
+ 
+   void debug_finalize() override;
++  void disable_stats() override { stats_all_.enabled = stats_sums_.enabled = false; }
+ 
+   void logMargNullspace();
+   Eigen::VectorXd checkMargNullspace() const;
+--- a/include/basalt/vi_estimator/sqrt_keypoint_vo.h
++++ b/include/basalt/vi_estimator/sqrt_keypoint_vo.h
+@@ -176,6 +176,7 @@ class SqrtKeypointVoEstimator : public VioEstimatorBase, public SqrtBundleAdjust
+   Sophus::SE3d getT_w_i_init() override { return T_w_i_init.template cast<double>(); }
+ 
+   void debug_finalize() override;
++  void disable_stats() override { stats_all_.enabled = stats_sums_.enabled = false; }
+ 
+   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+ 
+--- a/include/basalt/vi_estimator/vio_estimator.h
++++ b/include/basalt/vi_estimator/vio_estimator.h
+@@ -136,6 +136,9 @@ class VioEstimatorBase {
+ 
+   virtual inline void debug_finalize() {}
+ 
++  //! Stop keeping the per-frame timing stats that only debug_finalize() reads.
++  virtual void disable_stats() {}
++
+   virtual Sophus::SE3d getT_w_i_init() = 0;
+ 
+   // Legacy functions. Should not be used in the new code.
+--- a/src/utils/time_utils.cpp
++++ b/src/utils/time_utils.cpp
+@@ -31,6 +31,7 @@ Scalar variance(const Eigen::Matrix<Scalar, N, 1>& vec) {
+ }
+ 
+ ExecutionStats::Meta& ExecutionStats::add(const std::string& name, double value) {
++  if (!enabled) return discarded_;
+   auto [it, new_item] = stats_.try_emplace(name);
+   if (new_item) {
+     order_.push_back(name);
+@@ -41,6 +42,7 @@ ExecutionStats::Meta& ExecutionStats::add(const std::string& name, double value)
+ }
+ 
+ ExecutionStats::Meta& ExecutionStats::add(const std::string& name, const Eigen::VectorXd& value) {
++  if (!enabled) return discarded_;
+   auto [it, new_item] = stats_.try_emplace(name);
+   if (new_item) {
+     order_.push_back(name);
+@@ -56,6 +58,7 @@ ExecutionStats::Meta& ExecutionStats::add(const std::string& name, const Eigen::
+ }
+ 
+ void ExecutionStats::merge_all(const ExecutionStats& other) {
++  if (!enabled) return;
+   for (const auto& name : other.order_) {
+     const auto& meta = other.stats_.at(name);
+     std::visit(
+@@ -80,6 +83,7 @@ overload(Ts...) -> overload<Ts...>;
+ }  // namespace
+ 
+ void ExecutionStats::merge_sums(const ExecutionStats& other) {
++  if (!enabled) return;
+   for (const auto& name : other.order_) {
+     const auto& meta = other.stats_.at(name);
+     std::visit(overload{[&](const std::vector<double>& data) {
+--- a/src/vi_estimator/sqrt_keypoint_vio.cpp
++++ b/src/vi_estimator/sqrt_keypoint_vio.cpp
+@@ -1224,6 +1224,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::optimize() {
+ 
+     // timing
+     ExecutionStats stats;
++    stats.enabled = stats_all_.enabled;
+     Timer timer_total;
+     Timer timer_iteration;
+ 
+@@ -1544,7 +1545,7 @@ bool SqrtKeypointVioEstimator<Scalar_>::optimize() {
+         double cumulative_time = timer_total.elapsed();
+ 
+         stats.add("iteration", iteration_time).format("ms");
+-        {
++        if (stats.enabled) {
+           basalt::MemoryInfo mi;
+           if (get_memory_info(mi)) {
+             stats.add("resident_memory", mi.resident_memory);
+--- a/src/vi_estimator/sqrt_keypoint_vo.cpp
++++ b/src/vi_estimator/sqrt_keypoint_vo.cpp
+@@ -1108,6 +1108,7 @@ bool SqrtKeypointVoEstimator<Scalar_>::optimize() {
+ 
+   // timing
+   ExecutionStats stats;
++  stats.enabled = stats_all_.enabled;
+   Timer timer_total;
+   Timer timer_iteration;
+ 
+@@ -1395,7 +1396,7 @@ bool SqrtKeypointVoEstimator<Scalar_>::optimize() {
+       double cumulative_time = timer_total.elapsed();
+ 
+       stats.add("iteration", iteration_time).format("ms");
+-      {
++      if (stats.enabled) {
+         basalt::MemoryInfo mi;
+         if (get_memory_info(mi)) {
+           stats.add("resident_memory", mi.resident_memory);
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -398,6 +398,8 @@ struct Tracker::Implementation {
+     ASSERT_(image_data_queue != nullptr);
+ 
+     vio = VioEstimatorFactory::getVioEstimator(vio_config, calib, constants::g, true, use_double);
++    // Nothing reads these stats in a live session; they would grow for as long as it runs.
++    vio->disable_stats();
+     imu_data_queue = &vio->imu_data_queue;
+     ASSERT_(imu_data_queue != nullptr);
+ 
