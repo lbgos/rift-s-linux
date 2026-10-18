@@ -21,6 +21,8 @@
 #include <cmath>
 #include <algorithm>
 #include <fstream>
+#include <filesystem>
+#include <unistd.h>
 
 #include "math/m_api.h"
 #include "ovrd_log.hpp"
@@ -28,6 +30,7 @@
 #include "ovrd_display.hpp"
 #include "ovrd_camera.hpp"
 #include "ovrd_roomsetup_guard_process.hpp"
+#include "ovrd_realtime.hpp"
 #include "ovrd_world_universe.hpp"
 #include "ovrd_chaperone_origin.hpp"
 #include "../../drivers/rift_s/rift_s_world_control.h"
@@ -1948,6 +1951,23 @@ CServerDriver_Monado g_serverDriverMonado;
 
 #define NUM_XDEVS 16
 
+#ifdef __linux__
+static void
+warn_realtime_compositor()
+{
+	char server[4096];
+	ssize_t length = readlink("/proc/self/exe", server, sizeof(server) - 1);
+	if (length <= 0)
+		return;
+	server[length] = 0;
+	std::string launcher = (std::filesystem::path(server).parent_path() / "vrcompositor-launcher").string();
+	if (ovrd_realtime_compositor_killed(launcher.c_str()))
+		ovrd_log("WARNING: %s has CAP_SYS_NICE while vrserver's RLIMIT_RTTIME is 0. The kernel kills the "
+		         "compositor as soon as its realtime threads run. Remove it: sudo setcap -r %s\n",
+		         launcher.c_str(), launcher.c_str());
+}
+#endif
+
 vr::EVRInitError
 CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 {
@@ -1956,6 +1976,9 @@ CServerDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
 	ovrd_log_init(vr::VRDriverLog());
 
 	ovrd_log("Initializing Monado driver\n");
+#ifdef __linux__
+	warn_realtime_compositor();
+#endif
 	if (debug_get_bool_option_steamvr_bench()) {
 		vr::EVRSettingsError error = vr::VRSettingsError_None;
 		m_savedBenchPause = vr::VRSettings()->GetBool("power", "pauseCompositorOnStandby", &error);
