@@ -22,7 +22,7 @@ Free and open source, built on Monado and Basalt. Steam and SteamVR are installe
 
 - Oculus Rift S, its Touch controllers, USB 3 and DisplayPort.
 - An x86-64 Linux desktop with a systemd user session and local USB seat access.
-- Native Steam with SteamVR installed from the Steam library.
+- Native Steam with SteamVR installed from the Steam library. Flatpak and Snap Steam are not supported: Valve does not support SteamVR in them because they break DRM leasing and asynchronous reprojection.
 - A Vulkan-capable GPU and drivers supported by SteamVR's direct display mode. Current testing uses an NVIDIA RTX 3090.
 - The patched Basalt build. The Arch packages include it; an unpatched Basalt lacks the required reconnect support.
 - KDE Plasma Wayland for the Desktop overlay.
