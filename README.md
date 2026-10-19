@@ -34,8 +34,8 @@ Close SteamVR and Settings before installing or upgrading.
 On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r31/rift-s-linux-bin-31-1-x86_64.pkg.tar.zst
-sudo pacman -U rift-s-linux-bin-31-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r32/rift-s-linux-bin-32-1-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-32-1-x86_64.pkg.tar.zst
 ```
 
 To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending.
@@ -43,9 +43,9 @@ To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-m
 On other distributions, install the universal build into your home directory. It needs no SteamVR launch option; the udev rule asks for your password once. Settings needs glibc 2.35 or newer and WebKitGTK 4.1 (Debian/Ubuntu `libwebkit2gtk-4.1-0`, Fedora `webkit2gtk4.1`).
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r31/rift-s-linux-r31-x86_64.tar.xz
-tar -xf rift-s-linux-r31-x86_64.tar.xz
-./rift-s-linux-r31-x86_64/install.sh
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r32/rift-s-linux-r32-x86_64.tar.xz
+tar -xf rift-s-linux-r32-x86_64.tar.xz
+./rift-s-linux-r32-x86_64/install.sh
 ```
 
 `install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built.
