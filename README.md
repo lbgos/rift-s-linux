@@ -50,6 +50,8 @@ tar -xf rift-s-linux-r31-x86_64.tar.xz
 
 `install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built.
 
+To update from r32 on, close SteamVR and run `rifts-setup update`, or `~/.local/share/rift-s-linux/bin/rifts-setup update` for the universal build. It installs the latest release for your install type after checking its SHA-256; `--check` only reports whether one is available. Older releases update with the commands above.
+
 ## Build from source
 
 Install a C/C++ toolchain, CMake, Ninja, Eigen, TBB, fmt, OpenCV, Vulkan headers and loader, glslang, libusb, SDL2, cJSON, libcap, systemd and the X11, Wayland and DRM development libraries. The Desktop overlay also needs PipeWire development files, wayland-scanner, wayland-protocols and plasma-wayland-protocols. Settings needs Rust/Cargo, Node.js, pnpm, GTK3, WebKitGTK 4.1, shaderc's `glslc` and desktop-file-utils.

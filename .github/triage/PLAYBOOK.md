@@ -84,7 +84,8 @@ and by the component involved:
 4. Open and closed issues.
 
 Use `gh` when it is installed, otherwise the GitHub web API. If a release fixes
-it, give the exact update command for the user's install type. If only `main`
+it, the update is `rifts-setup update` from r32 on; older installs use the
+commands in the release notes. If only `main`
 fixes it, say so and offer a workaround until the next release. If an open pull
 request or issue matches, check it against the evidence before you rely on it.
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Register the installed Rift S driver using SteamVR's own path registry tool.
 
-`rifts-setup triage` instead writes machine facts for a support session and starts
-the user's coding agent with the triage playbook (.github/triage/PLAYBOOK.md)."""
+`rifts-setup update` installs the latest GitHub release for the current install type.
+`rifts-setup triage` writes machine facts for a support session and starts the user's
+coding agent with the triage playbook (.github/triage/PLAYBOOK.md)."""
 import argparse
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,13 +16,16 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
 
 DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
 DESKTOP = Path('@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop')
 PLAYBOOK = Path('@CMAKE_INSTALL_FULL_DATADIR@/rift-s-linux/triage/PLAYBOOK.md')
 PLAYBOOK_URL = 'https://raw.githubusercontent.com/lbgos/rift-s-linux/main/.github/triage/PLAYBOOK.md'
 AGENTS = ['claude', 'codex', 'gemini', 'opencode']
+LATEST_RELEASE = 'https://api.github.com/repos/lbgos/rift-s-linux/releases/latest'
 STEAMVR_APP = '250820'
 # Steam starts SteamVR inside the Steam Linux Runtime container, which cannot see the
 # host's /usr: a system-wide driver and its libraries would be missing. vrmonitor.sh
@@ -306,21 +311,21 @@ def release_ref(package, version):
 
 
 def install_facts():
+    """Install type, prefix, version and source ref of this driver, keyed for the triage context."""
     prefix = DRIVER.parent.parent
     version_file = prefix / 'version'
     if version_file.is_file():
         version = version_file.read_text().strip()
-        return [('Install type', 'universal build'), ('Prefix', prefix), ('Version', version),
-                ('Source ref', version)]
+        return {'Install type': 'universal build', 'Prefix': prefix, 'Version': version, 'Source ref': version}
     owner = subprocess.run(['pacman', '-Qqo', str(DRIVER)], capture_output=True, text=True) \
         if shutil.which('pacman') and DRIVER.exists() else None
     if owner and owner.returncode == 0:
         package = owner.stdout.strip()
         version = subprocess.run(['pacman', '-Q', package], capture_output=True, text=True).stdout.split()[-1]
-        return [('Install type', f'Arch package {package}'), ('Prefix', prefix), ('Version', version),
-                ('Source ref', release_ref(package, version) or 'unknown')]
-    return [('Install type', 'source build' if DRIVER.exists() else 'driver not found'), ('Prefix', prefix),
-            ('Version', 'unknown'), ('Source ref', 'unknown')]
+        return {'Install type': f'Arch package {package}', 'Prefix': prefix, 'Version': version,
+                'Source ref': release_ref(package, version) or 'unknown'}
+    return {'Install type': 'source build' if DRIVER.exists() else 'driver not found', 'Prefix': prefix,
+            'Version': 'unknown', 'Source ref': 'unknown'}
 
 
 def read_first_line(path):
@@ -391,7 +396,7 @@ def triage_context(home, registry_path, state, directory):
         lines.extend(f'- {row[0]}: {row[1]}' if isinstance(row, tuple) else f'- {row}' for row in rows)
         lines.append('')
 
-    section('rift-s-linux', install_facts() + [
+    section('rift-s-linux', [*install_facts().items(),
         ('Driver directory', DRIVER), ('Installed playbook', PLAYBOOK),
         ('Source cache directory', state / 'triage/source'),
         ('Registration service', subprocess.run(
@@ -429,6 +434,69 @@ def triage_context(home, registry_path, state, directory):
     (directory / 'context.md').write_text('\n'.join(lines))
 
 
+def release_asset(install_type, tag, names):
+    """The release asset that updates this install type, or None when it is built locally."""
+    if install_type == 'universal build':
+        wanted = re.compile(rf'rift-s-linux-{re.escape(tag)}-x86_64\.tar\.xz')
+    elif install_type == 'Arch package rift-s-linux-bin':
+        wanted = re.compile(rf'rift-s-linux-bin-{re.escape(tag[1:])}-\d+-x86_64\.pkg\.tar\.zst')
+    else:
+        return None
+    return next((name for name in names if wanted.fullmatch(name)), None)
+
+
+def download(url, path):
+    request = urllib.request.Request(url, headers={'User-Agent': 'rifts-setup'})
+    with urllib.request.urlopen(request, timeout=60) as response, open(path, 'wb') as out:
+        shutil.copyfileobj(response, out, 1 << 20)
+
+
+def update(check_only):
+    facts = install_facts()
+    install_type, installed = facts['Install type'], facts['Source ref']
+    request = urllib.request.Request(LATEST_RELEASE, headers={'User-Agent': 'rifts-setup'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    tag = release['tag_name']
+    assets = {asset['name']: asset['browser_download_url'] for asset in release['assets']}
+    if installed == tag:
+        print(f'rift-s-linux {tag} is up to date.')
+        return
+    asset = release_asset(install_type, tag, assets)
+    if not asset:
+        print(f'{tag} is the latest release; this is a {install_type} ({installed}).')
+        if install_type == 'Arch package rift-s-linux-git':
+            print('Rebuild it with makepkg -si in packaging/aur/rift-s-linux-git of a fresh clone.')
+        else:
+            print('Pull main and rebuild as described in the README.')
+        return
+    print(f'{tag} is available (installed: {installed}).')
+    if check_only:
+        return
+    running = [name for name in ['vrmonitor', 'vrserver', 'rifts-settings'] if user_process(name)]
+    if running:
+        raise SystemExit(f'Close SteamVR and Settings first (running: {", ".join(running)}).')
+    with tempfile.TemporaryDirectory(prefix='rifts-update-') as directory:
+        directory = Path(directory)
+        print(f'Downloading {asset}', flush=True)
+        download(assets[asset], directory / asset)
+        download(assets['SHA256SUMS'], directory / 'SHA256SUMS')
+        sums = dict(reversed(line.split()) for line in (directory / 'SHA256SUMS').read_text().splitlines() if line)
+        digest = hashlib.sha256()
+        with open(directory / asset, 'rb') as payload:
+            while chunk := payload.read(1 << 20):
+                digest.update(chunk)
+        digest = digest.hexdigest()
+        if sums.get(asset) != digest:
+            raise SystemExit(f'{asset} does not match SHA256SUMS; nothing was installed.')
+        if install_type == 'universal build':
+            subprocess.run(['tar', '-xf', asset], cwd=directory, check=True)
+            subprocess.run([str(directory / asset.removesuffix('.tar.xz') / 'install.sh')], check=True)
+        else:
+            subprocess.run(['sudo', 'pacman', '-U', str(directory / asset)], check=True)
+    print(f'Updated to {tag}. Start SteamVR from Steam.')
+
+
 def triage(home, registry_path, state, agent):
     directory = state / 'triage' / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     directory.mkdir(parents=True, mode=0o700)
@@ -452,7 +520,8 @@ def triage(home, registry_path, state, agent):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'uninstall', 'watch', 'triage'], nargs='?', default='install')
+    parser.add_argument('action', choices=['install', 'uninstall', 'watch', 'update', 'triage'], nargs='?', default='install')
+    parser.add_argument('--check', action='store_true', help='update: only report whether a newer release exists')
     parser.add_argument('--agent', help='coding agent command for triage (default: first of %s found)' % ', '.join(AGENTS))
     args = parser.parse_args()
     if os.geteuid() == 0:
@@ -464,6 +533,9 @@ def main():
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.action == 'triage':
         triage(home, registry_path, state, args.agent)
+        return
+    if args.action == 'update':
+        update(args.check)
         return
     events = DirectoryEvents()
     last_error = None

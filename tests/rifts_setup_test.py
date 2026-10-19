@@ -1,7 +1,7 @@
 # Copyright 2026, lbgos
 # SPDX-License-Identifier: BSL-1.0
 """Checks how rifts-setup edits SteamVR's launch option in Steam's localconfig.vdf
-and how triage maps an installed package to its source.
+and how triage and update map an installed package to its source and release asset.
 
 Usage: rifts_setup_test.py <configured rifts-setup script>
 """
@@ -70,6 +70,16 @@ class ReleaseRef(unittest.TestCase):
         self.assertEqual(setup.release_ref('rift-s-linux-bin', '31-1'), 'r31')
         self.assertEqual(setup.release_ref('rift-s-linux-git', '25.1.0.r8702.gd82b8cbda-1'), 'd82b8cbda')
         self.assertIsNone(setup.release_ref('other', '1.0-1'))
+
+
+class ReleaseAsset(unittest.TestCase):
+    NAMES = ['rift-s-linux-bin-32-1-x86_64.pkg.tar.zst', 'rift-s-linux-r32-x86_64.tar.xz',
+             'rift-s-linux-r32-x86_64.tar.zst', 'SHA256SUMS']
+
+    def test_each_install_type_gets_its_asset(self):
+        self.assertEqual(setup.release_asset('universal build', 'r32', self.NAMES), 'rift-s-linux-r32-x86_64.tar.xz')
+        self.assertEqual(setup.release_asset('Arch package rift-s-linux-bin', 'r32', self.NAMES), self.NAMES[0])
+        self.assertIsNone(setup.release_asset('Arch package rift-s-linux-git', 'r32', self.NAMES))
 
 
 if __name__ == '__main__':
