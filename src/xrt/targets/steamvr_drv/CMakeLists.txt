@@ -98,6 +98,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     file(CREATE_LINK "../rifts-steamvr-registration.service"
          ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.enabled SYMBOLIC)
     install(PROGRAMS ${PROJECT_BINARY_DIR}/rifts-setup DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${PROJECT_SOURCE_DIR}/.github/triage/PLAYBOOK.md DESTINATION ${CMAKE_INSTALL_DATADIR}/rift-s-linux/triage)
     install(PROGRAMS ${PROJECT_BINARY_DIR}/rifts-session-install DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
     install(FILES ${PROJECT_BINARY_DIR}/rifts-steamvr-registration.service
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)

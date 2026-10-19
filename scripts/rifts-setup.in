@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Register the installed Rift S driver using SteamVR's own path registry tool."""
+"""Register the installed Rift S driver using SteamVR's own path registry tool.
+
+`rifts-setup triage` instead writes machine facts for a support session and starts
+the user's coding agent with the triage playbook (.github/triage/PLAYBOOK.md)."""
 import argparse
 import ctypes
 import fcntl
@@ -15,6 +18,9 @@ import time
 
 DRIVER = Path('@CMAKE_INSTALL_FULL_DATADIR@/steamvr-monado')
 DESKTOP = Path('@CMAKE_INSTALL_FULL_BINDIR@/rifts-desktop')
+PLAYBOOK = Path('@CMAKE_INSTALL_FULL_DATADIR@/rift-s-linux/triage/PLAYBOOK.md')
+PLAYBOOK_URL = 'https://raw.githubusercontent.com/lbgos/rift-s-linux/main/.github/triage/PLAYBOOK.md'
+AGENTS = ['claude', 'codex', 'gemini', 'opencode']
 STEAMVR_APP = '250820'
 # Steam starts SteamVR inside the Steam Linux Runtime container, which cannot see the
 # host's /usr: a system-wide driver and its libraries would be missing. vrmonitor.sh
@@ -290,9 +296,136 @@ class DirectoryEvents:
             time.sleep(0.1)
 
 
+def release_ref(package, version):
+    """The git ref an installed package was built from: `r31` for rift-s-linux-bin 31-1,
+    the commit for a -git pkgver such as 25.1.0.r8702.gd82b8cbda. None when unknown."""
+    if package == 'rift-s-linux-bin':
+        return 'r' + version.split('-')[0]
+    match = re.search(r'\.g([0-9a-f]{7,40})(?:-\d+)?$', version)
+    return match.group(1) if package == 'rift-s-linux-git' and match else None
+
+
+def install_facts():
+    prefix = DRIVER.parent.parent
+    version_file = prefix / 'version'
+    if version_file.is_file():
+        version = version_file.read_text().strip()
+        return [('Install type', 'universal build'), ('Prefix', prefix), ('Version', version),
+                ('Source ref', version)]
+    owner = subprocess.run(['pacman', '-Qqo', str(DRIVER)], capture_output=True, text=True) \
+        if shutil.which('pacman') and DRIVER.exists() else None
+    if owner and owner.returncode == 0:
+        package = owner.stdout.strip()
+        version = subprocess.run(['pacman', '-Q', package], capture_output=True, text=True).stdout.split()[-1]
+        return [('Install type', f'Arch package {package}'), ('Prefix', prefix), ('Version', version),
+                ('Source ref', release_ref(package, version) or 'unknown')]
+    return [('Install type', 'source build' if DRIVER.exists() else 'driver not found'), ('Prefix', prefix),
+            ('Version', 'unknown'), ('Source ref', 'unknown')]
+
+
+def read_first_line(path):
+    try:
+        return path.read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+
+
+def gpu_facts():
+    gpus = []
+    for card in sorted(Path('/sys/class/drm').glob('card[0-9]*')):
+        device = card / 'device'
+        if '-' in card.name or not (device / 'vendor').exists():
+            continue
+        driver = os.path.basename(os.readlink(device / 'driver')) if (device / 'driver').exists() else '?'
+        gpus.append(f'{card.name}: {read_first_line(device / "vendor")}:{read_first_line(device / "device")} {driver}')
+    nvidia = read_first_line(Path('/proc/driver/nvidia/version'))
+    return gpus + ([nvidia] if nvidia else [])
+
+
+def headset_facts():
+    # Product names and link speed only; serial numbers stay out of the context file.
+    found = []
+    for device in sorted(Path('/sys/bus/usb/devices').glob('*')):
+        if read_first_line(device / 'idVendor') == '2833':
+            found.append(f'{device.name}: 2833:{read_first_line(device / "idProduct")} '
+                         f'{read_first_line(device / "product") or ""} {read_first_line(device / "speed") or "?"} Mb/s')
+    return found or ['no Oculus USB device connected']
+
+
+def triage_context(home, registry_path, state, directory):
+    os_release = dict(re.findall(r'^(\w+)="?([^"\n]*)"?$', Path('/etc/os-release').read_text(), re.M)) \
+        if Path('/etc/os-release').is_file() else {}
+    registry = read_registry(registry_path)
+    tool, roots, _ = find_runtime(home, registry)
+    runtime = tool.parents[2] if tool else None
+    lines = ['# rift-s-linux triage context', '', f'Created {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}.', '']
+
+    def section(title, rows):
+        lines.extend([f'## {title}', ''])
+        lines.extend(f'- {row[0]}: {row[1]}' if isinstance(row, tuple) else f'- {row}' for row in rows)
+        lines.append('')
+
+    section('rift-s-linux', install_facts() + [
+        ('Driver directory', DRIVER), ('Installed playbook', PLAYBOOK),
+        ('Source cache directory', state / 'triage/source'),
+        ('Registration service', subprocess.run(
+            ['systemctl', '--user', 'is-active', 'rifts-steamvr-registration.service'],
+            capture_output=True, text=True).stdout.strip() or 'unknown')])
+    section('System', [
+        ('OS', os_release.get('PRETTY_NAME', 'unknown')), ('Kernel', os.uname().release),
+        ('Desktop', f'{os.environ.get("XDG_CURRENT_DESKTOP", "?")} {os.environ.get("XDG_SESSION_TYPE", "?")}'),
+        *gpu_facts()])
+    section('Headset USB', headset_facts())
+    section('Steam and SteamVR', [
+        *(('Steam root', root) for root in roots),
+        ('Flatpak Steam data', home / '.var/app/com.valvesoftware.Steam'
+         if (home / '.var/app/com.valvesoftware.Steam').is_dir() else 'absent'),
+        ('Snap Steam data', home / 'snap/steam' if (home / 'snap/steam').is_dir() else 'absent'),
+        ('SteamVR runtime', runtime or 'not found'),
+        ('OpenVR registry', registry_path),
+        *(('Registered driver', path) for path in registry.get('external_drivers') or [])])
+    section('Running processes', [
+        f'{name}: {"pid " + str(pid) if (pid := user_process(name)) else "not running"}'
+        for name in ['steam', 'vrmonitor', 'vrserver', 'vrcompositor', 'rifts-settings', 'rifts-desktop']])
+    logs = [log for root in roots for log in sorted((root / 'logs').glob('*'))
+            if log.name.startswith(('vrserver', 'vrcompositor', 'vrclient_monado'))]
+    section('Logs', [f'{log} ({time.strftime("%Y-%m-%d %H:%M", time.localtime(log.stat().st_mtime))})'
+                     for log in logs] + [
+        'journalctl --user -b -u rifts-steamvr-registration.service', 'journalctl -k -b'])
+    section('State and configuration', [
+        state, Path(os.environ.get('XDG_CONFIG_HOME', home / '.config')) / 'monado',
+        *(root / 'config' for root in roots)])
+    section('Never read', [
+        *(root / name for root in roots for name in ['config/config.vdf', 'config/loginusers.vdf', 'ssfn*']),
+        'Steam userdata/ beyond the SteamVR launch options'])
+    (directory / 'context.md').write_text('\n'.join(lines))
+
+
+def triage(home, registry_path, state, agent):
+    directory = state / 'triage' / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    directory.mkdir(parents=True, mode=0o700)
+    (state / 'triage/source').mkdir(exist_ok=True)
+    triage_context(home, registry_path, state, directory)
+    playbook = PLAYBOOK.read_text() if PLAYBOOK.is_file() else f'Fetch the playbook from {PLAYBOOK_URL}.\n'
+    (directory / 'prompt.md').write_text(
+        'A rift-s-linux user has a problem with their setup and started this session with '
+        '`rifts-setup triage`.\n\nMachine facts are in the triage context file:\n\n'
+        f'    {directory / "context.md"}\n\nFollow the playbook below, starting by asking the user '
+        'what went wrong.\n\n---\n\n' + playbook)
+    command = agent or next((name for name in AGENTS if shutil.which(name)), None)
+    instruction = f'Read {directory / "prompt.md"} and follow it.'
+    if not command:
+        print(f'No coding agent found ({", ".join(AGENTS)}). Start one and tell it:\n  {instruction}')
+        return
+    print(f'Starting {command}. Triage files: {directory}', flush=True)
+    os.chdir(directory)
+    os.execvp(command, [command, instruction])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'uninstall', 'watch'], nargs='?', default='install')
+    parser.add_argument('action', choices=['install', 'uninstall', 'watch', 'triage'], nargs='?', default='install')
+    parser.add_argument('--agent', help='coding agent command for triage (default: first of %s found)' % ', '.join(AGENTS))
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error('Run in the Steam user session.')
@@ -301,6 +434,9 @@ def main():
     registry_path = Path(os.environ.get('VR_PATHREG_OVERRIDE', config / 'openvr/openvrpaths.vrpath'))
     state = Path(os.environ.get('XDG_STATE_HOME', home / '.local/state')) / 'monado-rifts'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.action == 'triage':
+        triage(home, registry_path, state, args.agent)
+        return
     events = DirectoryEvents()
     last_error = None
     last_desktop_server = None

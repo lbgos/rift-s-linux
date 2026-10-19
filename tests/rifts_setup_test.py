@@ -1,6 +1,7 @@
 # Copyright 2026, lbgos
 # SPDX-License-Identifier: BSL-1.0
-"""Checks how rifts-setup edits SteamVR's launch option in Steam's localconfig.vdf.
+"""Checks how rifts-setup edits SteamVR's launch option in Steam's localconfig.vdf
+and how triage maps an installed package to its source.
 
 Usage: rifts_setup_test.py <configured rifts-setup script>
 """
@@ -62,6 +63,13 @@ class LaunchOptions(unittest.TestCase):
     def test_quoted_values_round_trip(self):
         spaced = '"/my games/SteamVR/bin/vrmonitor.sh" %command%'
         self.assertEqual(launch_options(setup.with_launch_options(config([]), spaced)), spaced)
+
+
+class ReleaseRef(unittest.TestCase):
+    def test_package_versions_map_to_source(self):
+        self.assertEqual(setup.release_ref('rift-s-linux-bin', '31-1'), 'r31')
+        self.assertEqual(setup.release_ref('rift-s-linux-git', '25.1.0.r8702.gd82b8cbda-1'), 'd82b8cbda')
+        self.assertIsNone(setup.release_ref('other', '1.0-1'))
 
 
 if __name__ == '__main__':

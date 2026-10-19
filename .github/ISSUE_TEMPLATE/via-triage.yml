@@ -1,0 +1,44 @@
+name: Triage report
+description: Filed from a `rifts-setup triage` session.
+labels: [via-triage]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The problem in the user's words, and what they expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnosis
+    attributes:
+      label: Diagnosis
+      description: Root cause or best hypothesis, how confident, and the code involved at the installed release.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro steps
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Install type and version, distribution, kernel, desktop, GPU and driver, SteamVR version.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Redacted log excerpts with timestamps. No home paths, serial numbers or account IDs.
+      render: text
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues and pull requests

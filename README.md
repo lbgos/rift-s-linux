@@ -123,6 +123,10 @@ pnpm tauri build --no-bundle -- --locked
 
 To pair a new or replacement Touch controller, close SteamVR and use Pair controller in Settings. Hold Menu + Y (left) or Oculus + B (right) until the controller light flashes, then select it.
 
+## Troubleshooting
+
+Run `rifts-setup triage`, or `~/.local/share/rift-s-linux/bin/rifts-setup triage` for the universal build. It writes machine facts to `~/.local/state/monado-rifts/triage/` and starts your coding agent (Claude Code, Codex, Gemini CLI or opencode; `--agent <command>` picks another) with the [triage playbook](.github/triage/PLAYBOOK.md). The agent asks what went wrong, reads the logs, looks for an existing fix and drafts an issue only with your approval.
+
 ## Known issues
 
 - USB or DisplayPort loss can crash SteamVR's compositor. Reconnect the headset and relaunch SteamVR manually. Recovery does not launch SteamVR automatically.

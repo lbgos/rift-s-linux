@@ -18,6 +18,8 @@ licenses=$files/share/licenses/rift-s-linux
 rm -rf "$out"
 mkdir -p "$files"
 cp -a "$work/stage/opt/rift-s-linux/." "$files/"
+# rifts-setup triage reads the installed release from here.
+echo "$version" > "$files/version"
 # The universal install never registers itself as the system OpenXR runtime.
 rm -rf "$files/share/openxr" "$files/lib/libopenxr_monado.so"
 
