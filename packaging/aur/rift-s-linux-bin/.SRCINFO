@@ -1,6 +1,6 @@
 pkgbase = rift-s-linux-bin
 	pkgdesc = Oculus Rift S on Linux SteamVR: driver, Room Setup, Settings app and in-headset desktop (prebuilt)
-	pkgver = 31
+	pkgver = 32
 	pkgrel = 1
 	url = https://github.com/lbgos/rift-s-linux
 	install = rift-s-linux.install
@@ -72,7 +72,7 @@ pkgbase = rift-s-linux-bin
 	conflicts = monado-rifts-git
 	options = !strip
 	options = !debug
-	source = https://github.com/lbgos/rift-s-linux/releases/download/r31/rift-s-linux-r31-x86_64.tar.zst
-	sha256sums = b466138ac5f2bfa38d78335e4fdbee3d1b4c8efd3891cb0639d1eb28df86f47b
+	source = https://github.com/lbgos/rift-s-linux/releases/download/r32/rift-s-linux-r32-x86_64.tar.zst
+	sha256sums = ed486a7e0cbf699258e3ee13ec01b6f9421a8d85f35c09edbfdf471d54918b19
 
 pkgname = rift-s-linux-bin
