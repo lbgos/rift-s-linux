@@ -41,8 +41,12 @@ The partial clone keeps the full history, which step 6 compares against `main`.
 Releases are tagged `r<number>`. For a `-git` package or a source build, use
 the commit from the context file. If neither the context file nor the user
 knows the version, say so and use `main`, treating file and line references as
-approximate. Never guess a version. Reuse an existing clone instead of cloning
-again.
+approximate. Never guess a version.
+
+If the clone for this ref already exists, reuse it and run `git fetch origin`
+so step 6 sees the current `main`. Before cloning a new ref, remove the other
+entries in the source cache directory whose `git status --porcelain` is empty;
+keep any clone with local changes and tell the user it is there.
 
 ## 5. Investigate
 
