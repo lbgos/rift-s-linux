@@ -34,9 +34,10 @@ on an old release with an old copy.
 Clone the release the user runs into the source cache directory from the
 context file, one subdirectory per release tag or commit:
 
-    git clone --depth 1 --filter=blob:none --branch <tag> \
+    git clone --filter=blob:none --branch <tag> \
       https://github.com/lbgos/rift-s-linux <source-cache-dir>/<tag>
 
+The partial clone keeps the full history, which step 6 compares against `main`.
 Releases are tagged `r<number>`. For a `-git` package or a source build, use
 the commit from the context file. If neither the context file nor the user
 knows the version, say so and use `main`, treating file and line references as
@@ -60,9 +61,12 @@ Then gather evidence, most valuable first:
 3. Rift S state and configuration files, read-only.
 4. Process, USB and service state at the moment of the failure.
 
-Match timestamps to the user's repro. If the evidence is stale, ask the user to
-reproduce once and read the logs again. Trace each relevant log line to the code
-in the tag-pinned clone and explain it from the code, not from its wording.
+Match timestamps to the user's repro; log times are local, the context file
+notes the time zone. If evidence is stale or missing, tell the user exactly what
+to capture, ask them to reproduce once and read it again. Trace each relevant
+`monado:` and rift-s-linux log line to the code in the tag-pinned clone and
+explain it from the code, not from its wording. SteamVR's own lines have no
+source here; read them through the driver lines around them.
 
 Do not change anything while investigating. Ask before starting, stopping or
 restarting Steam, SteamVR or any service: the user may be wearing the headset.
@@ -105,7 +109,7 @@ tag-pinned diagnosis clone.
 
 ## 9. File the issue well
 
-- Follow `.github/ISSUE_TEMPLATE/via-triage.yml`: what happened, diagnosis,
+- Follow `.github/ISSUE_TEMPLATE/via-triage.yml` on `main`: what happened, diagnosis,
   repro steps, environment, evidence, related issues and pull requests.
 - Use a plain, specific title and the `via-triage` label.
 - Show the user the complete issue text and get an explicit yes before posting.
