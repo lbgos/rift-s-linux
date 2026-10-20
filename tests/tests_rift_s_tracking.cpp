@@ -574,6 +574,42 @@ TEST_CASE("Rift S counts repeated IMU reports apart from clock errors")
 	os_mutex_destroy(&ctrl.mutex);
 }
 
+TEST_CASE("Rift S stops publishing frozen controller poses after radio silence and resumes on fresh IMU")
+{
+	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
+	ctrl.pose.orientation.w = 1;
+	ctrl.P_imu_device = ctrl.P_device_aim = ctrl.P_device_grip = XRT_POSE_IDENTITY;
+	os_mutex_init(&ctrl.mutex);
+	auto report_at = [&](uint32_t device_us, timepoint_ns arrival_ns) {
+		rift_s_controller_report_t report{};
+		report.num_info = 1;
+		report.info[0].block_id = RIFT_S_CTRL_IMU;
+		report.info[0].imu.timestamp = device_us;
+		rift_s_controller_handle_report(&ctrl, arrival_ns, &report);
+	};
+	report_at(1000, 1000000000);
+	for (auto input : {XRT_INPUT_TOUCH_GRIP_POSE, XRT_INPUT_TOUCH_AIM_POSE}) {
+		xrt_space_relation rel{};
+		REQUIRE(rift_s_controller_get_tracked_pose(&ctrl.base, input, 1100000000, &rel) == XRT_SUCCESS);
+		CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
+		// Repeated firmware samples do not refresh the accepted IMU arrival time.
+		report_at(1000, 1200000000);
+		CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, input, 1250000001, &rel) ==
+		      XRT_ERROR_POSE_NOT_ACTIVE);
+		CHECK(rel.relation_flags == 0);
+		CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, input, 171000000000, &rel) ==
+		      XRT_ERROR_POSE_NOT_ACTIVE);
+		CHECK(rel.relation_flags == 0);
+	}
+	report_at(3000, 171002000000);
+	xrt_space_relation rel{};
+	CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, XRT_INPUT_TOUCH_GRIP_POSE, 171003000000, &rel) ==
+	      XRT_SUCCESS);
+	CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
+	os_mutex_destroy(&ctrl.mutex);
+}
+
 TEST_CASE("Rift S IMU clock resync needs a run or a large repeated backwards step")
 {
 	CHECK_FALSE(rift_s_imu_clock_needs_resync(2000, 1)); // a late resend

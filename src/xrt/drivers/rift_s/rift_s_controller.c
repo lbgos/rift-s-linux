@@ -942,6 +942,7 @@ reset_position_filter(struct rift_s_controller *ctrl)
 #define RIFT_S_POSITION_RESET_DISTANCE_M 0.15f
 // Longest render-time extrapolation of aim/grip.
 #define RIFT_S_MAX_PREDICTION_NS (100 * U_TIME_1MS_IN_NS)
+#define RIFT_S_IMU_TIMEOUT_NS (250 * U_TIME_1MS_IN_NS)
 
 enum position_tracking
 {
@@ -1868,6 +1869,16 @@ rift_s_controller_get_tracked_pose(struct xrt_device *xdev,
 	}
 
 	os_mutex_lock(&ctrl->mutex);
+	// Optical loss can use live IMU orientation. Radio silence cannot: otherwise the
+	// last attitude and angular velocity keep a frozen hand active indefinitely.
+	// Historical Constellation queries use their own capture-time history bounds.
+	if (name != XRT_INPUT_GENERIC_TRACKER_POSE && ctrl->last_imu_local_time_ns > 0 &&
+	    at_timestamp_ns - ctrl->last_imu_local_time_ns > RIFT_S_IMU_TIMEOUT_NS) {
+		*out_relation = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		log_tracking_health(ctrl, os_monotonic_get_ns(), false);
+		os_mutex_unlock(&ctrl->mutex);
+		return XRT_ERROR_POSE_NOT_ACTIVE;
+	}
 	// Constellation needs the bounded gyro-compensated gravity bootstrap. Aim/grip
 	// can expose gyro orientation during its first 250 ms.
 	if (name == XRT_INPUT_GENERIC_TRACKER_POSE && !ctrl->gravity_initialized) {
