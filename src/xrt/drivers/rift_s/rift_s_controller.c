@@ -1214,16 +1214,25 @@ rift_s_controller_handle_report(struct rift_s_controller *ctrl,
 	os_mutex_lock(&ctrl->mutex);
 
 	/* Collect state updates */
+	if (local_ts - ctrl->last_report_local_time_ns > RIFT_S_IMU_TIMEOUT_NS)
+		ctrl->last_battery_local_time_ns = 0;
+	ctrl->last_report_local_time_ns = local_ts;
 	ctrl->extra_bytes_len = 0;
 
 	for (int i = 0; i < report->num_info; i++) {
 		rift_s_controller_info_block_t *info = report->info + i;
 
 		switch (info->block_id) {
-		case RIFT_S_CTRL_MASK08:
+		case RIFT_S_CTRL_MASK08: {
 			saw_controls_update = true;
+			bool changed = ctrl->last_battery_local_time_ns == 0 || ctrl->mask08 != info->maskbyte.val;
 			ctrl->mask08 = info->maskbyte.val;
+			ctrl->last_battery_local_time_ns = ctrl->mask08 <= 100 ? local_ts : 0;
+			if (changed && ctrl->last_battery_local_time_ns > 0)
+				RIFT_S_INFO("Controller battery hand=%s percent=%u source=radio_0x08 received_ns=%" PRIi64,
+				            hand_alias(ctrl), ctrl->mask08, local_ts);
 			break;
+		}
 		case RIFT_S_CTRL_BUTTONS:
 			saw_controls_update = true;
 			ctrl->buttons = info->maskbyte.val;
@@ -1667,6 +1676,22 @@ rift_s_update_input_vec2(struct rift_s_controller *ctrl, int index, int64_t when
 	ctrl->base.inputs[index].timestamp = when_ns;
 	ctrl->base.inputs[index].value.vec2.x = x;
 	ctrl->base.inputs[index].value.vec2.y = y;
+}
+
+xrt_result_t
+rift_s_controller_get_battery_status(struct xrt_device *xdev, bool *out_present, bool *out_charging, float *out_charge)
+{
+	struct rift_s_controller *ctrl = (struct rift_s_controller *)xdev;
+	os_mutex_lock(&ctrl->mutex);
+	// The vendor caches notification type 0 as a percentage. There is no charging
+	// telemetry on these replaceable-AA controllers. Never publish calloc's zero
+	// or carry a previous radio session's notification into a new one.
+	*out_present = rift_s_system_is_online(ctrl->sys) && ctrl->last_battery_local_time_ns > 0 &&
+	               os_monotonic_get_ns() - ctrl->last_report_local_time_ns <= RIFT_S_IMU_TIMEOUT_NS;
+	*out_charging = false;
+	*out_charge = *out_present ? ctrl->mask08 / 100.0f : 0;
+	os_mutex_unlock(&ctrl->mutex);
+	return XRT_SUCCESS;
 }
 
 static xrt_result_t
@@ -2377,6 +2402,7 @@ rift_s_controller_create(struct rift_s_system *sys, enum xrt_device_type device_
 
 	u_device_populate_function_pointers(&ctrl->base, rift_s_controller_get_tracked_pose, rift_s_controller_destroy);
 	ctrl->base.update_inputs = rift_s_controller_update_inputs;
+	ctrl->base.get_battery_status = rift_s_controller_get_battery_status;
 	ctrl->base.set_output = rift_s_controller_set_output;
 	ctrl->base.get_view_poses = u_device_get_view_poses;
 	ctrl->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
@@ -2384,6 +2410,7 @@ rift_s_controller_create(struct rift_s_system *sys, enum xrt_device_type device_
 
 	ctrl->base.supported.orientation_tracking = true;
 	ctrl->base.supported.position_tracking = true;
+	ctrl->base.supported.battery_status = true;
 
 
 	if (device_type == XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER) {
@@ -2479,6 +2506,7 @@ rift_s_controller_device_lost(struct rift_s_controller *ctrl)
 	os_mutex_lock(&ctrl->mutex);
 	// The next report re-applies radio configuration even for the same paired ID.
 	ctrl->device_id = 0;
+	ctrl->last_battery_local_time_ns = ctrl->last_report_local_time_ns = 0;
 	ctrl->reading_config = ctrl->reading_calibration = false;
 	ctrl->have_config = ctrl->have_calibration = false;
 	ctrl->imu_descriptor_requested = ctrl->imu_descriptor_done = false;
@@ -2500,6 +2528,7 @@ rift_s_controller_update_configuration(struct rift_s_controller *ctrl, uint64_t 
 
 	if (ctrl->device_id != device_id) {
 		ctrl->device_id = device_id;
+		ctrl->last_battery_local_time_ns = ctrl->last_report_local_time_ns = 0;
 		snprintf(ctrl->base.serial, XRT_DEVICE_NAME_LEN, "%016" PRIx64, device_id);
 		// If the device ID changed somehow, re-read the JSON blocks
 		ctrl->have_config = ctrl->have_calibration = false;

@@ -96,7 +96,7 @@ rift_s_controller_write_succeeded(const uint8_t *response, size_t size, uint32_t
 
 typedef enum
 {
-	RIFT_S_CTRL_MASK08 = 0x08,   /* Unknown. Vals seen 0x28, 0x0a, 0x32, 0x46, 0x00... */
+	RIFT_S_CTRL_MASK08 = 0x08,   /* Battery percentage, 0..100; vendor input notification type 0. */
 	RIFT_S_CTRL_BUTTONS = 0x0c,  /* Button states */
 	RIFT_S_CTRL_FINGERS = 0x0d,  /* Finger positions */
 	RIFT_S_CTRL_MASK0e = 0x0e,   /* Unknown. Only seen 0x00 */

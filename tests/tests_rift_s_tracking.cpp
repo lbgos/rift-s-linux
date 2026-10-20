@@ -610,6 +610,67 @@ TEST_CASE("Rift S stops publishing frozen controller poses after radio silence a
 	os_mutex_destroy(&ctrl.mutex);
 }
 
+TEST_CASE("Rift S battery uses validated radio percentages and expires across silence")
+{
+	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
+	os_mutex_init(&ctrl.mutex);
+	bool present = true, charging = true;
+	float charge = -1;
+	auto query = [&] {
+		REQUIRE(rift_s_controller_get_battery_status(&ctrl.base, &present, &charging, &charge) == XRT_SUCCESS);
+		CHECK_FALSE(charging);
+	};
+	auto report = [&](uint8_t value, timepoint_ns stamp) {
+		rift_s_controller_report_t input{};
+		input.num_info = 1;
+		input.info[0].block_id = RIFT_S_CTRL_MASK08;
+		input.info[0].maskbyte.val = value;
+		rift_s_controller_handle_report(&ctrl, stamp, &input);
+	};
+	query();
+	CHECK_FALSE(present); // calloc zero is unknown, not empty.
+	for (uint8_t value : {0, 10, 80, 100}) {
+		report(value, os_monotonic_get_ns());
+		query();
+		CHECK(present);
+		CHECK(charge == Catch::Approx(value / 100.f));
+	}
+	// Battery notifications are change-only. Live reports keep the last value
+	// available even after the notification itself is older than the timeout.
+	auto now = os_monotonic_get_ns();
+	report(80, now - 400000000);
+	rift_s_controller_report_t input{};
+	input.num_info = 1;
+	input.info[0].block_id = RIFT_S_CTRL_BUTTONS;
+	rift_s_controller_handle_report(&ctrl, now - 200000000, &input);
+	rift_s_controller_handle_report(&ctrl, now, &input);
+	query();
+	CHECK(present);
+	CHECK(charge == Catch::Approx(.8f));
+	report(255, os_monotonic_get_ns());
+	query();
+	CHECK_FALSE(present);
+	report(70, os_monotonic_get_ns() - 300000000);
+	query();
+	CHECK_FALSE(present);
+	// A controller waking without a battery notification must not revive 70%.
+	rift_s_controller_handle_report(&ctrl, os_monotonic_get_ns(), &input);
+	query();
+	CHECK_FALSE(present);
+	report(60, os_monotonic_get_ns());
+	query();
+	CHECK(present);
+	xrt_atomic_s32_store(&ctrl.sys->transport_online, 0);
+	query();
+	CHECK_FALSE(present);
+	xrt_atomic_s32_store(&ctrl.sys->transport_online, 1);
+	rift_s_controller_device_lost(&ctrl);
+	query();
+	CHECK_FALSE(present);
+	os_mutex_destroy(&ctrl.mutex);
+}
+
 TEST_CASE("Rift S IMU clock resync needs a run or a large repeated backwards step")
 {
 	CHECK_FALSE(rift_s_imu_clock_needs_resync(2000, 1)); // a late resend
