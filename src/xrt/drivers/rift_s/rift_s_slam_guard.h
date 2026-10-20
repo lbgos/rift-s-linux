@@ -205,6 +205,8 @@ rift_s_slam_guard_reason_str(enum rift_s_slam_guard_reason reason);
 //! Tracks whether the SLAM cameras see enough features (not face down, covered or dark).
 struct rift_s_slam_feature_gate
 {
+	//! Initial feature acquisition must not restart the backend that just initialized.
+	bool have_features;
 	bool lost;
 	bool crossing;
 	int64_t crossing_since_ns;
@@ -217,7 +219,7 @@ enum rift_s_slam_feature_event
 	RIFT_S_SLAM_FEATURES_NO_CHANGE,
 	//! Features gone: hold the head pose.
 	RIFT_S_SLAM_FEATURES_LOST,
-	//! Features back: re-initialise SLAM and realign.
+	//! Previously acquired features back: re-initialise SLAM and realign.
 	RIFT_S_SLAM_FEATURES_RETURNED,
 };
 

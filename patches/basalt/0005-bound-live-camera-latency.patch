@@ -1,0 +1,17 @@
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -393,9 +393,13 @@
+
+     // NOTE: This factory also starts the optical flow
+     opt_flow_ptr = OpticalFlowFactory::getOpticalFlow(vio_config, calib);
+-    opt_flow_ptr->start();
+     image_data_queue = &opt_flow_ptr->input_img_queue;
+     ASSERT_(image_data_queue != nullptr);
++    // Live VIT input keeps one pending frame. Ten 30 Hz frames can queue for
++    // 333 ms, already older than the head pose freshness limit before processing.
++    // push_latest drops the oldest pending frame when the frontend falls behind.
++    if (!deterministic) image_data_queue->set_capacity(1);
++    opt_flow_ptr->start();
+
+     vio = VioEstimatorFactory::getVioEstimator(vio_config, calib, constants::g, true, use_double);
+     // Nothing reads these stats in a live session; they would grow for as long as it runs.

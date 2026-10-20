@@ -1136,6 +1136,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	struct xrt_space_relation query_relation = XRT_SPACE_RELATION_ZERO;
 	timepoint_ns sample_ts = 0;
 	bool slam_valid = false;
+	bool sample_stale = false;
 	bool features_known = false;
 	int feature_count = 0;
 	timepoint_ns feature_ts = 0;
@@ -1145,7 +1146,8 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 		                                     &slam_relation, &query_relation) &&
 		             (slam_relation.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) != 0;
 		timepoint_ns now_ns = os_monotonic_get_ns();
-		slam_valid = slam_valid && sample_ts <= now_ns && now_ns - sample_ts < 250 * U_TIME_1MS_IN_NS;
+		sample_stale = slam_valid && (sample_ts > now_ns || now_ns - sample_ts >= 250 * U_TIME_1MS_IN_NS);
+		slam_valid = slam_valid && !sample_stale;
 		// !todo Correct pose depending on the VIT system in use, this should be done in the system itself.
 		// For now, assume that we are using Basalt.
 		rift_s_tracker_correct_pose_from_basalt(&slam_relation.pose);
@@ -1309,6 +1311,45 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 		            g->recoveries, g->resets);
 	}
 	timepoint_ns pose_log_now = os_monotonic_get_ns();
+	if (pose == RIFT_S_TRACKER_POSE_DEVICE) {
+		// Log why POSITION_TRACKED was dropped. Rate-limit loss warnings and summarize
+		// a continuing on-head hold even before the first SLAM fix.
+		bool tracked = (imu_relation.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0;
+		if (tracked != t->head_tracked || t->head_change_ns == 0) {
+			if (!tracked && t->head_tracked) t->head_losses++;
+			if (tracked && t->head_loss_logged) {
+				RIFT_S_WARN("Head position tracked again after %.2f s losses=%u recoveries=%u resets=%u",
+				            (pose_log_now - t->head_change_ns) / 1e9, t->head_losses, g->recoveries,
+				            g->resets);
+				t->head_loss_logged = false;
+			}
+			t->head_tracked = tracked;
+			t->head_change_ns = pose_log_now;
+		}
+		bool new_loss = !tracked && !t->head_loss_logged && pose_log_now - t->head_log_ns >= U_TIME_1S_IN_NS;
+		bool still_held = !tracked && !t->standby && pose_log_now - t->head_log_ns >= 10LL * U_TIME_1S_IN_NS;
+		if (new_loss || still_held) {
+			const char *cause = t->standby                                          ? "standby"
+			                    : t->slam_paused                                    ? "camera_timeout"
+			                    : t->slam_restart_pending || paused                 ? "slam_restart"
+			                    : !query_slam                                       ? "slam_off"
+			                    : t->feature_gate.lost                              ? "few_features"
+			                    : at_timestamp_ns < (uint64_t)t->slam_min_sample_ns ? "before_restart"
+			                    : sample_stale                                      ? "sample_stale"
+			                    : g->state == RIFT_S_SLAM_GUARD_ACQUIRING           ? "acquiring"
+			                    : g->state == RIFT_S_SLAM_GUARD_DIVERGED            ? "diverged"
+			                                                                        : "query_rejected";
+			RIFT_S_WARN("Head position held for %.2f s cause=%s reason=%s slam_valid=%d sample_age_ms=%.1f "
+			            "features=%d camera_gap_ms=%.1f reject_step_m=%.2f losses=%u",
+			            (pose_log_now - t->head_change_ns) / 1e9, cause, rift_s_slam_guard_reason_str(reason),
+			            slam_valid, sample_ts ? (pose_log_now - sample_ts) / 1e6 : -1.0,
+			            features_known ? feature_count : -1,
+			            t->last_camera_arrival_ns ? (pose_log_now - t->last_camera_arrival_ns) / 1e6 : -1.0,
+			            g->last_reject_step_m, t->head_losses);
+			t->head_loss_logged = true;
+			t->head_log_ns = pose_log_now;
+		}
+	}
 	if (pose == RIFT_S_TRACKER_POSE_DEVICE &&
 	    pose_log_now - t->last_published_pose_log_ns >= 5LL * U_TIME_1S_IN_NS) {
 		t->last_published_pose_log_ns = pose_log_now;

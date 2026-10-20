@@ -107,6 +107,12 @@ apply_pose(struct xrt_space_relation *rel,
 	copy_pose_velocities(rel, m_pose);
 }
 
+/*!
+ * HMD pose. With @p allow_position_estimate (Rift S) a finite held position is still published.
+ * Keep the held position renderable while live IMU orientation is tracked. OutOfRange
+ * invokes SteamVR tracking-loss handling even when poseIsValid is true.
+ * Off-head standby without tracked orientation remains OutOfRange.
+ */
 inline void
 apply_head_pose(struct xrt_space_relation *rel, vr::DriverPose_t *pose, bool allow_position_estimate)
 {
@@ -116,9 +122,10 @@ apply_head_pose(struct xrt_space_relation *rel, vr::DriverPose_t *pose, bool all
 		pose->poseIsValid = finite_pose(rel->pose) && (rel->relation_flags & valid) == valid;
 		if (pose->poseIsValid) copy_quat(&rel->pose.orientation, &pose->qRotation);
 	}
-	if ((rel->relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) == 0 ||
-	    (rel->relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) == 0) {
-		pose->result = vr::TrackingResult_Running_OutOfRange;
+	const bool orientation_tracked = (rel->relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0;
+	if ((rel->relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) == 0 || !orientation_tracked) {
+		const bool worn_hold = allow_position_estimate && pose->poseIsValid && orientation_tracked;
+		pose->result = worn_hold ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
 		if (!allow_position_estimate) pose->poseIsValid = false;
 	}
 }

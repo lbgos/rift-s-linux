@@ -1971,7 +1971,7 @@ TEST_CASE("Rift S Touch OpenVR adapter rejects a nonfinite estimate")
 	CHECK(pose.vecPosition[0] == 0);
 }
 
-TEST_CASE("Rift S HMD fallback remains usable during relocalization without claiming tracked position")
+TEST_CASE("Rift S worn HMD hold renders as Running_OK without claiming tracked position")
 {
 	xrt_space_relation rel=XRT_SPACE_RELATION_ZERO;
 	rel.pose={XRT_QUAT_IDENTITY,{0.2f,1.6f,-0.1f}};
@@ -1982,11 +1982,15 @@ TEST_CASE("Rift S HMD fallback remains usable during relocalization without clai
 	pose.result=vr::TrackingResult_Running_OK;
 	apply_head_pose(&rel,&pose,true);
 	CHECK(pose.poseIsValid);
-	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	CHECK(pose.result==vr::TrackingResult_Running_OK);
 	CHECK(pose.vecPosition[1]==Catch::Approx(1.6f));
 	CHECK_FALSE(rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 	apply_head_pose(&rel,&pose,false);
 	CHECK_FALSE(pose.poseIsValid);
+	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	apply_head_pose(&rel,&pose,true);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.result==vr::TrackingResult_Running_OK);
 	// Standby keeps the finite held pose usable, while still reporting OutOfRange.
 	rel.relation_flags=static_cast<xrt_space_relation_flags>(rel.relation_flags & ~XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
 	pose.poseIsValid=true;
@@ -1999,6 +2003,11 @@ TEST_CASE("Rift S HMD fallback remains usable during relocalization without clai
 	pose.poseIsValid=true;
 	apply_head_pose(&rel,&pose,true);
 	CHECK_FALSE(pose.poseIsValid);
+	rel.relation_flags = static_cast<xrt_space_relation_flags>(rel.relation_flags | XRT_SPACE_RELATION_POSITION_VALID_BIT);
+	rel.pose.position.x = std::numeric_limits<float>::quiet_NaN();
+	apply_head_pose(&rel, &pose, true);
+	CHECK_FALSE(pose.poseIsValid);
+	CHECK(pose.result == vr::TrackingResult_Running_OutOfRange);
 }
 
 TEST_CASE("SteamVR held pose clears velocity retained from the last tracked pose")
@@ -2628,7 +2637,7 @@ TEST_CASE("Rift S loss and replacement SLAM replay keeps the SteamVR room pose c
 		pose.result = vr::TrackingResult_Running_OK;
 		apply_head_pose(&relation, &pose, true);
 		if (!tracked) {
-			if (!pose.poseIsValid || pose.result != vr::TrackingResult_Running_OutOfRange)
+			if (!pose.poseIsValid || pose.result != vr::TrackingResult_Running_OK)
 				++invalid_loss_poses;
 			CHECK(pose.vecVelocity[0] == 0);
 		}
