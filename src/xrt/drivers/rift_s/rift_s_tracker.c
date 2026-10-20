@@ -1258,16 +1258,23 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 			                      &imu_relation.angular_velocity);
 			imu_relation.relation_flags =
 			    (enum xrt_space_relation_flags)(held_flags | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
-			                                    XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+			                                    XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
+			                                    (query_relation.relation_flags &
+			                                     (XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT |
+			                                      XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT)));
 		} else {
 			rift_s_slam_guard_fallback_pose(g, &query_fusion, &no_pose_position, &imu_relation.pose);
 			if (t->have_published_imu_pose) {
 				imu_relation.pose.position = t->published_imu_pose.position;
 				if (g->have_good) g->good.position = imu_relation.pose.position;
 			}
-			imu_relation.angular_velocity = t->fusion.last_angular_velocity;
+			// The gyro is IMU-local; relations carry angular velocity in world space.
+			// Keep it valid so the compositor can predict a turning head during a hold.
+			math_quat_rotate_derivative(&imu_relation.pose.orientation, &t->fusion.last_angular_velocity,
+			                            &imu_relation.angular_velocity);
 			imu_relation.relation_flags =
-			    (enum xrt_space_relation_flags)(held_flags | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+			    (enum xrt_space_relation_flags)(held_flags | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+			                                    XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
 		}
 		if (pose == RIFT_S_TRACKER_POSE_DEVICE || !t->have_published_imu_pose) {
 			t->published_imu_pose = imu_relation.pose;

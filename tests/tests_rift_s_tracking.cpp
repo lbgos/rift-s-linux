@@ -2806,3 +2806,39 @@ TEST_CASE("Rift S worn camera hold keeps the displayed position and follows IMU 
 	CHECK(relation.pose.orientation.y == 0);
 	os_mutex_destroy(&tracker.mutex);
 }
+
+TEST_CASE("Rift S live IMU rotation reaches SteamVR prediction in the head frame")
+{
+	rift_s_tracker tracker{};
+	os_mutex_init(&tracker.mutex);
+	tracker.ready_for_data = true;
+	tracker.device_from_imu = XRT_POSE_IDENTITY;
+	const xrt_vec3 up{0, 1, 0};
+	math_quat_from_angle_vector(DEG_TO_RAD(90), &up, &tracker.pose.orientation);
+	tracker.fusion.last_angular_velocity = {1, 2, 3};
+	rift_s_slam_guard_init(&tracker.slam_guard);
+	for (bool camera_paused : {false, true}) {
+		tracker.tracking.slam_enabled = camera_paused;
+		tracker.slam_paused = camera_paused;
+		xrt_space_relation relation;
+		rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &relation);
+		CHECK((relation.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) != 0);
+		CHECK(relation.angular_velocity.x == Catch::Approx(3).margin(1e-5));
+		CHECK(relation.angular_velocity.y == Catch::Approx(2).margin(1e-5));
+		CHECK(relation.angular_velocity.z == Catch::Approx(-1).margin(1e-5));
+#ifdef TEST_RIFT_S_STEAMVR_POSE
+		vr::DriverPose_t pose{};
+		apply_head_pose(&relation, &pose, true);
+		REQUIRE(pose.poseIsValid);
+		CHECK(pose.result == vr::TrackingResult_Running_OK);
+		CHECK(pose.vecAngularVelocity[0] == Catch::Approx(1).margin(1e-5));
+		CHECK(pose.vecAngularVelocity[1] == Catch::Approx(2).margin(1e-5));
+		CHECK(pose.vecAngularVelocity[2] == Catch::Approx(3).margin(1e-5));
+#endif
+	}
+	tracker.standby = true;
+	xrt_space_relation standby{};
+	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &standby);
+	CHECK((standby.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) == 0);
+	os_mutex_destroy(&tracker.mutex);
+}
