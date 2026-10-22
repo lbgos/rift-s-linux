@@ -76,7 +76,9 @@ parse(int argc, char **argv, Options &o)
 		std::string a = argv[i];
 		auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : nullptr; };
 		const char *v = nullptr;
-		if (a == "--autolaunch") {
+		if (a.empty()) {
+			continue; // SteamVR launches manifest apps with one empty argument.
+		} else if (a == "--autolaunch") {
 			o.autolaunch = true;
 		} else if (a == "--portal") {
 			o.portal = true;

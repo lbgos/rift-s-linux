@@ -225,19 +225,47 @@
       "sources": [
         {
           "path": "/user/hand/left/input/joystick",
-          "mode": "joystick",
+          "mode": "scroll",
+          "parameters": {
+            "scroll_mode": "smooth"
+          },
           "inputs": {
-            "position": {
+            "scroll": {
               "output": "/actions/scroll_smooth/in/Scroll"
             }
           }
         },
         {
           "path": "/user/hand/right/input/joystick",
-          "mode": "joystick",
+          "mode": "scroll",
+          "parameters": {
+            "scroll_mode": "smooth"
+          },
           "inputs": {
-            "position": {
+            "scroll": {
               "output": "/actions/scroll_smooth/in/Scroll"
+            }
+          }
+        }
+      ]
+    },
+    "/actions/scroll_discrete": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/joystick",
+          "mode": "scroll",
+          "inputs": {
+            "scroll": {
+              "output": "/actions/scroll_discrete/in/Scroll"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/joystick",
+          "mode": "scroll",
+          "inputs": {
+            "scroll": {
+              "output": "/actions/scroll_discrete/in/Scroll"
             }
           }
         }
