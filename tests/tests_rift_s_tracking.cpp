@@ -574,6 +574,103 @@ TEST_CASE("Rift S counts repeated IMU reports apart from clock errors")
 	os_mutex_destroy(&ctrl.mutex);
 }
 
+TEST_CASE("Rift S stops publishing frozen controller poses after radio silence and resumes on fresh IMU")
+{
+	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
+	ctrl.pose.orientation.w = 1;
+	ctrl.P_imu_device = ctrl.P_device_aim = ctrl.P_device_grip = XRT_POSE_IDENTITY;
+	os_mutex_init(&ctrl.mutex);
+	auto report_at = [&](uint32_t device_us, timepoint_ns arrival_ns) {
+		rift_s_controller_report_t report{};
+		report.num_info = 1;
+		report.info[0].block_id = RIFT_S_CTRL_IMU;
+		report.info[0].imu.timestamp = device_us;
+		rift_s_controller_handle_report(&ctrl, arrival_ns, &report);
+	};
+	report_at(1000, 1000000000);
+	for (auto input : {XRT_INPUT_TOUCH_GRIP_POSE, XRT_INPUT_TOUCH_AIM_POSE}) {
+		xrt_space_relation rel{};
+		REQUIRE(rift_s_controller_get_tracked_pose(&ctrl.base, input, 1100000000, &rel) == XRT_SUCCESS);
+		CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
+		// Repeated firmware samples do not refresh the accepted IMU arrival time.
+		report_at(1000, 1200000000);
+		CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, input, 1250000001, &rel) ==
+		      XRT_ERROR_POSE_NOT_ACTIVE);
+		CHECK(rel.relation_flags == 0);
+		CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, input, 171000000000, &rel) ==
+		      XRT_ERROR_POSE_NOT_ACTIVE);
+		CHECK(rel.relation_flags == 0);
+	}
+	report_at(3000, 171002000000);
+	xrt_space_relation rel{};
+	CHECK(rift_s_controller_get_tracked_pose(&ctrl.base, XRT_INPUT_TOUCH_GRIP_POSE, 171003000000, &rel) ==
+	      XRT_SUCCESS);
+	CHECK((rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT) != 0);
+	os_mutex_destroy(&ctrl.mutex);
+}
+
+TEST_CASE("Rift S battery uses validated radio percentages and expires across silence")
+{
+	rift_s_controller ctrl{};
+	ctrl.sys = &online_test_system();
+	os_mutex_init(&ctrl.mutex);
+	bool present = true, charging = true;
+	float charge = -1;
+	auto query = [&] {
+		REQUIRE(rift_s_controller_get_battery_status(&ctrl.base, &present, &charging, &charge) == XRT_SUCCESS);
+		CHECK_FALSE(charging);
+	};
+	auto report = [&](uint8_t value, timepoint_ns stamp) {
+		rift_s_controller_report_t input{};
+		input.num_info = 1;
+		input.info[0].block_id = RIFT_S_CTRL_MASK08;
+		input.info[0].maskbyte.val = value;
+		rift_s_controller_handle_report(&ctrl, stamp, &input);
+	};
+	query();
+	CHECK_FALSE(present); // calloc zero is unknown, not empty.
+	for (uint8_t value : {0, 10, 80, 100}) {
+		report(value, os_monotonic_get_ns());
+		query();
+		CHECK(present);
+		CHECK(charge == Catch::Approx(value / 100.f));
+	}
+	// Battery notifications are change-only. Live reports keep the last value
+	// available even after the notification itself is older than the timeout.
+	auto now = os_monotonic_get_ns();
+	report(80, now - 400000000);
+	rift_s_controller_report_t input{};
+	input.num_info = 1;
+	input.info[0].block_id = RIFT_S_CTRL_BUTTONS;
+	rift_s_controller_handle_report(&ctrl, now - 200000000, &input);
+	rift_s_controller_handle_report(&ctrl, now, &input);
+	query();
+	CHECK(present);
+	CHECK(charge == Catch::Approx(.8f));
+	report(255, os_monotonic_get_ns());
+	query();
+	CHECK_FALSE(present);
+	report(70, os_monotonic_get_ns() - 300000000);
+	query();
+	CHECK_FALSE(present);
+	// A controller waking without a battery notification must not revive 70%.
+	rift_s_controller_handle_report(&ctrl, os_monotonic_get_ns(), &input);
+	query();
+	CHECK_FALSE(present);
+	report(60, os_monotonic_get_ns());
+	query();
+	CHECK(present);
+	xrt_atomic_s32_store(&ctrl.sys->transport_online, 0);
+	query();
+	CHECK_FALSE(present);
+	xrt_atomic_s32_store(&ctrl.sys->transport_online, 1);
+	rift_s_controller_device_lost(&ctrl);
+	query();
+	CHECK_FALSE(present);
+	os_mutex_destroy(&ctrl.mutex);
+}
+
 TEST_CASE("Rift S IMU clock resync needs a run or a large repeated backwards step")
 {
 	CHECK_FALSE(rift_s_imu_clock_needs_resync(2000, 1)); // a late resend
@@ -1971,7 +2068,7 @@ TEST_CASE("Rift S Touch OpenVR adapter rejects a nonfinite estimate")
 	CHECK(pose.vecPosition[0] == 0);
 }
 
-TEST_CASE("Rift S HMD fallback remains usable during relocalization without claiming tracked position")
+TEST_CASE("Rift S worn HMD hold renders as Running_OK without claiming tracked position")
 {
 	xrt_space_relation rel=XRT_SPACE_RELATION_ZERO;
 	rel.pose={XRT_QUAT_IDENTITY,{0.2f,1.6f,-0.1f}};
@@ -1982,11 +2079,15 @@ TEST_CASE("Rift S HMD fallback remains usable during relocalization without clai
 	pose.result=vr::TrackingResult_Running_OK;
 	apply_head_pose(&rel,&pose,true);
 	CHECK(pose.poseIsValid);
-	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	CHECK(pose.result==vr::TrackingResult_Running_OK);
 	CHECK(pose.vecPosition[1]==Catch::Approx(1.6f));
 	CHECK_FALSE(rel.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 	apply_head_pose(&rel,&pose,false);
 	CHECK_FALSE(pose.poseIsValid);
+	CHECK(pose.result==vr::TrackingResult_Running_OutOfRange);
+	apply_head_pose(&rel,&pose,true);
+	CHECK(pose.poseIsValid);
+	CHECK(pose.result==vr::TrackingResult_Running_OK);
 	// Standby keeps the finite held pose usable, while still reporting OutOfRange.
 	rel.relation_flags=static_cast<xrt_space_relation_flags>(rel.relation_flags & ~XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
 	pose.poseIsValid=true;
@@ -1999,6 +2100,11 @@ TEST_CASE("Rift S HMD fallback remains usable during relocalization without clai
 	pose.poseIsValid=true;
 	apply_head_pose(&rel,&pose,true);
 	CHECK_FALSE(pose.poseIsValid);
+	rel.relation_flags = static_cast<xrt_space_relation_flags>(rel.relation_flags | XRT_SPACE_RELATION_POSITION_VALID_BIT);
+	rel.pose.position.x = std::numeric_limits<float>::quiet_NaN();
+	apply_head_pose(&rel, &pose, true);
+	CHECK_FALSE(pose.poseIsValid);
+	CHECK(pose.result == vr::TrackingResult_Running_OutOfRange);
 }
 
 TEST_CASE("SteamVR held pose clears velocity retained from the last tracked pose")
@@ -2628,7 +2734,7 @@ TEST_CASE("Rift S loss and replacement SLAM replay keeps the SteamVR room pose c
 		pose.result = vr::TrackingResult_Running_OK;
 		apply_head_pose(&relation, &pose, true);
 		if (!tracked) {
-			if (!pose.poseIsValid || pose.result != vr::TrackingResult_Running_OutOfRange)
+			if (!pose.poseIsValid || pose.result != vr::TrackingResult_Running_OK)
 				++invalid_loss_poses;
 			CHECK(pose.vecVelocity[0] == 0);
 		}
@@ -2698,5 +2804,41 @@ TEST_CASE("Rift S worn camera hold keeps the displayed position and follows IMU 
 	tracker.standby = true;
 	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &relation);
 	CHECK(relation.pose.orientation.y == 0);
+	os_mutex_destroy(&tracker.mutex);
+}
+
+TEST_CASE("Rift S live IMU rotation reaches SteamVR prediction in the head frame")
+{
+	rift_s_tracker tracker{};
+	os_mutex_init(&tracker.mutex);
+	tracker.ready_for_data = true;
+	tracker.device_from_imu = XRT_POSE_IDENTITY;
+	const xrt_vec3 up{0, 1, 0};
+	math_quat_from_angle_vector(DEG_TO_RAD(90), &up, &tracker.pose.orientation);
+	tracker.fusion.last_angular_velocity = {1, 2, 3};
+	rift_s_slam_guard_init(&tracker.slam_guard);
+	for (bool camera_paused : {false, true}) {
+		tracker.tracking.slam_enabled = camera_paused;
+		tracker.slam_paused = camera_paused;
+		xrt_space_relation relation;
+		rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &relation);
+		CHECK((relation.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) != 0);
+		CHECK(relation.angular_velocity.x == Catch::Approx(3).margin(1e-5));
+		CHECK(relation.angular_velocity.y == Catch::Approx(2).margin(1e-5));
+		CHECK(relation.angular_velocity.z == Catch::Approx(-1).margin(1e-5));
+#ifdef TEST_RIFT_S_STEAMVR_POSE
+		vr::DriverPose_t pose{};
+		apply_head_pose(&relation, &pose, true);
+		REQUIRE(pose.poseIsValid);
+		CHECK(pose.result == vr::TrackingResult_Running_OK);
+		CHECK(pose.vecAngularVelocity[0] == Catch::Approx(1).margin(1e-5));
+		CHECK(pose.vecAngularVelocity[1] == Catch::Approx(2).margin(1e-5));
+		CHECK(pose.vecAngularVelocity[2] == Catch::Approx(3).margin(1e-5));
+#endif
+	}
+	tracker.standby = true;
+	xrt_space_relation standby{};
+	rift_s_tracker_get_tracked_pose(&tracker, RIFT_S_TRACKER_POSE_DEVICE, os_monotonic_get_ns(), &standby);
+	CHECK((standby.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) == 0);
 	os_mutex_destroy(&tracker.mutex);
 }

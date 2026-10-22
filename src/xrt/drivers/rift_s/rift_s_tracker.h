@@ -103,6 +103,12 @@ struct rift_s_tracker
 	bool have_published_imu_pose;
 	timepoint_ns last_published_pose_log_ns;
 	struct xrt_pose published_imu_pose;
+	//! Published head position tracking, for the loss/recovery warnings in vrserver.txt.
+	bool head_tracked;
+	bool head_loss_logged;
+	uint32_t head_losses;
+	timepoint_ns head_change_ns;
+	timepoint_ns head_log_ns;
 
 	//! Don't process IMU / video until started
 	bool ready_for_data;

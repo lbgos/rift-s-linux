@@ -332,6 +332,30 @@ TEST_CASE("Feature gate: face-down or covered cameras hold, features back re-ini
 	CHECK_FALSE(gate.lost);
 }
 
+TEST_CASE("Feature gate: initial features finish acquisition without restarting the backend")
+{
+	rift_s_slam_feature_gate gate = {};
+	int64_t ts = MS;
+	auto feed = [&](int count, int frames) {
+		rift_s_slam_feature_event last = RIFT_S_SLAM_FEATURES_NO_CHANGE;
+		for (int i = 0; i < frames; ++i) {
+			ts += 33 * MS;
+			auto event = rift_s_slam_feature_gate_update(&gate, true, count, ts);
+			if (event != RIFT_S_SLAM_FEATURES_NO_CHANGE) last = event;
+		}
+		return last;
+	};
+	// Basalt can publish zero features for longer than the dwell during initialization.
+	CHECK(feed(0, 30) == RIFT_S_SLAM_FEATURES_LOST);
+	CHECK(gate.lost);
+	CHECK(feed(80, 30) == RIFT_S_SLAM_FEATURES_NO_CHANGE);
+	CHECK_FALSE(gate.lost);
+	// Once initialized, a real loss and return must still request reinitialization.
+	CHECK(feed(0, 30) == RIFT_S_SLAM_FEATURES_LOST);
+	CHECK(feed(80, 30) == RIFT_S_SLAM_FEATURES_RETURNED);
+	CHECK_FALSE(gate.lost);
+}
+
 TEST_CASE("Source guard ignores duplicate and historical timestamps")
 {
 	Sim s;

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <limits>
+#include <time.h>
 
 struct CameraFixture : xrt_camera
 {
@@ -33,13 +34,13 @@ struct CameraFixture : xrt_camera
 		xrt_frame_reference(&frame, nullptr);
 	}
 	void
-	publish(uint8_t value)
+	publish(uint8_t value, int64_t age_ns = 0)
 	{
 		std::lock_guard guard(lock);
 		xrt_frame *next = nullptr;
 		u_frame_create_one_off(XRT_FORMAT_R8G8B8, 8, 4, &next);
 		memset(next->data, value, next->size);
-		next->timestamp = os_monotonic_get_ns();
+		next->timestamp = os_monotonic_get_ns() - age_ns;
 		xrt_frame_reference(&frame, next);
 		xrt_frame_reference(&next, nullptr);
 	}
@@ -334,6 +335,42 @@ TEST_CASE("Native camera queue publishes stable frames and recovers from a busy 
 		camera.StopVideoStream();
 	}
 	CHECK(queue.destroyed);
+}
+
+TEST_CASE("SteamVR camera capture ticks use the server raw clock and preserve capture age")
+{
+	CameraFixture provider;
+	xrt_device device{};
+	xrt_tracking_origin origin{};
+	origin.initial_offset = XRT_POSE_IDENTITY;
+	device.camera = &provider;
+	device.tracking_origin = &origin;
+	device.get_tracked_pose = [](xrt_device *, xrt_input_name, int64_t, xrt_space_relation *out) {
+		*out = XRT_SPACE_RELATION_ZERO;
+		out->pose = XRT_POSE_IDENTITY;
+		return XRT_SUCCESS;
+	};
+	NativeQueueFixture queue;
+	MonadoCamera camera(&device, &queue, &queue);
+	REQUIRE(camera.StartVideoStream());
+	std::this_thread::sleep_for(std::chrono::milliseconds(40));
+	provider.publish(110, 20 * U_TIME_1MS_IN_NS);
+	auto *frame = wait_frame(camera);
+	REQUIRE(frame);
+	timespec raw{};
+	REQUIRE(clock_gettime(CLOCK_MONOTONIC_RAW, &raw) == 0);
+	int64_t raw_now = raw.tv_sec * U_TIME_1S_IN_NS + raw.tv_nsec;
+	int64_t mono_now = os_monotonic_get_ns();
+	double capture_age = mono_now / 1e9 - frame->m_flFrameCaptureTime_DriverAbsolute;
+	double server_age = (raw_now - static_cast<int64_t>(frame->m_nFrameCaptureTicks_ServerAbsolute)) / 1e9;
+	CHECK(capture_age >= 0.020);
+	CHECK(server_age == Catch::Approx(capture_age).margin(0.002));
+	{
+		std::lock_guard lock(queue.mutex);
+		CHECK(queue.value<uint64_t>("/server_time_ticks") == frame->m_nFrameCaptureTicks_ServerAbsolute);
+		CHECK(queue.value<double>("/frame_time_monotonic") == frame->m_flFrameCaptureTime_DriverAbsolute);
+	}
+	camera.ReleaseVideoStreamFrame(frame);
 }
 
 TEST_CASE("2D camera projection rays use the same local region for both eye textures")

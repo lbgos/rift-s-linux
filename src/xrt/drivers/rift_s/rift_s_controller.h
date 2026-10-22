@@ -284,9 +284,12 @@ struct rift_s_controller
 
 	/* Controls / buttons state */
 	timepoint_ns last_controls_local_time_ns;
+	//! Battery notifications arrive on change. Invalidate them across a radio-report gap.
+	timepoint_ns last_report_local_time_ns;
+	timepoint_ns last_battery_local_time_ns;
 
 	/* 0x8, 0x0c 0x0d or 0xe block */
-	uint8_t mask08;
+	uint8_t mask08; //!< Battery percentage; valid only after a range-checked notification.
 	uint8_t buttons;
 	uint8_t fingers;
 	uint8_t mask0e;
@@ -413,6 +416,9 @@ rift_s_controller_push_pose_observation(struct xrt_device *xdev, const struct t_
 // the caller keeps the system devices alive and serializes IMU updates, as radio dispatch does.
 void
 rift_s_controller_update_motion(struct rift_s_controller *ctrl, timepoint_ns capture_ns);
+
+xrt_result_t
+rift_s_controller_get_battery_status(struct xrt_device *xdev, bool *out_present, bool *out_charging, float *out_charge);
 
 // Controller pose callback. Optical loss preserves IMU orientation and estimates hand position.
 xrt_result_t

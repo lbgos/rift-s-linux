@@ -4,6 +4,8 @@
 //
 // One dashboard overlay per screen. A screen is captured only while its tab is
 // visible. Laser mouse and SteamVR keyboard events are injected as desktop input.
+// On KWin the tabs replace SteamVR's and Steam's own Desktop buttons, which stay
+// black there, so those are hidden while the tabs exist.
 // SteamVR starts it through its app manifest (autolaunch) and stops it with
 // VREvent_Quit; a pidfd on vrserver covers a crashed server.
 #include "capture.hpp"
@@ -45,6 +47,8 @@ namespace rd {
 namespace {
 
 constexpr const char *kAppKey = "lbgos.rifts.desktop";
+// Steam client's Desktop view. It captures through X11, or PipeWire only when Steam runs with -pipewire.
+constexpr const char *kSteamDesktopKey = "valve.steam.desktop";
 // Newer OpenVR flags than the bundled 1.16 header: dashboard control bar with a keyboard button.
 constexpr auto kIgnoreTextureAlpha = vr::VROverlayFlags(1 << 22);
 constexpr auto kEnableControlBar = vr::VROverlayFlags(1 << 23);
@@ -76,7 +80,9 @@ parse(int argc, char **argv, Options &o)
 		std::string a = argv[i];
 		auto value = [&]() -> const char * { return i + 1 < argc ? argv[++i] : nullptr; };
 		const char *v = nullptr;
-		if (a == "--autolaunch") {
+		if (a.empty()) {
+			continue; // SteamVR launches manifest apps with one empty argument.
+		} else if (a == "--autolaunch") {
 			o.autolaunch = true;
 		} else if (a == "--portal") {
 			o.portal = true;
@@ -272,7 +278,7 @@ public:
 	~App()
 	{
 		tabs_.clear(); // captures before their PipeWire core
-		set_native_desktop_hidden(false);
+		set_duplicate_desktops_hidden(false);
 		vr_disconnect();
 		desktop_.reset();
 		if (context_) {
@@ -426,7 +432,7 @@ private:
 			vr_.overlay->DestroyOverlay(t->main);
 		}
 		tabs_.clear();
-		set_native_desktop_hidden(false);
+		set_duplicate_desktops_hidden(false);
 		vr_disconnect();
 		return 0;
 	}
@@ -516,7 +522,41 @@ private:
 			vr_.overlay->SetOverlayName(tabs_[i]->main, name.c_str());
 			vr_.overlay->SetOverlayName(tabs_[i]->thumb, name.c_str());
 		}
-		set_native_desktop_hidden(!tabs_.empty() && !strcmp(desktop_->name(), "kwin"));
+		set_duplicate_desktops_hidden(!tabs_.empty() && !strcmp(desktop_->name(), "kwin"));
+	}
+
+	void
+	set_duplicate_desktops_hidden(bool hidden)
+	{
+		duplicates_hidden_ = hidden;
+		set_native_desktop_hidden(hidden);
+		if (hidden) {
+			steam_desktop_check_at_ = {}; // next tick
+		} else if (steam_desktop_hidden_) {
+			set_steam_desktop_visible(true);
+			steam_desktop_hidden_ = false;
+		}
+	}
+
+	// Steam creates its Desktop overlay on connect and recreates it later, and other
+	// clients' flags read back as 0, so the flag is cleared again every few seconds.
+	void
+	hide_steam_desktop(Clock::time_point now)
+	{
+		if (!duplicates_hidden_ || now < steam_desktop_check_at_) return;
+		steam_desktop_check_at_ = now + std::chrono::seconds(3);
+		if (set_steam_desktop_visible(false) && !steam_desktop_hidden_) {
+			fprintf(stderr, "rifts-desktop: hid Steam's Desktop button\n");
+			steam_desktop_hidden_ = true;
+		}
+	}
+
+	bool
+	set_steam_desktop_visible(bool visible)
+	{
+		vr::VROverlayHandle_t h = vr::k_ulOverlayHandleInvalid;
+		if (!vr_.overlay || vr_.overlay->FindOverlay(kSteamDesktopKey, &h) != vr::VROverlayError_None) return false;
+		return vr_.overlay->SetOverlayFlag(h, vr::VROverlayFlags_VisibleInDashboard, visible) == vr::VROverlayError_None;
 	}
 
 	void
@@ -624,6 +664,7 @@ private:
 			}
 		}
 		set_tick(any_visible);
+		hide_steam_desktop(now);
 		if (opt_.stats) {
 			stats(now);
 		}
@@ -750,7 +791,8 @@ private:
 	std::vector<std::unique_ptr<Tab>> tabs_;
 	int timer_fd_ = -1, signal_fd_ = -1, server_fd_ = -1;
 	bool running_ = true, fast_tick_ = false, screens_dirty_ = false, dumped_ = false;
-	bool native_desktop_hidden_ = false;
+	bool native_desktop_hidden_ = false, duplicates_hidden_ = false, steam_desktop_hidden_ = false;
+	Clock::time_point steam_desktop_check_at_;
 	Clock::time_point stats_at_;
 	rusage stats_usage_ = {};
 };

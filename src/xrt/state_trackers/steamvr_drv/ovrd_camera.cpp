@@ -15,10 +15,21 @@
 #include <sys/syscall.h>
 #include <pthread.h>
 #include <sched.h>
+#include <time.h>
 #include <unistd.h>
 
 DEBUG_GET_ONCE_BOOL_OPTION(steamvr_bench, "MONADO_STEAMVR_BENCH", false)
 DEBUG_GET_ONCE_BOOL_OPTION(bench_camera, "MONADO_STEAMVR_BENCH_CAMERA", false)
+
+// SteamVR's Linux system ticks use CLOCK_MONOTONIC_RAW. Monado capture times
+// use CLOCK_MONOTONIC, whose rate/offset can differ after clock discipline.
+static int64_t
+server_time_ns()
+{
+	timespec now{};
+	clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+	return os_timespec_to_ns(&now);
+}
 
 std::atomic<MonadoCamera *> MonadoCamera::s_instance{nullptr};
 
@@ -248,7 +259,7 @@ MonadoCamera::GetVideoStreamFrame()
 	if (!active || paused)
 		return nullptr;
 	Buffer *latest = nullptr;
-	uint64_t now = os_monotonic_get_ns();
+	uint64_t now = server_time_ns();
 	for (auto &b : buffers) {
 		if (b.ready && !b.acquired && now >= b.frame.m_nFrameCaptureTicks_ServerAbsolute &&
 		    now - b.frame.m_nFrameCaptureTicks_ServerAbsolute <= 250 * U_TIME_1MS_IN_NS &&
@@ -373,10 +384,11 @@ MonadoCamera::run()
 					xrt_frame_reference(&frame, nullptr);
 					continue;
 				}
+				const uint64_t server_ticks = frame->timestamp + server_time_ns() - os_monotonic_get_ns();
 				if (queue_handle) {
 					double interval =
 					    last_timestamp ? (frame->timestamp - last_timestamp) / 1e9 : 1.0 / 30;
-					publish_queue(rgba.data(), frame->timestamp, native_sequence++, interval);
+					publish_queue(rgba.data(), frame->timestamp, server_ticks, native_sequence++, interval);
 				}
 				for (size_t i = 0; i < buffers.size(); ++i) {
 					auto &b = buffers[i];
@@ -398,7 +410,7 @@ MonadoCamera::run()
 					    (static_cast<int64_t>(frame->timestamp) -
 					     static_cast<int64_t>(os_monotonic_get_ns())) /
 					    1e9;
-					b.frame.m_nFrameCaptureTicks_ServerAbsolute = frame->timestamp;
+					b.frame.m_nFrameCaptureTicks_ServerAbsolute = server_ticks;
 					xrt_matrix_4x4 matrix;
 					math_matrix_4x4_isometry_from_pose(&rel.pose, &matrix);
 					for (int row = 0; row < 3; ++row)
@@ -541,7 +553,7 @@ MonadoCamera::initialize_queue()
 }
 
 void
-MonadoCamera::publish_queue(const uint8_t *pixels, int64_t timestamp, uint64_t sequence, double interval)
+MonadoCamera::publish_queue(const uint8_t *pixels, int64_t timestamp, uint64_t server_ticks, uint64_t sequence, double interval)
 {
 	vr::PropertyContainerHandle_t block = 0;
 	void *data = nullptr;
@@ -554,7 +566,7 @@ MonadoCamera::publish_queue(const uint8_t *pixels, int64_t timestamp, uint64_t s
 	memcpy(data, pixels, bytes());
 	int32_t size = bytes();
 	double capture = timestamp / 1e9;
-	uint64_t ticks = timestamp;
+	uint64_t ticks = server_ticks;
 	double elapsed = (timestamp - start_ns) / 1e9;
 	void *values[] = {&size, &sequence, &capture, &ticks, &interval, &elapsed};
 	uint32_t sizes[] = {sizeof(size),  sizeof(sequence), sizeof(capture),

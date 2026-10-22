@@ -487,10 +487,16 @@ rift_s_slam_feature_gate_update(struct rift_s_slam_feature_gate *gate, bool know
 		if (ts_ns - gate->crossing_since_ns >= RIFT_S_SLAM_FEATURES_DWELL_NS) {
 			gate->lost = low;
 			gate->crossing = false;
-			return low ? RIFT_S_SLAM_FEATURES_LOST : RIFT_S_SLAM_FEATURES_RETURNED;
+			if (low) return RIFT_S_SLAM_FEATURES_LOST;
+			// Startup poses can have no features until VIO initializes. Restarting on
+			// that first acquisition puts the replacement backend into the same loop.
+			bool reacquired = gate->have_features;
+			gate->have_features = true;
+			return reacquired ? RIFT_S_SLAM_FEATURES_RETURNED : RIFT_S_SLAM_FEATURES_NO_CHANGE;
 		}
 	} else {
 		gate->crossing = false;
+		if (!low) gate->have_features = true;
 	}
 	return RIFT_S_SLAM_FEATURES_NO_CHANGE;
 }

@@ -946,6 +946,7 @@ public:
 	Activate(vr::TrackedDeviceIndex_t unObjectId)
 	{
 		ovrd_log("Activating Controller SteamVR[%d]\n", unObjectId);
+		m_batteryInitialized = false;
 
 		if (!m_handed_controller) {
 			//! @todo handle trackers etc
@@ -1191,6 +1192,33 @@ public:
 	RunFrame()
 	{
 		m_xdev->update_inputs(m_xdev);
+		if (m_xdev->supported.battery_status) {
+			bool present = false, charging = false;
+			float charge = 0;
+			if (xrt_device_get_battery_status(m_xdev, &present, &charging, &charge) != XRT_SUCCESS ||
+			    !std::isfinite(charge) || charge < 0 || charge > 1)
+				present = false;
+			// Publish changes only. Mark missing/stale telemetry as unavailable so
+			// Settings and SteamVR cannot display an old percentage as current.
+			if (!m_batteryInitialized || present != m_batteryPresent ||
+			    (present && (charge != m_batteryCharge || charging != m_batteryCharging))) {
+				auto *properties = vr::VRProperties();
+				properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_DeviceProvidesBatteryStatus_Bool, true);
+				if (present) {
+					properties->SetFloatProperty(m_ulPropertyContainer, vr::Prop_DeviceBatteryPercentage_Float, charge);
+					properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_DeviceIsCharging_Bool, charging);
+				} else {
+					properties->SetPropertyError(m_ulPropertyContainer, vr::Prop_DeviceBatteryPercentage_Float,
+					                             vr::TrackedProp_ValueNotProvidedByDevice);
+					properties->SetPropertyError(m_ulPropertyContainer, vr::Prop_DeviceIsCharging_Bool,
+					                             vr::TrackedProp_ValueNotProvidedByDevice);
+				}
+				m_batteryInitialized = true;
+				m_batteryPresent = present;
+				m_batteryCharge = charge;
+				m_batteryCharging = charging;
+			}
+		}
 		xrt_pose bench_pose;
 		float bench_trigger = 0;
 		bool synthetic = is_rift_s_touch(m_xdev) && m_bench.sample(bench_pose, bench_trigger);
@@ -1348,6 +1376,8 @@ private:
 	//! Head, for the resting position of a controller that has never had a position fix.
 	struct xrt_device *m_xhmd = NULL;
 	bool m_had_position = false;
+	bool m_batteryInitialized = false, m_batteryPresent = false, m_batteryCharging = false;
+	float m_batteryCharge = 0;
 	enum xrt_hand m_hand;
 	bool m_handed_controller;
 
