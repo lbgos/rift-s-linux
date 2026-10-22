@@ -119,7 +119,7 @@ private:
 	bool
 	initialize_queue();
 	void
-	publish_queue(const uint8_t *pixels, int64_t timestamp, uint64_t sequence, double interval);
+	publish_queue(const uint8_t *pixels, int64_t timestamp, uint64_t server_ticks, uint64_t sequence, double interval);
 	static std::atomic<MonadoCamera *> s_instance;
 
 	void
