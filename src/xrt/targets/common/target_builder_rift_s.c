@@ -120,6 +120,15 @@ rift_s_open_system_impl(struct xrt_builder *xb,
 		goto unlock_and_fail;
 	}
 
+	// The HID half can enumerate without the USB 3 camera half. Reject that state
+	// before firmware reads, SLAM initialization and display/camera startup waits.
+	if (u_builder_find_prober_device(xpdevs, xpdev_count, OCULUS_VR_INC_VID, OCULUS_RIFT_S_CAMERA_PID,
+	                                XRT_BUS_TYPE_USB) == NULL) {
+		RIFT_S_ERROR("Rift S cameras are missing from USB (2833:4051). Replug the headset USB into a USB 3 "
+		             "port, then start SteamVR again.");
+		goto unlock_and_fail;
+	}
+
 	struct os_hid_device *hid_hmd = NULL;
 	int result = xrt_prober_open_hid_interface(xp, dev_hmd, RIFT_S_INTF_HMD, &hid_hmd);
 	if (result != 0) {

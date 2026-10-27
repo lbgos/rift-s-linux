@@ -87,7 +87,7 @@ pkgbase = rift-s-linux-git
 	source = settings-licenses.py
 	source = settings-license-fallbacks.json
 	sha256sums = SKIP
-	sha256sums = 3fbda3da3bb6fdd909d6a507a1a49ede88479ab47e5b7bf88aba6d5365005ba6
+	sha256sums = 25ed4a570ad65986103cfd2ecf6ad66538a10c99ec62fb5b16fb3faba755fb59
 	sha256sums = f3eaa7437858d201c5e48c6ec62e38a28c5286112d6a994a695821db78462c2b
 	sha256sums = 2093d3111612e01f10ea0d0478d100faea010edaa738997d2e4866a7072c1e06
 
