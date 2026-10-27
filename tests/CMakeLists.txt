@@ -151,6 +151,11 @@ if(XRT_MODULE_CONSTELLATION_TRACKING)
 endif()
 
 if(XRT_BUILD_DRIVER_RIFT_S)
+	add_executable(tests_rift_s_startup tests_rift_s_startup.cpp)
+	target_include_directories(tests_rift_s_startup PRIVATE ../src/xrt/drivers)
+	target_link_libraries(tests_rift_s_startup PRIVATE xrt-external-catch2 xrt-interfaces target_lists drv_rift_s aux_tracking aux_util_sink)
+	add_test(NAME tests_rift_s_startup COMMAND tests_rift_s_startup)
+
 	add_executable(tests_rift_s_motion tests_rift_s_motion.cpp ../src/xrt/drivers/rift_s/rift_s_motion.cpp)
 	target_include_directories(tests_rift_s_motion PRIVATE ../src/xrt/drivers/rift_s)
 	target_link_libraries(tests_rift_s_motion PRIVATE xrt-external-catch2 aux_math aux_util)

@@ -2,3 +2,6 @@
 # Seat access only; do not grant all users world-writable USB access.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2833", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="2833", TAG+="uaccess"
+
+# Keep the Rift S camera's USB device awake while tracking is in use.
+ACTION=="add|bind", SUBSYSTEM=="usb", ATTR{idVendor}=="2833", ATTR{idProduct}=="4051", TEST=="power/control", ATTR{power/control}="on"

@@ -1594,7 +1594,7 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
 	}
 	if (m_headDetect || debug_get_bool_option_steamvr_bench()) {
 		vr::VRProperties()->SetBoolProperty(m_ulPropertyContainer, vr::Prop_ContainsProximitySensor_Bool, true);
-		auto proximity_error = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, "/input/proximity", &m_proximity);
+		auto proximity_error = vr::VRDriverInput()->CreateBooleanComponent(m_ulPropertyContainer, "/proximity", &m_proximity);
 		ovrd_log("HMD proximity component: error=%d\n", proximity_error);
 	}
 	if (debug_get_bool_option_steamvr_bench())

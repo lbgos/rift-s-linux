@@ -26,6 +26,7 @@ extern "C" {
 
 #define OCULUS_VR_INC_VID 0x2833
 #define OCULUS_RIFT_S_PID 0x0051
+#define OCULUS_RIFT_S_CAMERA_PID 0x4051
 
 /*!
  * Builder setup for Oculus Rift S HMD.

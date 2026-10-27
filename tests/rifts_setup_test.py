@@ -9,6 +9,8 @@ import importlib.machinery
 import importlib.util
 import sys
 import unittest
+import tempfile
+from pathlib import Path
 
 loader = importlib.machinery.SourceFileLoader('rifts_setup', sys.argv.pop(1))
 setup = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -80,6 +82,34 @@ class ReleaseAsset(unittest.TestCase):
         self.assertEqual(setup.release_asset('universal build', 'r32', self.NAMES), 'rift-s-linux-r32-x86_64.tar.xz')
         self.assertEqual(setup.release_asset('Arch package rift-s-linux-bin', 'r32', self.NAMES), self.NAMES[0])
         self.assertIsNone(setup.release_asset('Arch package rift-s-linux-git', 'r32', self.NAMES))
+
+
+class SafeMode(unittest.TestCase):
+    def test_warns_without_editing_settings_or_exposing_other_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'config').mkdir()
+            path = root / 'config/steamvr.vrsettings'
+            original = '{"driver_monado":{"blocked_by_safe_mode":true},"unrelated":"private"}'
+            path.write_text(original)
+            status = list(setup.steamvr_driver_status([root]))
+            self.assertEqual(len(status), 1)
+            self.assertIn('blocked_by_safe_mode=true', status[0])
+            self.assertIn('Manage Add-ons', status[0])
+            self.assertNotIn('private', status[0])
+            self.assertEqual(path.read_text(), original)
+
+    def test_missing_unblocked_and_malformed_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(list(setup.steamvr_driver_status([root])), [])
+            (root / 'config').mkdir()
+            path = root / 'config/steamvr.vrsettings'
+            path.write_text('{"driver_monado":{"blocked_by_safe_mode":false}}')
+            self.assertIn('not blocked', next(setup.steamvr_driver_status([root])))
+            for text in ['{', '[]', '{"driver_monado":null}']:
+                path.write_text(text)
+                self.assertIn('unable to inspect', next(setup.steamvr_driver_status([root])))
 
 
 if __name__ == '__main__':

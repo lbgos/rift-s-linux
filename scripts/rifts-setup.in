@@ -382,6 +382,24 @@ def chaperone_universes(roots):
             yield 'unreadable chaperone_info.vrchap'
 
 
+def steamvr_driver_status(roots):
+    # Inspect only our safe-mode flag, not unrelated Steam account settings.
+    for root in roots:
+        path = root / 'config/steamvr.vrsettings'
+        try:
+            data = json.loads(path.read_text())
+            blocked = data.get('driver_monado', {}).get('blocked_by_safe_mode')
+            if blocked is True:
+                yield f'{path}: driver_monado.blocked_by_safe_mode=true. After fixing USB enumeration, ' \
+                      're-enable the Monado add-on in SteamVR Settings > Startup/Shutdown > Manage Add-ons.'
+            elif blocked is False:
+                yield f'{path}: Monado add-on is not blocked by safe mode'
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, AttributeError):
+            yield f'{path}: unable to inspect Monado safe-mode status'
+
+
 def triage_context(home, registry_path, state, directory):
     os_release = dict(re.findall(r'^(\w+)="?([^"\n]*)"?$', Path('/etc/os-release').read_text(), re.M)) \
         if Path('/etc/os-release').is_file() else {}
@@ -415,6 +433,7 @@ def triage_context(home, registry_path, state, directory):
         ('SteamVR runtime', runtime or 'not found'),
         *(('SteamVR version', version) for version in steamvr_versions(roots)),
         *(('Chaperone universes', universes) for universes in chaperone_universes(roots)),
+        *(('Monado add-on', status) for status in steamvr_driver_status(roots)),
         ('OpenVR registry', registry_path),
         *(('Registered driver', path) for path in registry.get('external_drivers') or [])])
     section('Running processes', [
