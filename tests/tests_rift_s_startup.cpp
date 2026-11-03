@@ -8,8 +8,8 @@
 struct Prober : xrt_prober
 {
 	xrt_prober_device hmd{OCULUS_VR_INC_VID, OCULUS_RIFT_S_PID, XRT_BUS_TYPE_USB, 0};
-	xrt_prober_device camera{OCULUS_VR_INC_VID, OCULUS_RIFT_S_CAMERA_PID, XRT_BUS_TYPE_USB, 0};
-	std::array<xrt_prober_device *, 2> devices{&hmd, &camera};
+	xrt_prober_device hub{OCULUS_VR_INC_VID, OCULUS_RIFT_S_USB3_HUB_PID, XRT_BUS_TYPE_USB, 0};
+	std::array<xrt_prober_device *, 2> devices{&hmd, &hub};
 	size_t count = 1;
 	unsigned opens = 0, unlocks = 0;
 
@@ -34,7 +34,7 @@ struct Prober : xrt_prober
 	}
 };
 
-TEST_CASE("Rift S USB 2-only startup fails before opening HID or initializing tracking")
+TEST_CASE("Rift S startup without the USB 3 hub fails before opening HID or initializing tracking")
 {
 	Prober prober;
 	auto *builder = rift_s_builder_create();
@@ -51,23 +51,23 @@ TEST_CASE("Rift S USB 2-only startup fails before opening HID or initializing tr
 	builder->destroy(builder);
 }
 
-TEST_CASE("Rift S startup requires its camera VID/PID on USB")
+// The cameras enumerate only after power-on, so the hub alone must let startup proceed.
+TEST_CASE("Rift S startup requires its USB 3 hub VID/PID, not the cameras")
 {
 	Prober prober;
 	prober.count = 2;
 	auto *builder = rift_s_builder_create();
 	xrt_system_devices *devices = nullptr;
 	xrt_space_overseer *spaces = nullptr;
-	SECTION("camera present") {}
-	SECTION("wrong vendor") { prober.camera.vendor_id = 0x1234; }
-	SECTION("wrong product") { prober.camera.product_id = 0x1234; }
-	SECTION("wrong bus") { prober.camera.bus = XRT_BUS_TYPE_BLUETOOTH; }
+	SECTION("hub present") {}
+	SECTION("wrong vendor") { prober.hub.vendor_id = 0x1234; }
+	SECTION("wrong product") { prober.hub.product_id = 0x1234; }
+	SECTION("wrong bus") { prober.hub.bus = XRT_BUS_TYPE_BLUETOOTH; }
 	CHECK(builder->open_system(builder, nullptr, &prober, nullptr, &devices, &spaces) ==
 	      XRT_ERROR_DEVICE_CREATION_FAILED);
-	bool camera_present = prober.camera.vendor_id == OCULUS_VR_INC_VID &&
-	                      prober.camera.product_id == OCULUS_RIFT_S_CAMERA_PID &&
-	                      prober.camera.bus == XRT_BUS_TYPE_USB;
-	CHECK(prober.opens == (camera_present ? 1 : 0));
+	bool hub_present = prober.hub.vendor_id == OCULUS_VR_INC_VID &&
+	                   prober.hub.product_id == OCULUS_RIFT_S_USB3_HUB_PID && prober.hub.bus == XRT_BUS_TYPE_USB;
+	CHECK(prober.opens == (hub_present ? 1 : 0));
 	CHECK(prober.unlocks == 1);
 	builder->destroy(builder);
 }

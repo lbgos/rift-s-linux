@@ -120,11 +120,12 @@ rift_s_open_system_impl(struct xrt_builder *xb,
 		goto unlock_and_fail;
 	}
 
-	// The HID half can enumerate without the USB 3 camera half. Reject that state
-	// before firmware reads, SLAM initialization and display/camera startup waits.
-	if (u_builder_find_prober_device(xpdevs, xpdev_count, OCULUS_VR_INC_VID, OCULUS_RIFT_S_CAMERA_PID,
+	// The cameras (2833:4051) only enumerate after power-on, but the headset's USB 3 hub is
+	// present whenever the SuperSpeed link is up. Without it the cameras can never appear,
+	// so fail before firmware reads, SLAM initialization and display/camera startup waits.
+	if (u_builder_find_prober_device(xpdevs, xpdev_count, OCULUS_VR_INC_VID, OCULUS_RIFT_S_USB3_HUB_PID,
 	                                XRT_BUS_TYPE_USB) == NULL) {
-		RIFT_S_ERROR("Rift S cameras are missing from USB (2833:4051). Replug the headset USB into a USB 3 "
+		RIFT_S_ERROR("Rift S USB 3 link is down (hub 2833:2051 missing). Replug the headset USB into a USB 3 "
 		             "port, then start SteamVR again.");
 		goto unlock_and_fail;
 	}
