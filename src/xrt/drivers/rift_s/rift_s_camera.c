@@ -169,7 +169,8 @@ rift_s_camera_create(struct xrt_prober *xp,
 	} while (retry_count-- > 0);
 
 	if (finder.xfs == NULL) {
-		RIFT_S_ERROR("Didn't find Rift S camera device");
+		RIFT_S_ERROR("Rift S cameras (2833:4051) were not found or could not be opened after power-on. Replug "
+		             "the headset USB, check access to its /dev/video devices, then start SteamVR again.");
 		return NULL;
 	}
 
