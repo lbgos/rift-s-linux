@@ -133,8 +133,8 @@ rift_s_slam_guard_init(struct rift_s_slam_guard *g);
  * @param g                 Guard state.
  * @param slam_valid        Whether the SLAM tracker returned a pose with a valid position.
  * @param slam_pose         SLAM IMU pose, already converted to the Monado frame.
- * @param ts_ns             Query time of the sample.
- * @param fusion_orientation Current 3DoF orientation.
+ * @param ts_ns             Source timestamp of the sample, or the read time when there is none.
+ * @param fusion_orientation 3DoF orientation at @p ts_ns.
  * @param no_pose_position  Position to report while no SLAM position was ever trusted. It is at eye
  *                          height, so it also gives the nominal floor for the height bound.
  * @param[out] out_pose     Pose to publish.

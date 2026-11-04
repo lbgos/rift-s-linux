@@ -35,6 +35,10 @@
 #ifndef RIFT_S_H
 #define RIFT_S_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct rift_s_hmd;
 struct rift_s_controller;
 struct rift_s_camera;
@@ -169,5 +173,9 @@ rift_s_system_get_hand_tracking_device(struct rift_s_system *sys);
 
 void
 rift_s_system_reference(struct rift_s_system **dst, struct rift_s_system *src);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

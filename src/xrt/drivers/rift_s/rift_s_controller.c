@@ -1606,6 +1606,8 @@ ctrl_json_cb(bool success, uint8_t *response_bytes, int response_bytes_len, stru
 
 	RIFT_S_TRACE("Got Controller calibration device=%d:\n%s", ctrl->base.device_type, response_bytes);
 
+	// A device ID change re-reads the block; release the previous LED and lensing arrays first.
+	rift_s_controller_free_imu_calibration(&ctrl->calibration);
 	bool parsed = rift_s_controller_parse_imu_calibration((char *)response_bytes, &ctrl->calibration) == 0;
 	if (parsed) {
 		ctrl->gyro_calibration = rift_s_controller_gyro_calibration_for_imu(
@@ -1996,6 +1998,7 @@ rift_s_controller_destroy(struct xrt_device *xdev)
 		m_clock_windowed_skew_tracker_destroy(ctrl->imu_clock);
 	}
 
+	rift_s_controller_free_imu_calibration(&ctrl->calibration);
 	os_mutex_destroy(&ctrl->mutex);
 
 	u_device_free(&ctrl->base);
@@ -2006,12 +2009,12 @@ rift_s_controller_get_led_model(struct xrt_device *xdev, struct t_constellation_
 {
 	struct rift_s_controller *ctrl = (struct rift_s_controller *)(xdev);
 
+	// The calibration is replaced when the controller re-reports it, so copy it under the lock.
 	os_mutex_lock(&ctrl->mutex);
 	if (!ctrl->have_calibration) {
 		os_mutex_unlock(&ctrl->mutex);
 		return false;
 	}
-	os_mutex_unlock(&ctrl->mutex);
 
 	t_constellation_led_model_init((int)ctrl->base.device_type, NULL, led_model, ctrl->calibration.num_leds, 0);
 
@@ -2038,6 +2041,7 @@ rift_s_controller_get_led_model(struct xrt_device *xdev, struct t_constellation_
 
 		led->radius_mm = 3.5;
 	}
+	os_mutex_unlock(&ctrl->mutex);
 
 	return true;
 }

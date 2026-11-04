@@ -34,8 +34,8 @@ Close SteamVR and Settings before installing or upgrading.
 On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r32/rift-s-linux-bin-32-1-x86_64.pkg.tar.zst
-sudo pacman -U rift-s-linux-bin-32-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r36/rift-s-linux-bin-36-1-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-36-1-x86_64.pkg.tar.zst
 ```
 
 To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending.
@@ -43,9 +43,9 @@ To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-m
 On other distributions, install the universal build into your home directory. It needs no SteamVR launch option; the udev rule asks for your password once. Settings needs glibc 2.35 or newer and WebKitGTK 4.1 (Debian/Ubuntu `libwebkit2gtk-4.1-0`, Fedora `webkit2gtk4.1`).
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r32/rift-s-linux-r32-x86_64.tar.xz
-tar -xf rift-s-linux-r32-x86_64.tar.xz
-./rift-s-linux-r32-x86_64/install.sh
+curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r36/rift-s-linux-r36-x86_64.tar.xz
+tar -xf rift-s-linux-r36-x86_64.tar.xz
+./rift-s-linux-r36-x86_64/install.sh
 ```
 
 `install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built.
@@ -119,9 +119,10 @@ pnpm tauri build --no-bundle -- --locked
 1. Connect USB and DisplayPort. Reconnect the headset after installation to apply USB access rules.
 2. Open Steam and click SteamVR in the library. If Steam was running during the install, restart Steam once first.
 3. Put on the headset and complete Room Setup. Set the floor and draw the boundary for your physical play area.
-4. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
-5. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.
-6. Open the dashboard's Desktop tab to use the KDE desktop inside the headset.
+4. Set SteamVR as the OpenXR runtime once, or OpenXR games stay in a flat window on the monitor: SteamVR Settings > OpenXR > Set SteamVR as OpenXR Runtime. Alternatively, link its manifest with `mkdir -p ~/.config/openxr/1 && ln -sf <SteamVR>/steamxr_linux64.json ~/.config/openxr/1/active_runtime.json`, where `<SteamVR>` is usually `~/.local/share/Steam/steamapps/common/SteamVR`.
+5. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
+6. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.
+7. Open the dashboard's Desktop tab to use the KDE desktop inside the headset.
 
 To pair a new or replacement Touch controller, close SteamVR and use Pair controller in Settings. Hold Menu + Y (left) or Oculus + B (right) until the controller light flashes, then select it.
 

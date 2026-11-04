@@ -551,7 +551,7 @@ fn set_ipd(mm: f64) -> Result<(), String> {
     if !mm.is_finite() || !(50.0..=80.0).contains(&mm) {
         return Err("IPD must be between 50 and 80 mm".into());
     }
-    // The active Rift S driver polls this file every 500 ms.
+    // The Rift S driver reads this file; SteamVR takes the IPD when it starts.
     let h = home()?;
     let tmp = h.join(".rift-s-ipd.conf.settings-tmp");
     fs::write(&tmp, format!("{mm:.1}\n")).map_err(|e| e.to_string())?;

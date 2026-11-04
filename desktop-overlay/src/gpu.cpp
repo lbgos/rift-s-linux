@@ -263,6 +263,11 @@ Gpu::submit(VkCommandBuffer cmd, bool wait)
 	}
 	if (wait) {
 		bool ok = vkWaitForFences(device_, 1, &fence_, VK_TRUE, 1000000000ull) == VK_SUCCESS;
+		// A timed-out fence is still pending: drain the queue before resetting it, and before
+		// the caller frees resources the submission uses.
+		if (!ok) {
+			vkQueueWaitIdle(queue_);
+		}
 		vkResetFences(device_, 1, &fence_);
 		return ok;
 	}

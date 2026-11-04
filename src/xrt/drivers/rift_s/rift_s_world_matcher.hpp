@@ -146,18 +146,18 @@ public:
 	void
 	knnMatch(const cv::Mat &descriptors, std::vector<std::vector<cv::DMatch>> &nearest, int count)
 	{
+		// FLANN requires continuous queries, and OpenCV's LSH hashes rows through
+		// size_t loads. A packed aligned copy serves sliced or unaligned callers.
+		cv::Mat queries = descriptors;
+		if (!queries.isContinuous() || reinterpret_cast<uintptr_t>(queries.data) % alignof(size_t))
+			queries = descriptors.clone();
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 		if (fast) {
-			// OpenCV hashes rows through size_t loads. A packed aligned copy
-			// keeps sliced or unaligned callers out of that loader.
-			cv::Mat queries = descriptors;
-			if (!queries.isContinuous() || reinterpret_cast<uintptr_t>(queries.data) % alignof(size_t))
-				queries = descriptors.clone();
 			fast->knnMatch(queries, nearest, count);
 			return;
 		}
 #endif
-		fallback->knnMatch(descriptors, nearest, count);
+		fallback->knnMatch(queries, nearest, count);
 	}
 
 private:

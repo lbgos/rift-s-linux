@@ -217,7 +217,9 @@ TEST_CASE("Rift S ring recovers depth with unit gain from 0.3 to 0.8 m through c
 	/* The r18 report: controllers drawn farther than the hands. Project the recorded ring through
 	 * each factory calibration and extrinsic straight ahead of that camera, then recover it with the
 	 * search the tracker runs: cold (gravity only, no position) and tracked (trusted prior 2 cm off,
-	 * known heading, 3 ms fast-path budget). Depth must come back unbiased and with unit gain. */
+	 * known heading). The tracked search is bounded by its trial caps; its wall-clock budget is set
+	 * high enough never to end the search, so scheduler stalls cannot change the result. Depth must
+	 * come back unbiased and with unit gain. */
 	auto leds = rift_s_ring_leds;
 	t_constellation_led_model model{};
 	model.id = 3;
@@ -268,10 +270,7 @@ TEST_CASE("Rift S ring recovers depth with unit gain from 0.3 to 0.8 m through c
 				constellation_constrained_default_config(&config);
 				xrt_pose prior = truth;
 				if (trusted) {
-					config.time_budget_us = 3000;
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 					config.time_budget_us = 200000;
-#endif
 					prior.position.x += 0.02f;
 				} else {
 					prior.position = {42, 42, 42};

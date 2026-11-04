@@ -1,6 +1,6 @@
 pkgbase = rifts-steamvr-wayland
 	pkgver = 1.1.4
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/NVIDIA/egl-gbm
 	arch = x86_64
 	license = MIT
@@ -22,7 +22,7 @@ pkgname = lib32-egl-gbm
 
 pkgname = rifts-steamvr-wayland
 	pkgdesc = Native Wayland desktop capture dependencies for the Rift S SteamVR launcher
-	depends = monado-rifts-git
+	depends = rift-s-linux
 	depends = steam
 	depends = pipewire
 	depends = xdg-desktop-portal

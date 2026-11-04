@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -46,6 +48,93 @@ multiply(const xrt_quat &a, const xrt_quat &b)
 	xrt_quat q;
 	math_quat_rotate(&a, &b, &q);
 	return q;
+}
+
+/* libstdc++'s distribution and shuffle algorithms over std::mt19937. The std:: versions and
+ * the evaluation order of function arguments are implementation-defined, and the Monte Carlo
+ * bounds below were measured on GCC's sample stream; draws are sequenced explicitly to match it. */
+template <typename T>
+T
+canonical(std::mt19937 &rng)
+{
+	// generate_canonical<T, digits<T>>: one 32-bit draw for float, two for double.
+	T sum = 0, scale = 1;
+	for (int k = std::numeric_limits<T>::digits > 32 ? 2 : 1; k > 0; k--) {
+		sum += T(rng()) * scale;
+		scale *= T(4294967296.0);
+	}
+	T value = sum / scale;
+	return value >= 1 ? std::nextafter(T(1), T(0)) : value;
+}
+
+template <typename T> struct Uniform
+{
+	T a, b;
+	T
+	operator()(std::mt19937 &rng) const
+	{
+		return canonical<T>(rng) * (b - a) + a;
+	}
+};
+
+// Marsaglia polar method; the second value of each pair is kept for the next call.
+template <typename T> struct Normal
+{
+	T mean, stddev;
+	T saved = 0;
+	bool has_saved = false;
+	T
+	operator()(std::mt19937 &rng)
+	{
+		T value;
+		if (has_saved) {
+			has_saved = false;
+			value = saved;
+		} else {
+			T x, y, r2;
+			do {
+				x = T(2) * canonical<T>(rng) - 1.0;
+				y = T(2) * canonical<T>(rng) - 1.0;
+				r2 = x * x + y * y;
+			} while (r2 > 1.0 || r2 == 0.0);
+			const T mult = std::sqrt(-2 * std::log(r2) / r2);
+			saved = x * mult;
+			has_saved = true;
+			value = y * mult;
+		}
+		return value * stddev + mean;
+	}
+};
+
+// Integer in [0, range) by Lemire's multiply-shift, as uniform_int_distribution for 32-bit engines.
+uint32_t
+below(std::mt19937 &rng, uint32_t range)
+{
+	uint64_t product = uint64_t(rng()) * range;
+	if (uint32_t(product) < range) {
+		const uint32_t threshold = (0u - range) % range;
+		while (uint32_t(product) < threshold)
+			product = uint64_t(rng()) * range;
+	}
+	return uint32_t(product >> 32);
+}
+
+// std::shuffle for ranges below 2^16 elements: swap positions are drawn two at a time.
+template <typename T>
+void
+shuffle(std::vector<T> &v, std::mt19937 &rng)
+{
+	const uint32_t n = uint32_t(v.size());
+	if (n == 0)
+		return;
+	uint32_t i = 1;
+	if (n % 2 == 0)
+		std::swap(v[i++], v[below(rng, 2)]);
+	while (i != n) {
+		const uint32_t range = i + 1, pair = below(rng, range * (range + 1));
+		std::swap(v[i++], v[pair / (range + 1)]);
+		std::swap(v[i++], v[pair % (range + 1)]);
+	}
 }
 
 struct Scene
@@ -163,14 +252,15 @@ TEST_CASE("A held HMD cannot turn accurate camera pixels into false controller f
 TEST_CASE("Constrained two-point geometry recovers 1000 randomized valid poses")
 {
 	std::mt19937 rng(0x534f4c);
-	std::uniform_real_distribution<float> unit(-1, 1);
+	Uniform<float> unit{-1, 1};
 	unsigned accepted = 0, two_roots = 0;
 	for (unsigned attempt = 0; accepted < 1000 && attempt < 10000; attempt++) {
 		xrt_vec3 points[2] = {{unit(rng) * 0.06f, unit(rng) * 0.06f, unit(rng) * 0.06f},
 		                      {unit(rng) * 0.06f, unit(rng) * 0.06f, unit(rng) * 0.06f}};
 		xrt_vec3 gravity = {unit(rng), unit(rng), unit(rng)};
 		math_vec3_normalize(&gravity);
-		xrt_quat tilt = rotation(unit(rng), {unit(rng), unit(rng), unit(rng)});
+		xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+		xrt_quat tilt = rotation(unit(rng), axis);
 		xrt_pose truth = XRT_POSE_IDENTITY;
 		truth.orientation = multiply(rotation(unit(rng) * 3.1, gravity), tilt);
 		truth.position = {unit(rng) * 0.2f, unit(rng) * 0.2f, 0.8f + unit(rng) * 0.4f};
@@ -539,7 +629,7 @@ struct Rig
 xrt_pose
 world_tilt_prior(const xrt_quat &truth, double yaw, double tilt_error, std::mt19937 &rng)
 {
-	std::uniform_real_distribution<float> unit(-1, 1);
+	Uniform<float> unit{-1, 1};
 	xrt_pose prior = XRT_POSE_IDENTITY;
 	prior.position = {42, 42, 42};
 	xrt_quat tilt_noise = rotation(tilt_error, {unit(rng), 0, unit(rng)});
@@ -568,8 +658,8 @@ run_cold_acquisition(bool mirror_model,
                      bool recovered_minimum_only = false)
 {
 	std::mt19937 rng(seed);
-	std::uniform_real_distribution<float> unit(-1, 1), positive(0, 1);
-	std::normal_distribution<float> noise(0, 0.3f);
+	Uniform<float> unit{-1, 1}, positive{0, 1};
+	Normal<float> noise{0, 0.3f};
 	auto truth_leds = rift_s_ring_leds;
 	auto model_leds = rift_s_ring_leds;
 	if (mirror_model)
@@ -598,7 +688,8 @@ run_cold_acquisition(bool mirror_model,
 	MonteCarlo stats;
 	while (stats.trials < trials) {
 		xrt_pose truth = XRT_POSE_IDENTITY;
-		truth.orientation = rotation(3.14159f * positive(rng), {unit(rng), unit(rng), unit(rng)});
+		xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+		truth.orientation = rotation(3.14159f * positive(rng), axis);
 		float depth = 0.25f + 0.45f * positive(rng);
 		truth.position = {unit(rng) * 0.4f * depth, unit(rng) * 0.3f * depth, depth};
 		rig.clear();
@@ -611,25 +702,29 @@ run_cold_acquisition(bool mirror_model,
 			}
 		if (visible.size() < 3)
 			continue;
-		std::shuffle(visible.begin(), visible.end(), rng);
+		shuffle(visible, rng);
 		unsigned keep = std::min<unsigned>(visible.size(), 3 + rng() % 4);
 		visible.resize(keep);
 		std::array<std::vector<int>, 2> truth_led;
 		for (auto [k, l] : visible) {
 			float x, y;
 			rig.project(k, truth, truth_leds[l], x, y, -1);
-			rig.add_blob(k, x + noise(rng), y + noise(rng));
+			float dy = noise(rng), dx = noise(rng);
+			rig.add_blob(k, x + dx, y + dy);
 			truth_led[k].push_back(int(l));
 		}
 		for (unsigned k = 0; k < 2; k++)
 			for (unsigned d = 0; d < distractors; d++) {
-				rig.add_blob(k, 640 * positive(rng), 480 * positive(rng));
+				float y = 480 * positive(rng), x = 640 * positive(rng);
+				rig.add_blob(k, x, y);
 				truth_led[k].push_back(-1);
 			}
 		stats.trials++;
 		xrt_pose prior = world_tilt_prior(truth.orientation, 6.28 * positive(rng), 0.015, rng);
-		if (independent_tilt)
-			prior.orientation = rotation(3.14159f * positive(rng), {unit(rng), unit(rng), unit(rng)});
+		if (independent_tilt) {
+			xrt_vec3 tilt_axis = {unit(rng), unit(rng), unit(rng)};
+			prior.orientation = rotation(3.14159f * positive(rng), tilt_axis);
+		}
 		constellation_constrained_result result;
 		bool ok = constellation_constrained_search(&model, rig.views.data(), 2, &prior, false, false, &config,
 		                                           &result);
@@ -696,8 +791,8 @@ run_scenario(const Scenario &sc,
              const constellation_constrained_config *override = nullptr)
 {
 	std::mt19937 rng(seed);
-	std::uniform_real_distribution<float> unit(-1, 1), positive(0, 1);
-	std::normal_distribution<float> noise(0, sc.pixel_noise);
+	Uniform<float> unit{-1, 1}, positive{0, 1};
+	Normal<float> noise{0, sc.pixel_noise};
 	auto leds = rift_s_ring_leds;
 	t_constellation_led_model model{};
 	model.id = 3;
@@ -712,7 +807,8 @@ run_scenario(const Scenario &sc,
 	MonteCarlo stats;
 	while (stats.trials < trials) {
 		xrt_pose truth = XRT_POSE_IDENTITY;
-		truth.orientation = rotation(3.14159f * positive(rng), {unit(rng), unit(rng), unit(rng)});
+		xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+		truth.orientation = rotation(3.14159f * positive(rng), axis);
 		float depth = sc.depth_min + (sc.depth_max - sc.depth_min) * positive(rng);
 		truth.position = {unit(rng) * 0.4f * depth, unit(rng) * 0.3f * depth, depth};
 		rig.clear();
@@ -725,7 +821,7 @@ run_scenario(const Scenario &sc,
 			}
 		if (visible.size() < sc.min_keep)
 			continue;
-		std::shuffle(visible.begin(), visible.end(), rng);
+		shuffle(visible, rng);
 		unsigned keep =
 		    std::min<unsigned>(visible.size(), sc.min_keep + rng() % (sc.max_keep - sc.min_keep + 1));
 		visible.resize(keep);
@@ -733,7 +829,8 @@ run_scenario(const Scenario &sc,
 		for (auto [k, l] : visible) {
 			float x = 0, y = 0;
 			rig.project(k, truth, leds[l], x, y, -1);
-			rig.add_blob(k, x + noise(rng), y + noise(rng));
+			float dy = noise(rng), dx = noise(rng);
+			rig.add_blob(k, x + dx, y + dy);
 			truth_led[k].push_back(int(l));
 		}
 		stats.trials++;
@@ -926,10 +1023,11 @@ struct RingScene
 	choose_pose(xrt_vec3 position, std::initializer_list<unsigned> need, uint32_t seed)
 	{
 		std::mt19937 rng(seed);
-		std::uniform_real_distribution<float> unit(-1, 1);
+		Uniform<float> unit{-1, 1};
 		truth.position = position;
 		for (unsigned attempt = 0; attempt < 10000; attempt++) {
-			truth.orientation = rotation(3.14159f * (unit(rng) + 1) / 2, {unit(rng), unit(rng), unit(rng)});
+			xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+			truth.orientation = rotation(3.14159f * (unit(rng) + 1) / 2, axis);
 			unsigned k = 0;
 			bool ok = true;
 			for (unsigned n : need) {
@@ -1307,7 +1405,7 @@ TEST_CASE("Track changes yaw observation source without comparing different worl
 TEST_CASE("Track never publishes randomized wrong identities on a moving hand")
 {
 	std::mt19937 rng(0x7ac4);
-	std::uniform_real_distribution<float> unit(-1, 1), positive(0, 1);
+	Uniform<float> unit{-1, 1}, positive{0, 1};
 	constellation_track track;
 	constellation_track_init(&track);
 	const int64_t frame = 16666667;
@@ -1322,7 +1420,8 @@ TEST_CASE("Track never publishes randomized wrong identities on a moving hand")
 		if (speed > 2)
 			v = {v.x * 2 / speed, v.y * 2 / speed, v.z * 2 / speed};
 		p = {p.x + v.x * 0.016667f, p.y + v.y * 0.016667f, p.z + v.z * 0.016667f};
-		q = multiply(rotation(0.1 * positive(rng), {unit(rng), unit(rng), unit(rng)}), q);
+		xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+		q = multiply(rotation(0.1 * positive(rng), axis), q);
 		imu_history.push_back(q);
 		float draw = positive(rng);
 		if (draw < 0.3f) {
@@ -1339,8 +1438,8 @@ TEST_CASE("Track never publishes randomized wrong identities on a moving hand")
 			xrt_vec3 dir = {unit(rng), unit(rng), unit(rng)};
 			math_vec3_normalize(&dir);
 			position = {p.x + d * dir.x, p.y + d * dir.y, p.z + d * dir.z};
-			orientation =
-			    multiply(rotation(0.35 + 2.8 * positive(rng), {unit(rng), unit(rng), unit(rng)}), q);
+			xrt_vec3 slip_axis = {unit(rng), unit(rng), unit(rng)};
+			orientation = multiply(rotation(0.35 + 2.8 * positive(rng), slip_axis), q);
 			wrong_results++;
 		} else {
 			correct_results++;
@@ -1365,7 +1464,7 @@ TEST_CASE("Track never publishes randomized wrong identities on a moving hand")
 TEST_CASE("Known-orientation translation stays bounded near the bearing-separation limit")
 {
 	std::mt19937 rng(17);
-	std::normal_distribution<double> noise(0, 1e-5);
+	Normal<double> noise{0, 1e-5};
 	const xrt_vec3 points[2] = {{0, 0, 0}, {0.004f, 0.001f, 0.0f}};
 	xrt_quat q = rotation(0.3, {0.2f, 1, 0.1f});
 	for (double depth : {0.3, 0.8, 1.6}) {
@@ -1408,10 +1507,11 @@ TEST_CASE("Dense clutter exhausts the bounded budget instead of stalling, and ad
 	s.choose_pose({-0.02f, 0.04f, 0.4f}, {4, 2}, 3);
 	REQUIRE(s.observe(0, 4) + s.observe(1, 2) >= 5);
 	std::mt19937 rng(3);
-	std::uniform_real_distribution<float> unit(0, 1);
+	Uniform<float> unit{0, 1};
 	for (unsigned k = 0; k < 2; k++)
 		for (unsigned d = 0; d < 25; d++) {
-			s.rig.add_blob(k, 640 * unit(rng), 480 * unit(rng));
+			float y = 480 * unit(rng), x = 640 * unit(rng);
+			s.rig.add_blob(k, x, y);
 			s.truth_led[k].push_back(-1);
 		}
 	xrt_pose prior = world_tilt_prior(s.truth.orientation, 1.0, 0, rng);
@@ -1433,8 +1533,8 @@ TEST_CASE("Dense clutter exhausts the bounded budget instead of stalling, and ad
 TEST_CASE("Two controllers in one exposure acquire their own rings and never swap")
 {
 	std::mt19937 rng(0x7a11);
-	std::uniform_real_distribution<float> unit(-1, 1), positive(0, 1);
-	std::normal_distribution<float> noise(0, 0.3f);
+	Uniform<float> unit{-1, 1}, positive{0, 1};
+	Normal<float> noise{0, 0.3f};
 	auto left_leds = rift_s_ring_leds, right_leds = rift_s_ring_leds;
 	for (auto &l : right_leds) {
 		l.pos.x = -l.pos.x;
@@ -1459,7 +1559,8 @@ TEST_CASE("Two controllers in one exposure acquire their own rings and never swa
 		unsigned visible_total[2] = {0, 0};
 		for (unsigned hand = 0; hand < 2; hand++) {
 			truth[hand] = XRT_POSE_IDENTITY;
-			truth[hand].orientation = rotation(3.14159f * positive(rng), {unit(rng), unit(rng), unit(rng)});
+			xrt_vec3 axis = {unit(rng), unit(rng), unit(rng)};
+			truth[hand].orientation = rotation(3.14159f * positive(rng), axis);
 			float depth = 0.3f + 0.3f * positive(rng);
 			// Hands side by side, sometimes close together.
 			truth[hand].position = {(hand ? 1 : -1) * (0.03f + 0.12f * positive(rng)), 0.1f * unit(rng), depth};
@@ -1470,7 +1571,8 @@ TEST_CASE("Two controllers in one exposure acquire their own rings and never swa
 					if (!rig.project(k, truth[hand], leds[l], x, y, std::cos(70 * M_PI / 180)) ||
 					    positive(rng) < 0.3f) // partial occlusion by the hand
 						continue;
-					rig.add_blob(k, x + noise(rng), y + noise(rng));
+					float dy = noise(rng), dx = noise(rng);
+					rig.add_blob(k, x + dx, y + dy);
 					owner[k].push_back(int(hand));
 					led_of[k].push_back(int(l));
 					visible_total[hand]++;

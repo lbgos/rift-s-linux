@@ -194,7 +194,7 @@ struct constellation_tracker_camera_state
 	struct xrt_pose P_imu_cam;
 
 	//! Constellation tracking - fast tracking thread
-	struct os_mutex bw_lock; /* Protects blobwatch process vs release from long thread */
+	struct os_mutex bw_lock; /* Serializes blobwatch calls and label writes between the fast and long threads */
 	blobwatch *bw;
 	int last_num_blobs;
 
@@ -956,6 +956,9 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 		if (!view->bwobs) {
 			continue;
 		}
+		/* This observation can be blobwatch's last one, which the other analysis thread reads and
+		 * relabels under bw_lock, so the labels are written under it too. */
+		os_mutex_lock(&ct->cam[v].bw_lock);
 		for (int b = 0; b < view->bwobs->num_blobs; b++) {
 			struct blob *blob = &view->bwobs->blobs[b];
 			if (LED_OBJECT_ID(blob->led_id) == device->led_model.id) {
@@ -972,7 +975,6 @@ submit_joint_pose(struct t_constellation_tracker *ct,
 			blob->led_id = LED_MAKE_ID(device->led_model.id, a->led_id);
 			brightness += blob->brightness;
 		}
-		os_mutex_lock(&ct->cam[v].bw_lock);
 		blobwatch_update_labels(ct->cam[v].bw, view->bwobs, device->led_model.id);
 		os_mutex_unlock(&ct->cam[v].bw_lock);
 	}
@@ -1767,11 +1769,11 @@ constellation_tracker_process_frame_long(struct t_constellation_tracker *ct,
 			for (unsigned v = 0; v < sample->n_views; v++) {
 				struct tracking_sample_frame *view = &sample->views[v];
 				if (!view->bwobs) continue;
+				os_mutex_lock(&ct->cam[v].bw_lock);
 				for (int b = 0; b < view->bwobs->num_blobs; b++) {
 					struct blob *blob = &view->bwobs->blobs[b];
 					if (LED_OBJECT_ID(blob->led_id) == state->led_model->id) blob->led_id = LED_INVALID_ID;
 				}
-				os_mutex_lock(&ct->cam[v].bw_lock);
 				blobwatch_update_labels(ct->cam[v].bw, view->bwobs, state->led_model->id);
 				os_mutex_unlock(&ct->cam[v].bw_lock);
 			}

@@ -45,8 +45,8 @@ struct rift_s_radio_command
 	/* Monotonic deadline from first update (0 = not yet armed). Bounds total
 	 * queued send + response wait so a missing reply cannot wedge the queue. */
 	timepoint_ns deadline_ns;
-	/* Earliest monotonic time for the next HID op after a transport error.
-	 * Valid busy polls retry every update; only short/error backs off. */
+	/* Earliest monotonic time for the next HID op. Valid busy polls wait 5 ms;
+	 * short/error reads and failed sends back off exponentially. */
 	timepoint_ns next_attempt_ns;
 	/* Bounded retry counters. Send retries reuse the same payload. */
 	int send_attempts;

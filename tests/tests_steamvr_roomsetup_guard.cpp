@@ -360,6 +360,14 @@ struct FakeRuntime
 			execl(binary.c_str(), binary.filename().c_str(), "60", nullptr);
 			_exit(127);
 		}
+		// Until exec completes the child is a copy of this test binary, and
+		// unique_runtime_process cannot match it by executable path.
+		auto exe = fs::path("/proc") / std::to_string(pid) / "exe";
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		std::error_code error;
+		while (fs::read_symlink(exe, error) != binary && std::chrono::steady_clock::now() < deadline)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		REQUIRE(fs::read_symlink(exe, error) == binary);
 		return pid;
 	}
 	static void stop(pid_t pid)
@@ -417,6 +425,18 @@ struct FakeRuntime
 		close(pipefd[0]);
 		return out;
 	}
+	// Poll until the recovery reaps its cleanup helper, which starts this test
+	// binary and so takes an unbounded time on a loaded machine.
+	template <typename Poll> static void reap_helper(Poll poll)
+	{
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		bool reaped = false;
+		while (!reaped && std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			reaped = fired(poll).find("cleanup helper exited") != std::string::npos;
+		}
+		REQUIRE(reaped);
+	}
 	~FakeRuntime()
 	{
 		stop(compositor);
@@ -451,9 +471,10 @@ TEST_CASE("Display recovery adopts a respawned compositor instead of restarting 
 		recovery.update(true, .01f, 101, runtime.server_fd, runtime.server, library);
 	});
 	CHECK(output.find("draining crashed") != std::string::npos);
-	// Let the helper child exit so the destructor does not leave a zombie.
-	std::this_thread::sleep_for(std::chrono::milliseconds(200));
-	recovery.update(false, -1, 101, runtime.server_fd, runtime.server, library);
+	// Reap the helper child so the destructor does not leave a zombie.
+	FakeRuntime::reap_helper([&] {
+		recovery.update(false, -1, 101, runtime.server_fd, runtime.server, library);
+	});
 }
 
 TEST_CASE("Display cleanup requires sustained loss and fresh watchdog proof, and honors quit")
@@ -499,8 +520,9 @@ TEST_CASE("Display cleanup works without a monitor and stops at three attempts")
 			recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
 		});
 		CHECK(output.find("attempt " + std::to_string(attempt) + "/3") != std::string::npos);
-		std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+		FakeRuntime::reap_helper([&] {
+			recovery.update(true, -1, 100, runtime.server_fd, runtime.server, library);
+		});
 		std::this_thread::sleep_for(std::chrono::milliseconds(5050));
 	}
 	auto output = FakeRuntime::fired([&] {

@@ -199,7 +199,7 @@ TEST_CASE("Radio timeout blocks later commands until transport recovery")
 	};
 
 	int64_t now = T0;
-	// Run past the first head's deadline; busy polls every tick (no backoff).
+	// Run past the first head's deadline; busy polls repeat every 5 ms.
 	for (int i = 0; i < 4000 && a.calls == 0; i++) {
 		rift_s_radio_update_at(&st, &hid.base, now);
 		now += TICK;

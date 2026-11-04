@@ -416,6 +416,7 @@ rift_s_hmd_create(struct rift_s_system *sys, const unsigned char *hmd_serial_no,
 
 cleanup:
 	rift_s_system_reference(&hmd->sys, NULL);
+	u_device_free(&hmd->base);
 	return NULL;
 }
 

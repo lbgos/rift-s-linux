@@ -50,6 +50,32 @@ class LaunchOptions(unittest.TestCase):
         old = config(['"LaunchOptions"\t\t"/old/SteamVR/bin/vrmonitor.sh %command%"'])
         self.assertEqual(launch_options(setup.with_launch_options(old, OURS)), OURS)
 
+    def test_keeps_prefixed_vrmonitor_option(self):
+        for prefixed in ['QT_QPA_PLATFORM=xcb ' + OURS, 'QT_QPA_PLATFORM=xcb \\"/my games/SteamVR/bin/vrmonitor.sh\\" %command%']:
+            custom = config(['"LaunchOptions"\t\t"' + prefixed + '"'])
+            self.assertIsNone(setup.with_launch_options(custom, OURS))
+            self.assertIsNone(setup.with_launch_options(custom, None))
+
+    def test_notice_only_when_custom_option_lacks_command(self):
+        runtime = '/my games/SteamVR'
+        command = '\\"' + runtime + '/bin/vrmonitor.sh\\" %command%'
+        user_process = setup.user_process
+        setup.user_process = lambda name: False
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                path = Path(root) / 'userdata/1/config/localconfig.vdf'
+                path.parent.mkdir(parents=True)
+                for value, notice in [('QT_QPA_PLATFORM=xcb ' + command, False), ('gamemoderun %command%', True)]:
+                    path.write_text(config(['"LaunchOptions"\t\t"' + value + '"']))
+                    self.assertEqual(setup.host_launch([Path(root)], runtime) is not None, notice)
+                    self.assertEqual(launch_options(path.read_text()), value.replace('\\"', '"'))
+        finally:
+            setup.user_process = user_process
+
+    def test_updates_quoted_option(self):
+        old = config(['"LaunchOptions"\t\t"\\"/my games/SteamVR/bin/vrmonitor.sh\\" %command%"'])
+        self.assertEqual(launch_options(setup.with_launch_options(old, OURS)), OURS)
+
     def test_uninstall_removes_only_our_line(self):
         installed = config(['"LaunchOptions"\t\t"' + OURS + '"', '"LastPlayed"\t\t"1"'])
         self.assertEqual(setup.with_launch_options(installed, None), config(['"LastPlayed"\t\t"1"']))

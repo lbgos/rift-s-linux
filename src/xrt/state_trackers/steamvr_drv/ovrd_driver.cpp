@@ -1615,7 +1615,10 @@ CDeviceDriver_Monado::Activate(vr::TrackedDeviceIndex_t unObjectId)
         vr::EVRInitError queue_error = vr::VRInitError_None;
         auto queue = static_cast<vr::IVRBlockQueue *>(vr::VRDriverContext()->GetGenericInterface(vr::IVRBlockQueue_Version, &queue_error));
         auto paths = static_cast<vr::IVRPaths *>(vr::VRDriverContext()->GetGenericInterface(vr::IVRPaths_Version, &queue_error));
-        m_camera = std::make_unique<MonadoCamera>(m_xdev, queue, paths);
+        // Keep the camera across repeated Activate. A replacement is built while the
+        // old camera still holds the queue path, and the old destructor then clears
+        // the button hook and releases this process's export lock.
+        if (!m_camera) m_camera = std::make_unique<MonadoCamera>(m_xdev, queue, paths);
         ovrd_log("Rift S native camera queue: %s\n", m_camera->native_ready() ? "ready" : "unavailable");
         auto properties = vr::VRProperties();
         properties->SetBoolProperty(m_ulPropertyContainer, vr::Prop_HasCamera_Bool, true);

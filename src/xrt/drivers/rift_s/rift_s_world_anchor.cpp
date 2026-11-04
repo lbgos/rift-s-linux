@@ -1367,6 +1367,8 @@ rift_s_world_anchor_save(rift_s_world_anchor *a)
 	size_t offset = 0;
 	while (ok && offset < b.data.size()) {
 		ssize_t n = write(fd, b.data.data() + offset, b.data.size() - offset);
+		if (n < 0 && errno == EINTR)
+			continue;
 		if (n <= 0)
 			ok = false;
 		else

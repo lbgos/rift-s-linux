@@ -32,6 +32,8 @@ STEAMVR_APP = '250820'
 # starts SteamVR on the host instead. The universal build installs into the home
 # directory, which the container shares, and needs no launch option.
 LAUNCH_SUFFIX = '/bin/vrmonitor.sh %command%'
+# The values host_launch writes: `<SteamVR>/bin/vrmonitor.sh %command%`, quoted when the path has spaces.
+OURS_LAUNCH = re.compile(r'(?:/\S*/bin/vrmonitor\.sh|"/[^"]*/bin/vrmonitor\.sh") %command%')
 LAUNCH_PATH = ['UserLocalConfigStore', 'Software', 'Valve', 'Steam', 'apps', STEAMVR_APP]
 
 
@@ -182,7 +184,8 @@ def with_launch_options(text, value):
             return text[:at] + ''.join(lines) + text[at:]
         block = child
     current = next((v for k, v in block['items'] if k.lower() == 'launchoptions' and isinstance(v, tuple)), None)
-    ours = current is not None and current[3].replace('"', '').endswith(LAUNCH_SUFFIX)
+    # Only the bare value host_launch writes, for any SteamVR path, is ours; anything around it is custom.
+    ours = current is not None and OURS_LAUNCH.fullmatch(current[3].strip()) is not None
     if current is not None and current[3].strip() and not ours:
         return None
     if value is None:
@@ -243,7 +246,8 @@ def host_launch(roots, runtime, uninstall=False):
         except (OSError, ValueError):
             continue
         if updated is None:
-            if not uninstall:
+            # Custom options that already run our command, such as an environment prefix, need no notice.
+            if not uninstall and vdf_quote(command)[1:-1] not in text:
                 notice = f'SteamVR has custom launch options. Add {command} to start it with the Rift S driver.'
             continue
         if updated == text:

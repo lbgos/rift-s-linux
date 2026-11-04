@@ -1638,6 +1638,18 @@ t_slam_node_destroy(struct xrt_frame_node *node)
 	auto &t = *t_ptr; // Needed by SLAM_DEBUG
 	SLAM_DEBUG("Destroying SLAM tracker");
 	u_var_remove_root(t_ptr);
+
+	// Stop the backend first: its threads deliver poses into the buffers and writers freed below.
+	{
+		std::unique_lock backend_lock(t.backend_mutex);
+		std::lock_guard lock(t.state_mutex);
+		if (t.tracker != nullptr) {
+			t.vit.tracker_destroy(t.tracker);
+			t.tracker = nullptr;
+		}
+		t_vit_bundle_unload(&t.vit);
+	}
+
 	if (t.ovr_tracker != NULL) {
 		t_openvr_tracker_destroy(t.ovr_tracker);
 	}
@@ -1655,16 +1667,6 @@ t_slam_node_destroy(struct xrt_frame_node *node)
 	os_mutex_destroy(&t.lock_ff);
 	m_ff_vec3_f32_free(&t.filter.pos_ff);
 	m_ff_vec3_f32_free(&t.filter.rot_ff);
-
-	{
-		std::unique_lock backend_lock(t.backend_mutex);
-		std::lock_guard lock(t.state_mutex);
-		if (t.tracker != nullptr) {
-			t.vit.tracker_destroy(t.tracker);
-			t.tracker = nullptr;
-		}
-		t_vit_bundle_unload(&t.vit);
-	}
 
 	delete t_ptr;
 }
@@ -1740,7 +1742,7 @@ t_slam_create(struct xrt_frame_context *xfctx,
 	                         ? debug_get_bool_option_slam_backend_recreate()
 	                         : t.vit.tracker_supports_safe_recreation && t.vit.tracker_supports_safe_recreation();
 	SLAM_INFO("Backend recreation enabled=%d advertised_safe=%d", t.backend_recreate,
-	          t.vit.tracker_supports_safe_recreation != nullptr);
+	          t.vit.tracker_supports_safe_recreation && t.vit.tracker_supports_safe_recreation());
 
 	// Check the user has provided a SLAM_CONFIG file
 	const char *config_file = config->slam_config;

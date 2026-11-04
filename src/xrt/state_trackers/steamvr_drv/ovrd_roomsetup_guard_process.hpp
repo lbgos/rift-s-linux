@@ -46,9 +46,10 @@ public:
 			// guard instead of orphaning it behind a second child.
 			if (roomsetup_wait_child(pid, WNOHANG) == 0) return true;
 			pid = -1;
-			acknowledged = false;
-			if (acknowledgement >= 0) { close(acknowledgement); acknowledgement = -1; }
 		}
+		// ready() may already have reaped the guard and left its pipe open.
+		acknowledged = false;
+		if (acknowledgement >= 0) { close(acknowledgement); acknowledgement = -1; }
 		Dl_info module{};
 		char server[4096];
 		ssize_t length = readlink("/proc/self/exe", server, sizeof(server) - 1);
