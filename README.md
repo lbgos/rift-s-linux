@@ -103,7 +103,7 @@ EOF
 sudo udevadm control --reload-rules
 ```
 
-The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. The same service sets SteamVR's launch option to `vrmonitor.sh %command%`, because Steam otherwise starts SteamVR in the Steam Linux Runtime container, where the driver is not visible. If SteamVR already has custom launch options, they are left alone and the service logs the command to add. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
+The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. The same service sets SteamVR's launch option to `vrmonitor.sh %command%`, because Steam otherwise starts SteamVR in the Steam Linux Runtime container, where the driver is not visible. Prefixed options that still end in that command (for example `QT_QPA_PLATFORM=xcb …/vrmonitor.sh %command%`) are left alone; other custom options are left alone and the service logs the command to add. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
 
 Build and install Settings:
 
@@ -119,7 +119,12 @@ pnpm tauri build --no-bundle -- --locked
 1. Connect USB and DisplayPort. Reconnect the headset after installation to apply USB access rules.
 2. Open Steam and click SteamVR in the library. If Steam was running during the install, restart Steam once first.
 3. Put on the headset and complete Room Setup. Set the floor and draw the boundary for your physical play area.
-4. Set SteamVR as the OpenXR runtime once, or OpenXR games stay in a flat window on the monitor: SteamVR Settings > OpenXR > Set SteamVR as OpenXR Runtime. Alternatively, link its manifest with `mkdir -p ~/.config/openxr/1 && ln -sf <SteamVR>/steamxr_linux64.json ~/.config/openxr/1/active_runtime.json`, where `<SteamVR>` is usually `~/.local/share/Steam/steamapps/common/SteamVR`.
+4. Set SteamVR as the OpenXR runtime once, or OpenXR games under Proton stay in a flat window on the monitor. Prefer SteamVR Settings > OpenXR > Set SteamVR as OpenXR Runtime. If that menu will not open, link the manifest (adjust the SteamVR path if your library lives elsewhere):
+
+```sh
+mkdir -p ~/.config/openxr/1 && ln -sf ~/.local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json ~/.config/openxr/1/active_runtime.json
+```
+
 5. On later starts, look around the saved room to recognize it. Check the floor and boundary before playing.
 6. Open Rift S Settings from the desktop launcher. For the full-resolution preview, enable its next-start preference and relaunch SteamVR once. On KDE, the native VR View opens minimized to supply the preview.
 7. Open the dashboard's Desktop tab to use the KDE desktop inside the headset.
@@ -129,6 +134,14 @@ To pair a new or replacement Touch controller, close SteamVR and use Pair contro
 ## Troubleshooting
 
 Run `rifts-setup triage`, or `~/.local/share/rift-s-linux/bin/rifts-setup triage` for the universal build. It writes machine facts to `~/.local/state/monado-rifts/triage/` and starts your coding agent (Claude Code, Codex, Gemini CLI or opencode; `--agent <command>` picks another) with the [triage playbook](.github/triage/PLAYBOOK.md). The agent asks what went wrong, reads the logs, looks for an existing fix and drafts an issue only with your approval.
+
+On some Wayland sessions SteamVR's Qt UI will not start unless it runs on XWayland. Set SteamVR's launch options (Properties > General > Launch Options) to:
+
+```
+QT_QPA_PLATFORM=xcb ~/.local/share/Steam/steamapps/common/SteamVR/bin/vrmonitor.sh %command%
+```
+
+The registration service keeps that prefix; adjust the SteamVR path if your library lives elsewhere. On X11 the default `…/vrmonitor.sh %command%` is enough.
 
 ## Known issues
 
