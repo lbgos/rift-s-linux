@@ -412,9 +412,8 @@ struct TrackerSlam
 		u_var_curves fcs_ui;        //!< Display of `fcs` in UI
 
 		bool enabled = false;           //!< Whether the features extension is enabled
-		//! Features tracked over all cameras in the latest pose, -1 when unknown.
-		int last_total = -1; // Protected with last_total_ts by state_mutex.
-		timepoint_ns last_total_ts = 0;
+		//! Features of the latest pose; total is -1 when unknown. Under state_mutex.
+		t_slam_features last = {0, -1, 0, {}};
 		struct u_var_button enable_btn; //!< Toggle extension
 	} features;
 
@@ -842,12 +841,14 @@ flush_poses(TrackerSlam &t)
 			vector feat_count = features_ui_push(t, pose, nts);
 			t.slam_features_writer->push({nts, feat_count});
 			if (!feat_count.empty()) {
-				int total = 0;
+				t_slam_features &last = t.features.last;
+				last = {nts, 0, 0, {}};
 				for (int c : feat_count) {
-					total += c;
+					last.total += c;
+					if (last.camera_count < XRT_TRACKING_MAX_SLAM_CAMS) {
+						last.per_camera[last.camera_count++] = c;
+					}
 				}
-				t.features.last_total = total;
-				t.features.last_total_ts = nts;
 			}
 		}
 
@@ -1225,7 +1226,7 @@ t_slam_restart(struct xrt_tracked_slam *xts)
 	t.last_imu_ts = INT64_MIN;
 	std::fill(t.last_cam_ts.begin(), t.last_cam_ts.end(), INT64_MIN);
 	t.dbg_pred_counter = 0;
-	t.features.last_total = -1;
+	t.features.last.total = -1;
 	{
 		unique_lock lock(t.last_hand_masks_mutex);
 		t.last_hand_masks = {};
@@ -1290,25 +1291,21 @@ t_slam_reset(struct xrt_tracked_slam *xts)
 	t.filter.target = XRT_SPACE_RELATION_ZERO;
 	m_filter_euro_vec3_init(&t.filter.pos_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
 	m_filter_euro_quat_init(&t.filter.rot_oe, t.filter.min_cutoff, t.filter.min_dcutoff, t.filter.beta);
-	t.features.last_total = -1;
+	t.features.last.total = -1;
 
 	SLAM_INFO("VIT tracker reset; cleared prediction history");
 	return 0;
 }
 
 extern "C" bool
-t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint_ns *out_ts)
+t_slam_get_features(struct xrt_tracked_slam *xts, struct t_slam_features *out)
 {
 	auto &t = *container_of(xts, TrackerSlam, base);
 	std::unique_lock lock(t.state_mutex, std::try_to_lock);
-	if (!lock.owns_lock())
-		return false;
-	int count = t.features.last_total;
-	if (count < 0) {
+	if (!lock.owns_lock() || t.features.last.total < 0) {
 		return false;
 	}
-	*out_count = count;
-	*out_ts = t.features.last_total_ts;
+	*out = t.features.last;
 	return true;
 }
 

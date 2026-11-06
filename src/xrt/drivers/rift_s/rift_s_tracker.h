@@ -55,6 +55,32 @@ enum rift_s_tracker_pose
 	RIFT_S_TRACKER_POSE_DEVICE,
 };
 
+//! Head tracking statistics over one window while worn, for the periodic health warning in vrserver.txt.
+struct rift_s_slam_health
+{
+	timepoint_ns start_ns;
+	timepoint_ns last_query_ns;
+	//! Camera frame sets submitted to SLAM and the longest gap between them.
+	uint32_t frames;
+	timepoint_ns last_frame_ns;
+	timepoint_ns max_frame_gap_ns;
+	//! Distinct SLAM samples seen by pose queries and their worst age.
+	uint32_t poses;
+	timepoint_ns last_sample_ts;
+	double max_sample_age_ms;
+	//! Feature counts of distinct SLAM poses.
+	uint32_t feature_samples;
+	timepoint_ns last_feature_ts;
+	int64_t feature_sum[XRT_TRACKING_MAX_SLAM_CAMS];
+	uint32_t feature_cameras;
+	int min_features;
+	//! Time the published head position was not tracked.
+	timepoint_ns held_ns;
+	uint32_t restarts;
+	uint32_t feature_losses;
+	float max_head_speed_dps;
+};
+
 struct rift_s_tracker
 {
 	struct xrt_device base;
@@ -93,11 +119,19 @@ struct rift_s_tracker
 	bool slam_paused;
 	//! Re-initialise SLAM before submitting the next fresh camera frame.
 	bool slam_restart_pending;
+	//! Why the pending restart was requested ("standby", "guard", ...), and the guard's last rejection.
+	const char *slam_restart_cause;
+	enum rift_s_slam_guard_reason slam_restart_guard_reason;
+	uint32_t slam_restarts;
 	uint64_t slam_generation;
 	timepoint_ns slam_min_sample_ns;
 
 	//! Whether the SLAM cameras see enough features. Under @ref mutex.
 	struct rift_s_slam_feature_gate feature_gate;
+	//! When the feature gate last reported a loss. Under @ref mutex.
+	timepoint_ns features_lost_ns;
+	//! Under @ref mutex.
+	struct rift_s_slam_health health;
 
 	//! Last published IMU pose, frozen while the head pose is held.
 	bool have_published_imu_pose;

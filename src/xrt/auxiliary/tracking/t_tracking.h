@@ -708,14 +708,23 @@ t_slam_start(struct xrt_tracked_slam *xts);
 int
 t_slam_reset(struct xrt_tracked_slam *xts);
 
+//! Features tracked in the latest SLAM pose.
+struct t_slam_features
+{
+	timepoint_ns timestamp;
+	int total;
+	uint32_t camera_count;
+	int per_camera[XRT_TRACKING_MAX_SLAM_CAMS];
+};
+
 /*!
- * Features tracked over all cameras in the latest SLAM pose. Returns false while unknown (the
- * backend has no feature extension, or no pose since the last reset).
+ * Features of the latest SLAM pose. Returns false while unknown (the backend has no feature
+ * extension, or no pose since the last reset).
  *
  * @public @memberof xrt_tracked_slam
  */
 bool
-t_slam_get_feature_count(struct xrt_tracked_slam *xts, int *out_count, timepoint_ns *out_ts);
+t_slam_get_features(struct xrt_tracked_slam *xts, struct t_slam_features *out);
 
 //! Exposure-time history query. Only exact/interpolated results retain pose flags;
 //! display prediction settings cannot supply a pose outside observed history.

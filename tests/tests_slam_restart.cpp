@@ -90,9 +90,8 @@ main()
 	std::atomic<bool> reading{true};
 	std::thread reader([&] {
 		while (reading) {
-			int count;
-			timepoint_ns timestamp;
-			t_slam_get_feature_count(tracker, &count, &timestamp);
+			t_slam_features features;
+			t_slam_get_features(tracker, &features);
 			xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
 			tracker->get_tracked_pose(tracker, os_monotonic_get_ns(), &relation);
 			os_nanosleep(1000000);

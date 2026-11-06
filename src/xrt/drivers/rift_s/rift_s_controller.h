@@ -103,6 +103,12 @@ struct rift_s_fusion_diagnostics
 	timepoint_ns last_health_log_ns;
 	const char *last_optical_result;
 	timepoint_ns last_optical_processing_ns;
+	//! Time per position source over the current window, for the periodic tracking warning.
+	timepoint_ns window_start_ns;
+	timepoint_ns window_last_query_ns;
+	timepoint_ns window_source_ns[4];
+	uint32_t window_unreliable_entries;
+	uint64_t window_optical_accepted;
 
 };
 

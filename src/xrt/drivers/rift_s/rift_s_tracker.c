@@ -56,6 +56,54 @@
 static void
 pause_slam_locked(struct rift_s_tracker *t);
 
+//! Mark a SLAM restart pending and remember why, for the restart warning. Called with t->mutex held.
+static void
+request_slam_restart_locked(struct rift_s_tracker *t, const char *cause, enum rift_s_slam_guard_reason guard_reason)
+{
+	if (!t->tracking.slam_enabled) {
+		return;
+	}
+	if (!t->slam_restart_pending) {
+		t->slam_restart_cause = cause;
+		t->slam_restart_guard_reason = guard_reason;
+	}
+	t->slam_restart_pending = true;
+}
+
+#define RIFT_S_SLAM_HEALTH_PERIOD_NS (30LL * U_TIME_1S_IN_NS)
+
+//! Start a new health window, dropping the time off-head or without cameras. Called with t->mutex held.
+static void
+slam_health_reset_locked(struct rift_s_tracker *t, timepoint_ns now_ns)
+{
+	t->health = (struct rift_s_slam_health){0};
+	t->health.start_ns = now_ns;
+	t->health.min_features = -1;
+}
+
+//! Log the window's head tracking statistics while worn, then start the next one. Called with t->mutex held.
+static void
+slam_health_log_locked(struct rift_s_tracker *t, timepoint_ns now_ns)
+{
+	struct rift_s_slam_health *h = &t->health;
+	double seconds = (now_ns - h->start_ns) / 1e9;
+	char features[96] = "unknown";
+	if (h->feature_samples > 0) {
+		int at = snprintf(features, sizeof(features), "min=%d avg=", h->min_features);
+		for (uint32_t i = 0; i < h->feature_cameras && at > 0 && (size_t)at < sizeof(features); i++) {
+			at += snprintf(features + at, sizeof(features) - at, "%s%.0f", i ? "/" : "",
+			               (double)h->feature_sum[i] / h->feature_samples);
+		}
+	}
+	RIFT_S_WARN("Head tracking health over %.0f s: camera_hz=%.1f max_camera_gap_ms=%.1f slam_hz=%.1f "
+	            "max_sample_age_ms=%.1f features %s held_s=%.1f feature_losses=%u slam_restarts=%u "
+	            "max_head_speed_dps=%.0f guard=%d",
+	            seconds, h->frames / seconds, h->max_frame_gap_ns / 1e6, h->poses / seconds,
+	            h->max_sample_age_ms, features, h->held_ns / 1e9, h->feature_losses, h->restarts,
+	            h->max_head_speed_dps, t->slam_guard.state);
+	slam_health_reset_locked(t, now_ns);
+}
+
 #ifdef XRT_FEATURE_SLAM
 static const bool slam_supported = true;
 #else
@@ -637,7 +685,7 @@ rift_s_tracker_device_lost(struct rift_s_tracker *t)
 	t->ready_for_data = false;
 	t->slam_guard.room_continuous = false;
 	pause_slam_locked(t);
-	t->slam_restart_pending = t->tracking.slam_enabled;
+	request_slam_restart_locked(t, "usb_reconnect", RIFT_S_SLAM_GUARD_OK);
 	// The reconnected device restarts its counters: drop the clock map and all device-epoch state so
 	// the first post-reconnect IMU/frame is not rejected as backward or misaligned.
 	t->have_hw2mono = false;
@@ -782,7 +830,9 @@ pause_slam_locked(struct rift_s_tracker *t)
 		return;
 	}
 	t->slam_paused = true;
-	t->slam_restart_pending = t->tracking.slam_enabled && t->last_camera_arrival_ns != 0;
+	if (t->last_camera_arrival_ns != 0) {
+		request_slam_restart_locked(t, t->standby ? "standby" : "camera_timeout", RIFT_S_SLAM_GUARD_OK);
+	}
 	// SLAM is realigned onto the held pose once it is consistent again.
 	rift_s_slam_guard_suspend(&t->slam_guard, &t->pose.orientation);
 	t->world_confirmations = 0;
@@ -995,7 +1045,13 @@ rift_s_tracker_push_slam_frames(struct rift_s_tracker *t,
 		}
 #endif
 		os_mutex_lock(&t->mutex);
+		const char *cause = t->slam_restart_cause ? t->slam_restart_cause : "unknown";
+		enum rift_s_slam_guard_reason guard_reason = t->slam_restart_guard_reason;
+		uint32_t restarts = ++t->slam_restarts;
+		t->health.restarts++;
 		t->slam_restart_pending = false;
+		t->slam_restart_cause = NULL;
+		t->features_lost_ns = 0;
 		/* Samples from before the restart belong to the old session. */
 		t->slam_guard.stable_samples = 0;
 		if (ret == 0)
@@ -1003,8 +1059,13 @@ rift_s_tracker_push_slam_frames(struct rift_s_tracker *t,
 		t->feature_gate = (struct rift_s_slam_feature_gate){0};
 		os_mutex_unlock(&t->mutex);
 		if (ret == 0) {
-			RIFT_S_INFO("SLAM session restarted method=%s elapsed_ms=%.3f; waiting for consistent poses",
-			            how, (os_monotonic_get_ns() - restart_begin_ns) / 1e6);
+			// Standby and camera timeouts restart on every resume; the rest mean tracking failed.
+			bool routine = strcmp(cause, "standby") == 0 || strcmp(cause, "camera_timeout") == 0;
+			enum u_logging_level level = routine ? U_LOGGING_INFO : U_LOGGING_WARN;
+			U_LOG_IFL(level, rift_s_log_level,
+			          "SLAM session restarted cause=%s guard_reason=%s method=%s elapsed_ms=%.1f restarts=%u",
+			          cause, rift_s_slam_guard_reason_str(guard_reason), how,
+			          (os_monotonic_get_ns() - restart_begin_ns) / 1e6, restarts);
 		} else {
 			RIFT_S_WARN("Unable to restart SLAM; the guard keeps holding until its poses are consistent");
 		}
@@ -1015,7 +1076,13 @@ rift_s_tracker_push_slam_frames(struct rift_s_tracker *t,
 		/* Proximity may change while the backend is restarting. */
 		submit = !t->standby;
 		if (submit) {
-			t->last_camera_arrival_ns = os_monotonic_get_ns();
+			timepoint_ns arrival_ns = os_monotonic_get_ns();
+			struct rift_s_slam_health *h = &t->health;
+			if (h->last_frame_ns != 0 && arrival_ns - h->last_frame_ns > h->max_frame_gap_ns)
+				h->max_frame_gap_ns = arrival_ns - h->last_frame_ns;
+			h->last_frame_ns = arrival_ns;
+			h->frames++;
+			t->last_camera_arrival_ns = arrival_ns;
 			t->slam_paused = false;
 		}
 		os_mutex_unlock(&t->mutex);
@@ -1138,8 +1205,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	bool slam_valid = false;
 	bool sample_stale = false;
 	bool features_known = false;
-	int feature_count = 0;
-	timepoint_ns feature_ts = 0;
+	struct t_slam_features features = {0};
 	if (query_slam && !paused) {
 #ifdef XRT_FEATURE_SLAM
 		slam_valid = t_slam_get_latest_sample(t->tracking.slam, at_timestamp_ns, &sample_ts,
@@ -1157,7 +1223,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 		math_quat_rotate_vec3(&basalt_to_xr, &slam_relation.angular_velocity, &slam_relation.angular_velocity);
 		math_quat_rotate_vec3(&basalt_to_xr, &query_relation.linear_velocity, &query_relation.linear_velocity);
 		math_quat_rotate_vec3(&basalt_to_xr, &query_relation.angular_velocity, &query_relation.angular_velocity);
-		features_known = t_slam_get_feature_count(t->tracking.slam, &feature_count, &feature_ts);
+		features_known = t_slam_get_features(t->tracking.slam, &features);
 #endif
 	}
 
@@ -1193,13 +1259,14 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	enum rift_s_slam_guard_reason reason = RIFT_S_SLAM_GUARD_OK;
 
 	enum rift_s_slam_feature_event feature_event = RIFT_S_SLAM_FEATURES_NO_CHANGE;
+	bool features_acquired = t->feature_gate.have_features;
 	if (query_slam && !paused) {
-		feature_event = rift_s_slam_feature_gate_update(&t->feature_gate, features_known, feature_count,
-		                                                (int64_t)feature_ts);
+		feature_event = rift_s_slam_feature_gate_update(&t->feature_gate, features_known, features.total,
+		                                                (int64_t)features.timestamp);
 		if (feature_event == RIFT_S_SLAM_FEATURES_LOST) {
 			rift_s_slam_guard_suspend(g, &t->pose.orientation);
 		} else if (feature_event == RIFT_S_SLAM_FEATURES_RETURNED) {
-			t->slam_restart_pending = true;
+			request_slam_restart_locked(t, "features_returned", RIFT_S_SLAM_GUARD_OK);
 		}
 	}
 	bool hold = paused || (query_slam && t->feature_gate.lost);
@@ -1213,7 +1280,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 			                         slam_valid ? sample_ts : os_monotonic_get_ns(), &sample_fusion,
 			                         &no_pose_position, &ignored, &reason);
 			if (rift_s_slam_guard_take_reset(g, os_monotonic_get_ns()))
-				t->slam_restart_pending = true;
+				request_slam_restart_locked(t, "guard", reason);
 		}
 	}
 
@@ -1243,7 +1310,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 			                                    slam_valid ? sample_ts : os_monotonic_get_ns(), &sample_fusion,
 			                                    &no_pose_position, &imu_relation.pose, &reason);
 			if (rift_s_slam_guard_take_reset(g, os_monotonic_get_ns())) {
-				t->slam_restart_pending = true;
+				request_slam_restart_locked(t, "guard", reason);
 			}
 		} else {
 			// TODO: Estimate pose at timestamp at_timestamp_ns
@@ -1285,11 +1352,37 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	if (at_timestamp_ns < (uint64_t)t->slam_min_sample_ns)
 		imu_relation.relation_flags = held_flags;
 
-	if (feature_event == RIFT_S_SLAM_FEATURES_LOST) {
-		RIFT_S_WARN("SLAM cameras see %d features (< %d); holding head pose", feature_count,
-		            RIFT_S_SLAM_FEATURES_MIN);
-	} else if (feature_event == RIFT_S_SLAM_FEATURES_RETURNED) {
-		RIFT_S_INFO("SLAM cameras see %d features again; re-initialising SLAM", feature_count);
+	if (feature_event != RIFT_S_SLAM_FEATURES_NO_CHANGE || (features_acquired != t->feature_gate.have_features)) {
+		char per_camera[64] = "";
+		for (uint32_t i = 0, at = 0; i < features.camera_count && at < sizeof(per_camera); i++) {
+			int n = snprintf(per_camera + at, sizeof(per_camera) - at, "%s%d", i ? "/" : "", features.per_camera[i]);
+			if (n < 0) break;
+			at += (uint32_t)n;
+		}
+		timepoint_ns now_ns = os_monotonic_get_ns();
+		float head_speed_dps = m_vec3_len(t->fusion.last_angular_velocity) * (float)(180.0 / M_PI);
+		if (feature_event == RIFT_S_SLAM_FEATURES_LOST && features_acquired) {
+			t->features_lost_ns = now_ns;
+			t->health.feature_losses++;
+			// Feature loss after tracking worked: covered, dark, blank view, fast motion or a stalled backend.
+			RIFT_S_WARN("SLAM cameras see %d features (< %d) per_camera=%s head_speed_dps=%.0f sample_age_ms=%.1f "
+			            "slam_hz_window=%.1f; holding head pose",
+			            features.total, RIFT_S_SLAM_FEATURES_MIN, per_camera, head_speed_dps,
+			            sample_ts ? (now_ns - sample_ts) / 1e6 : -1.0,
+			            t->health.start_ns ? t->health.poses / ((now_ns - t->health.start_ns) / 1e9) : -1.0);
+		} else if (feature_event == RIFT_S_SLAM_FEATURES_LOST) {
+			// A fresh SLAM session has no features until VIO initializes. Staying here means it never does.
+			t->features_lost_ns = now_ns;
+			RIFT_S_WARN("SLAM session has no features yet per_camera=%s head_speed_dps=%.0f restarts=%u",
+			            per_camera, head_speed_dps, t->slam_restarts);
+		} else {
+			enum u_logging_level level = t->features_lost_ns ? U_LOGGING_WARN : U_LOGGING_INFO;
+			U_LOG_IFL(level, rift_s_log_level,
+			          "SLAM cameras see %d features again per_camera=%s after_s=%.1f%s", features.total, per_camera,
+			          t->features_lost_ns ? (now_ns - t->features_lost_ns) / 1e9 : 0.0,
+			          feature_event == RIFT_S_SLAM_FEATURES_RETURNED ? "; re-initialising SLAM" : "");
+			t->features_lost_ns = 0;
+		}
 	}
 	if (g->divergences != divergences) {
 		RIFT_S_WARN(
@@ -1319,6 +1412,32 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	}
 	timepoint_ns pose_log_now = os_monotonic_get_ns();
 	if (pose == RIFT_S_TRACKER_POSE_DEVICE) {
+		struct rift_s_slam_health *h = &t->health;
+		if (t->standby || t->slam_paused || h->start_ns == 0) {
+			slam_health_reset_locked(t, pose_log_now);
+		} else {
+			if (h->last_query_ns != 0 && (imu_relation.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) == 0)
+				h->held_ns += pose_log_now - h->last_query_ns < 100 * U_TIME_1MS_IN_NS
+				                  ? pose_log_now - h->last_query_ns
+				                  : 100 * U_TIME_1MS_IN_NS;
+			if (slam_valid && sample_ts != h->last_sample_ts) {
+				h->poses++;
+				h->last_sample_ts = sample_ts;
+				h->max_sample_age_ms = fmax(h->max_sample_age_ms, (pose_log_now - sample_ts) / 1e6);
+			}
+			if (features_known && features.timestamp != h->last_feature_ts) {
+				h->last_feature_ts = features.timestamp;
+				h->feature_samples++;
+				h->feature_cameras = features.camera_count;
+				for (uint32_t i = 0; i < features.camera_count; i++) h->feature_sum[i] += features.per_camera[i];
+				if (h->min_features < 0 || features.total < h->min_features) h->min_features = features.total;
+			}
+			h->max_head_speed_dps = fmaxf(h->max_head_speed_dps, m_vec3_len(t->fusion.last_angular_velocity) *
+			                                                         (float)(180.0 / M_PI));
+			if (pose_log_now - h->start_ns >= RIFT_S_SLAM_HEALTH_PERIOD_NS) slam_health_log_locked(t, pose_log_now);
+		}
+		h->last_query_ns = pose_log_now;
+
 		// Log why POSITION_TRACKED was dropped. Rate-limit loss warnings and summarize
 		// a continuing on-head hold even before the first SLAM fix.
 		bool tracked = (imu_relation.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT) != 0;
@@ -1347,12 +1466,12 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 			                    : g->state == RIFT_S_SLAM_GUARD_DIVERGED            ? "diverged"
 			                                                                        : "query_rejected";
 			RIFT_S_WARN("Head position held for %.2f s cause=%s reason=%s slam_valid=%d sample_age_ms=%.1f "
-			            "features=%d camera_gap_ms=%.1f reject_step_m=%.2f losses=%u",
+			            "features=%d camera_gap_ms=%.1f reject_step_m=%.2f losses=%u restarts=%u",
 			            (pose_log_now - t->head_change_ns) / 1e9, cause, rift_s_slam_guard_reason_str(reason),
 			            slam_valid, sample_ts ? (pose_log_now - sample_ts) / 1e6 : -1.0,
-			            features_known ? feature_count : -1,
+			            features_known ? features.total : -1,
 			            t->last_camera_arrival_ns ? (pose_log_now - t->last_camera_arrival_ns) / 1e6 : -1.0,
-			            g->last_reject_step_m, t->head_losses);
+			            g->last_reject_step_m, t->head_losses, t->slam_restarts);
 			t->head_loss_logged = true;
 			t->head_log_ns = pose_log_now;
 		}

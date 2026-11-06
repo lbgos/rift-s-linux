@@ -493,6 +493,70 @@ log_tracking_health(struct rift_s_controller *ctrl, timepoint_ns now, bool trans
 	            d->reject_clock_by[RIFT_S_CLOCK_DISCONTINUITY]);
 }
 
+#define CONTROLLER_WINDOW_NS (30LL * U_TIME_1S_IN_NS)
+
+enum controller_window_source
+{
+	WINDOW_OPTICAL,
+	WINDOW_INERTIAL,
+	WINDOW_MODEL,
+	WINDOW_UNRELIABLE,
+};
+
+static enum controller_window_source
+window_source(const char *source)
+{
+	if (source == NULL || strcmp(source, "unreliable") == 0) return WINDOW_UNRELIABLE;
+	if (strcmp(source, "optical") == 0) return WINDOW_OPTICAL;
+	if (strcmp(source, "inertial") == 0) return WINDOW_INERTIAL;
+	return WINDOW_MODEL; // at_rest, near_head and the other motion-model estimates.
+}
+
+/*!
+ * Account the time since the last pose query to the current position source and log the share of
+ * each source every CONTROLLER_WINDOW_NS. Shows in vrserver.txt how often a controller is Limited
+ * and why, without RIFT_S_LOG=debug. Called with ctrl->mutex held, before the source changes.
+ */
+static void
+account_position_source(struct rift_s_controller *ctrl, timepoint_ns now, const char *next_source)
+{
+	struct rift_s_fusion_diagnostics *d = &ctrl->diagnostics;
+	if (d->window_start_ns == 0) {
+		d->window_start_ns = now;
+		d->window_optical_accepted = d->optical_accepted;
+	} else if (d->window_last_query_ns != 0) {
+		timepoint_ns dt = now - d->window_last_query_ns;
+		// Gaps between queries (SteamVR idle, controller asleep) are not tracking time.
+		if (dt > 0 && dt < 100 * U_TIME_1MS_IN_NS) d->window_source_ns[window_source(ctrl->position_source)] += dt;
+	}
+	d->window_last_query_ns = now;
+	if (next_source != ctrl->position_source && window_source(next_source) == WINDOW_UNRELIABLE &&
+	    window_source(ctrl->position_source) != WINDOW_UNRELIABLE)
+		d->window_unreliable_entries++;
+	if (now - d->window_start_ns < CONTROLLER_WINDOW_NS) return;
+
+	timepoint_ns total = 0;
+	for (int i = 0; i < 4; i++) total += d->window_source_ns[i];
+	if (total > U_TIME_1S_IN_NS) {
+		double scale = 100.0 / (double)total;
+		RIFT_S_WARN("Controller hand=%s tracking over %.0f s: optical=%.0f%% inertial=%.0f%% model=%.0f%% "
+		            "unreliable=%.0f%% unreliable_entries=%u optical_accepted=%" PRIu64
+		            " last_optical_result=%s imu_age_ms=%.1f reject_clock=%" PRIu64 " clock_resyncs=%u",
+		            hand_alias(ctrl), (now - d->window_start_ns) / 1e9, d->window_source_ns[WINDOW_OPTICAL] * scale,
+		            d->window_source_ns[WINDOW_INERTIAL] * scale, d->window_source_ns[WINDOW_MODEL] * scale,
+		            d->window_source_ns[WINDOW_UNRELIABLE] * scale, d->window_unreliable_entries,
+		            d->optical_accepted - d->window_optical_accepted,
+		            d->last_optical_result ? d->last_optical_result : "none",
+		            ctrl->last_imu_local_time_ns ? (double)(now - ctrl->last_imu_local_time_ns) / U_TIME_1MS_IN_NS
+		                                         : -1.0,
+		            d->reject_clock, d->clock_resyncs);
+	}
+	d->window_start_ns = now;
+	d->window_optical_accepted = d->optical_accepted;
+	d->window_unreliable_entries = 0;
+	memset(d->window_source_ns, 0, sizeof(d->window_source_ns));
+}
+
 bool
 rift_s_controller_has_heading_prior(struct rift_s_controller *ctrl, timepoint_ns capture_ns)
 {
@@ -1859,6 +1923,7 @@ predict_aim_grip(struct rift_s_controller *ctrl, int64_t at_timestamp_ns, struct
 		}
 		}
 	}
+	account_position_source(ctrl, os_monotonic_get_ns(), source);
 	if (source != ctrl->position_source) {
 		bool fallback = state == POSITION_NONE;
 		ctrl->diagnostics.fallback_entries += fallback && !ctrl->fallback_active;
