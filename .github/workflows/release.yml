@@ -1,0 +1,46 @@
+# Builds every release asset with packaging/release/build.sh on the self-hosted runner labelled
+# rift-s-release. A pushed tag r<N> publishes them as release r<N>, marked latest: the tag's subject line
+# is the release title and its body the notes. Pull requests from branches of this repository build
+# without publishing; pull requests from forks never reach the runner.
+name: Release
+
+on:
+  push:
+    tags: ['r[0-9]*']
+  pull_request:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, rift-s-release]
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # pkgver of rift-s-linux-git counts commits; the version comes from git describe.
+          fetch-depth: 0
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          RELEASE_WORK: ${{ runner.temp }}/rift-s-release
+          RELEASE_CACHE: ${{ runner.tool_cache }}/rift-s-release
+        run: packaging/release/build.sh ${VERSION:+"$VERSION"}
+
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The checkout keeps the tag without its message.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git tag -l --format='%(contents:body)' "$TAG" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* --verify-tag --latest \
+            --title "$(git tag -l --format='%(contents:subject)' "$TAG")" --notes-file "$RUNNER_TEMP/notes.md"

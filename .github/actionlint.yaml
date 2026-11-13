@@ -1,0 +1,4 @@
+# Custom label of the self-hosted runner that .github/workflows/release.yml targets.
+self-hosted-runner:
+  labels:
+    - rift-s-release

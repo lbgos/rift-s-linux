@@ -34,8 +34,8 @@ Close SteamVR and Settings before installing or upgrading.
 On Arch Linux and derivatives, install the prebuilt package from the [latest release](https://github.com/lbgos/rift-s-linux/releases/latest):
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r36/rift-s-linux-bin-36-1-x86_64.pkg.tar.zst
-sudo pacman -U rift-s-linux-bin-36-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/lbgos/rift-s-linux/releases/latest/download/rift-s-linux-bin-x86_64.pkg.tar.zst
+sudo pacman -U rift-s-linux-bin-x86_64.pkg.tar.zst
 ```
 
 To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-monado-rifts](packaging/aur/basalt-monado-rifts), then in [packaging/aur/rift-s-linux-git](packaging/aur/rift-s-linux-git). AUR submission is pending.
@@ -43,12 +43,13 @@ To build the latest `main` instead, run `makepkg -si` in [packaging/aur/basalt-m
 On other distributions, install the universal build into your home directory. It needs no SteamVR launch option; the udev rule asks for your password once. Settings needs glibc 2.35 or newer and WebKitGTK 4.1 (Debian/Ubuntu `libwebkit2gtk-4.1-0`, Fedora `webkit2gtk4.1`).
 
 ```sh
-curl -LO https://github.com/lbgos/rift-s-linux/releases/download/r36/rift-s-linux-r36-x86_64.tar.xz
-tar -xf rift-s-linux-r36-x86_64.tar.xz
-./rift-s-linux-r36-x86_64/install.sh
+curl -LO https://github.com/lbgos/rift-s-linux/releases/latest/download/rift-s-linux-x86_64.tar.xz
+dir=$(mktemp -d)
+tar -xf rift-s-linux-x86_64.tar.xz -C "$dir" --strip-components=1
+"$dir/install.sh"
 ```
 
-`install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built.
+`install.sh --uninstall` removes it. Remove the universal build before installing a system package, and the reverse. [packaging/universal](packaging/universal) describes how it is built; [packaging/release/build.sh](packaging/release/build.sh) builds every release asset.
 
 To update from r32 on, close SteamVR and run `rifts-setup update`, or `~/.local/share/rift-s-linux/bin/rifts-setup update` for the universal build. It installs the latest release for your install type after checking its SHA-256; `--check` only reports whether one is available. Older releases update with the commands above.
 

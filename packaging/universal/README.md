@@ -41,3 +41,6 @@ packaging/universal/package.sh work <version>          # host, needs patchelf
 
 The result is `work/dist/rift-s-linux-<version>-x86_64.tar.xz`. Users extract it
 and run `./install.sh`; `./install.sh --uninstall` removes it.
+
+`packaging/release/build.sh` runs these steps in downloaded roots, together with
+the other release assets.
