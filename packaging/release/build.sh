@@ -28,7 +28,7 @@
 #   RELEASE_WORK   scratch directory, default build-release/ in the checkout; removed on exit unless KEEP_WORK=1
 #   RELEASE_CACHE  checksum-pinned downloads kept between runs, default $RELEASE_WORK/cache
 #   DIST           output directory, default dist/ in the checkout; emptied first
-#   JOBS           parallel compile jobs, default 4
+#   JOBS           parallel compile jobs, default 4; in CI it comes from the runner's environment
 set -euo pipefail
 
 SNIPER_VERSION=3.0.20261021.266025
@@ -62,16 +62,18 @@ wipe() {
 	rm -rf "$@"
 }
 
-# fetch <url> <name> [sha256]: print the path of a download. Pinned files are kept in the cache.
+# fetch <url> <file> [sha256]: download <url> to <file> unless it exists, then check the digest.
+# A file with the wrong digest is deleted and fails the build.
 fetch() {
-	local url=$1 file=$roots/$2 sum=${3:-}
-	[[ -z $sum ]] || file=$cache/$2
+	local url=$1 file=$2 sum=${3:-}
 	if [[ ! -f $file ]]; then
 		curl -fsSL --retry 5 --retry-all-errors -o "$file.part" "$url"
 		mv "$file.part" "$file"
 	fi
-	[[ -z $sum ]] || echo "$sum  $file" | sha256sum -c --quiet - >&2
-	echo "$file"
+	if [[ -n $sum ]] && ! echo "$sum  $file" | sha256sum -c --quiet -; then
+		rm -f "$file"
+		return 1
+	fi
 }
 
 # unpack <archive> <root> <sentinel> [tar options]: extract a root filesystem owned by the calling user.
@@ -128,12 +130,14 @@ git -C "$universal/src/monado" checkout -q -B release "$commit"
 src=$universal/src/monado
 
 step roots
-unpack "$(fetch https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst arch.tar.zst)" \
-	"$roots/arch" usr/bin/pacman --zstd --strip-components=1
-unpack "$(fetch "https://repo.steampowered.com/steamrt-images-sniper/snapshots/$SNIPER_VERSION/com.valvesoftware.SteamRuntime.Sdk-amd64,i386-sniper-sysroot.tar.gz" \
-	"sniper-$SNIPER_VERSION.tar.gz" "$SNIPER_SHA256")" "$roots/sniper" usr/share/cmake-3.25/Modules/CMake.cmake -z
-unpack "$(fetch https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz \
-	ubuntu-base-22.04.5.tar.gz "$JAMMY_SHA256")" "$roots/jammy" usr/bin/apt-get -z
+fetch https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst "$roots/arch.tar.zst"
+unpack "$roots/arch.tar.zst" "$roots/arch" usr/bin/pacman --zstd --strip-components=1
+fetch "https://repo.steampowered.com/steamrt-images-sniper/snapshots/$SNIPER_VERSION/com.valvesoftware.SteamRuntime.Sdk-amd64,i386-sniper-sysroot.tar.gz" \
+	"$cache/sniper-$SNIPER_VERSION.tar.gz" "$SNIPER_SHA256"
+unpack "$cache/sniper-$SNIPER_VERSION.tar.gz" "$roots/sniper" usr/share/cmake-3.25/Modules/CMake.cmake -z
+fetch https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz \
+	"$cache/ubuntu-base-22.04.5.tar.gz" "$JAMMY_SHA256"
+unpack "$cache/ubuntu-base-22.04.5.tar.gz" "$roots/jammy" usr/bin/apt-get -z
 
 step "arch packages"
 in_arch() { enter "$roots/arch" "$1" "$work/arch" --ro-bind "$src" /repo -- bash /repo/packaging/release/arch.sh "${@:2}"; }
@@ -147,7 +151,8 @@ step "universal sources"
 mv "$work/arch/hostdeps" "$universal/hostdeps"
 cp -a "$work/arch/basalt-monado-rifts/src/basalt" "$universal/src/basalt"
 while read -r sum name url; do
-	tar -xzf "$(fetch "$url" "$name" "$sum")" -C "$universal/src"
+	fetch "$url" "$cache/$name" "$sum"
+	tar -xzf "$cache/$name" -C "$universal/src"
 done <<'EOF'
 bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af fmt-11.2.0.tar.gz https://github.com/fmtlib/fmt/archive/refs/tags/11.2.0.tar.gz
 f0f78001c8c8edb4bddc3d4c5ee7428d56ae313254158ad1eec49eced57f6a5b oneTBB-2022.2.0.tar.gz https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2022.2.0.tar.gz

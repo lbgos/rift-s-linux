@@ -1,7 +1,8 @@
-# Builds every release asset with packaging/release/build.sh on the self-hosted runner labelled
-# rift-s-release. A pushed tag r<N> publishes them as release r<N>, marked latest: the tag's subject line
-# is the release title and its body the notes. Pull requests from branches of this repository build
-# without publishing; pull requests from forks never reach the runner.
+# Release assets come from packaging/release/build.sh, which runs on a self-hosted runner and verifies them
+# with packaging/release/verify.py. Pull requests from branches of this repository only build; pull
+# requests from forks are skipped. A pushed tag r<N> also publishes release r<N>, marked latest: the tag's
+# subject line becomes the release title and its body the notes. Only the publish job, which runs no
+# repository code, gets a token that can write.
 name: Release
 
 on:
@@ -9,38 +10,72 @@ on:
     tags: ['r[0-9]*']
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release:
+  build:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, rift-s-release]
     timeout-minutes: 360
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # pkgver of rift-s-linux-git counts commits; the version comes from git describe.
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Build
+      # JOBS and other limits of build.sh come from the runner's environment.
+      - name: Build and verify
         env:
           VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           RELEASE_WORK: ${{ runner.temp }}/rift-s-release
           RELEASE_CACHE: ${{ runner.tool_cache }}/rift-s-release
         run: packaging/release/build.sh ${VERSION:+"$VERSION"}
 
-      - name: Publish
+      - name: Upload assets
         if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Check SHA256SUMS
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          # The checkout keeps the tag without its message.
-          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
-          git tag -l --format='%(contents:body)' "$TAG" > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" dist/* --verify-tag --latest \
-            --title "$(git tag -l --format='%(contents:subject)' "$TAG")" --notes-file "$RUNNER_TEMP/notes.md"
+          # The tag object holds the title and notes; a lightweight tag falls back to the commit message.
+          ref=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG")
+          if [ "$(jq -r .object.type <<<"$ref")" = tag ]; then
+            message=$(gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<<"$ref")" --jq .message)
+          else
+            message=$(gh api "repos/$GH_REPO/commits/$(jq -r .object.sha <<<"$ref")" --jq .commit.message)
+          fi
+          title=$(head -n 1 <<<"$message")
+          tail -n +3 <<<"$message" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* --verify-tag --latest --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
