@@ -40,6 +40,8 @@ setup() {
 	for file in $(pacman -Sp --print-format %f boost eigen vulkan-headers plasma-wayland-protocols); do
 		bsdtar -xf "/var/cache/pacman/pkg/$file" -C /work/hostdeps usr
 	done
+	# build.sh keeps the package cache between runs; keep only the installed versions in it.
+	pacman -Sc --noconfirm
 }
 
 package() {

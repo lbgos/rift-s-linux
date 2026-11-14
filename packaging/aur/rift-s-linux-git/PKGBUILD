@@ -17,9 +17,10 @@ optdepends=('steam: install and run SteamVR from the Steam library (native insta
             'kwin: in-headset Desktop overlay and minimized VR View preview source'
             'kconfig: write the VR View window rule (kwriteconfig6)'
             'qt6-tools: apply the VR View window rule (qdbus6)')
+# Linking monado-gui needs the Qt 6 libraries of opencv's highgui, which opencv does not depend on.
 makedepends=('git' 'cmake' 'ninja' 'eigen' 'glslang' 'vulkan-headers'
              'wayland-protocols' 'plasma-wayland-protocols' 'pipewire' 'cargo' 'pnpm' 'nodejs' 'pkgconf' 'shaderc'
-             'desktop-file-utils')
+             'desktop-file-utils' 'qt6-base')
 provides=('rift-s-linux' 'monado' 'monado-git' 'rifts-settings')
 conflicts=('rift-s-linux' 'monado' 'monado-git' 'rifts-settings' 'monado-rifts-git')
 install=rift-s-linux.install

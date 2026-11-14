@@ -26,7 +26,7 @@
 #
 # Environment:
 #   RELEASE_WORK   scratch directory, default build-release/ in the checkout; removed on exit unless KEEP_WORK=1
-#   RELEASE_CACHE  checksum-pinned downloads kept between runs, default $RELEASE_WORK/cache
+#   RELEASE_CACHE  checksum-pinned downloads and Arch packages kept between runs, default $RELEASE_WORK/cache
 #   DIST           output directory, default dist/ in the checkout; emptied first
 #   JOBS           parallel compile jobs, default 4; in CI it comes from the runner's environment
 set -euo pipefail
@@ -119,7 +119,7 @@ if ((${#problems[@]})); then
 	printf 'cannot build: %s\n' "${problems[@]}" >&2
 	exit 1
 fi
-mkdir -p "$cache" "$roots" "$work/arch/home" "$universal/src" "$universal/home"
+mkdir -p "$cache/pacman" "$roots" "$work/arch/home" "$universal/src" "$universal/home"
 trap '[[ ${KEEP_WORK:-0} == 1 ]] || wipe "$work"' EXIT
 [[ -z $(git -C "$repo" status --porcelain) ]] || echo "Uncommitted changes are not built; building $commit." >&2
 
@@ -140,7 +140,10 @@ fetch https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-
 unpack "$cache/ubuntu-base-22.04.5.tar.gz" "$roots/jammy" usr/bin/apt-get -z
 
 step "arch packages"
-in_arch() { enter "$roots/arch" "$1" "$work/arch" --ro-bind "$src" /repo -- bash /repo/packaging/release/arch.sh "${@:2}"; }
+in_arch() {
+	enter "$roots/arch" "$1" "$work/arch" --ro-bind "$src" /repo --bind "$cache/pacman" /var/cache/pacman/pkg -- \
+		bash /repo/packaging/release/arch.sh "${@:2}"
+}
 in_arch 0 setup
 in_arch 1000 package basalt-monado-rifts
 in_arch 0 install_package basalt-monado-rifts
@@ -158,10 +161,14 @@ bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af fmt-11.2.0.tar.
 f0f78001c8c8edb4bddc3d4c5ee7428d56ae313254158ad1eec49eced57f6a5b oneTBB-2022.2.0.tar.gz https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2022.2.0.tar.gz
 44c106d5bb47efec04e531fd93008b3fcd1d27138985c5baf4eafac0e1ec9e9d opencv-4.12.0.tar.gz https://github.com/opencv/opencv/archive/refs/tags/4.12.0.tar.gz
 EOF
+# Free the Arch build trees; the Arch root stays for verify.py.
+wipe "$work/arch/basalt-monado-rifts" "$work/arch/rift-s-linux-git" "$work/arch/rift-s-linux-bin" \
+	"$work/arch/stage" "$work/arch/srcdest"
 
 step "universal sniper build"
 enter "$roots/sniper" 1000 "$universal" -- sh /work/src/monado/packaging/universal/deps.sh
 enter "$roots/sniper" 1000 "$universal" -- sh /work/src/monado/packaging/universal/build.sh
+wipe "$roots/sniper"
 
 step "universal settings and tarball"
 jammy=(--setenv RUSTUP_HOME /opt/rustup --setenv CARGO_HOME /opt/cargo)
