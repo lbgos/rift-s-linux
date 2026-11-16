@@ -20,9 +20,12 @@ apt-get install -y fakeroot
 FAKEROOTDONTTRYCHOWN=1 fakeroot apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
 	libgtk-3-dev libsoup-3.0-dev libvulkan-dev libwayland-dev glslang-tools python3 ca-certificates curl \
 	xz-utils file patchelf
-download() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 "$@"; }
-download "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" | tar -xJ --no-same-owner -C /opt
+# download <url> <file>: curl restarts a failed partial transfer from scratch only in an output file.
+download() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -o "$2" "$1"; }
+download "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" /tmp/node.tar.xz
+tar -xJf /tmp/node.tar.xz --no-same-owner -C /opt
 ln -sfn "node-v$NODE_VERSION-linux-x64" /opt/node
 npm install -g "pnpm@$PNPM_VERSION"
-download https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+download https://sh.rustup.rs /tmp/rustup-init.sh
+sh /tmp/rustup-init.sh -y --profile minimal --no-modify-path
 install -m755 /work/src/monado/packaging/release/glslc /usr/local/bin/glslc
