@@ -26,7 +26,7 @@
 #
 # Environment:
 #   RELEASE_WORK   scratch directory, default build-release/ in the checkout; removed on exit unless KEEP_WORK=1
-#   RELEASE_CACHE  checksum-pinned downloads and Arch packages kept between runs, default $RELEASE_WORK/cache
+#   RELEASE_CACHE  checksum-pinned downloads and Arch packages kept between runs, default build-release-cache/ in the checkout
 #   DIST           output directory, default dist/ in the checkout; emptied first
 #   JOBS           parallel compile jobs, default 4; in CI it comes from the runner's environment
 set -euo pipefail
@@ -48,7 +48,7 @@ fi
 binver=${version#r}
 binver=${binver//-/.}
 work=${RELEASE_WORK:-$repo/build-release}
-cache=${RELEASE_CACHE:-$work/cache}
+cache=${RELEASE_CACHE:-$repo/build-release-cache}
 dist=${DIST:-$repo/dist}
 jobs=${JOBS:-4}
 roots=$work/roots

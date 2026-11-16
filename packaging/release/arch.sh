@@ -10,6 +10,9 @@
 # /work/out receives the packages. VERSION (r38) and BINVER (38) come from build.sh.
 set -euo pipefail
 out=/work/out
+# The namespace maps no uid 0, so a real chown to root fails with EINVAL, which fakeroot passes on
+# (`cp -a` in rift-s-linux-bin). Ownership in the packages comes from fakeroot either way.
+export FAKEROOTDONTTRYCHOWN=1
 
 setup() {
 	# The namespace maps one user: pacman cannot switch to its download user, and files that
