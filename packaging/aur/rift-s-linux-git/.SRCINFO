@@ -35,6 +35,7 @@ pkgbase = rift-s-linux-git
 	makedepends = pkgconf
 	makedepends = shaderc
 	makedepends = desktop-file-utils
+	makedepends = qt6-base
 	depends = glibc
 	depends = libgcc
 	depends = libstdc++

@@ -1,0 +1,24 @@
+#!/bin/sh
+# The glslc call of settings-app/src-tauri/build.rs on Ubuntu 22.04, which packages glslang but not
+# shaderc: compile with glslangValidator and wrap its hex words in the braces of `glslc -mfmt=c`.
+set -eu
+stage='' input='' output=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-fshader-stage=*) stage=${1#-fshader-stage=} ;;
+	-mfmt=c) ;;
+	-o)
+		output=$2
+		shift
+		;;
+	*) input=$1 ;;
+	esac
+	shift
+done
+glslangValidator -V -x -S "$stage" -o "$output.words" "$input" >/dev/null
+{
+	echo '{'
+	cat "$output.words"
+	echo '}'
+} >"$output"
+rm "$output.words"
