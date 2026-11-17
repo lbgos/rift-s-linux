@@ -34,6 +34,7 @@
 #include <memory>
 #include <string>
 #include <set>
+#include <thread>
 #include <vector>
 
 #ifndef RIFTS_DESKTOP_MANIFEST
@@ -306,7 +307,7 @@ public:
 		sigaddset(&mask, SIGTERM);
 		if (need_vr) sigprocmask(SIG_BLOCK, &mask, nullptr);
 		if (need_vr) {
-			if (!vr_connect(vr::VRApplication_Overlay, vr_, error)) {
+			if (!connect_when_ready(error)) {
 				fprintf(stderr, "rifts-desktop: %s\n", error.c_str());
 				return 2;
 			}
@@ -385,6 +386,47 @@ public:
 	}
 
 private:
+	// rifts-setup starts this client as soon as vrserver appears, often before SteamVR
+	// accepts clients or has its headset. This instance holds the single-instance lock, so
+	// the later SteamVR autolaunch exits on it; give up only when SteamVR does.
+	bool
+	connect_when_ready(std::string &error)
+	{
+		const auto deadline = Clock::now() + std::chrono::seconds(90);
+		std::string reported;
+		// SIGINT and SIGTERM are blocked for the signalfd, so check them here.
+		auto stopped = [] {
+			sigset_t pending;
+			return sigpending(&pending) == 0 && (sigismember(&pending, SIGINT) || sigismember(&pending, SIGTERM));
+		};
+		auto wait = [&](const std::string &reason) {
+			if (reason != reported) {
+				fprintf(stderr, "rifts-desktop: %s; waiting for SteamVR\n", reason.c_str());
+				reported = reason;
+			}
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		};
+		while (!vr_connect(vr::VRApplication_Overlay, vr_, error)) {
+			if (!vrserver_pid() || stopped() || Clock::now() >= deadline) return false;
+			wait(error);
+		}
+		// The headset's display decides the GPU that overlay textures must come from.
+		while (!vr_.system->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
+			if (!vrserver_pid() || stopped()) {
+				vr_disconnect();
+				error = "SteamVR is not running";
+				return false;
+			}
+			if (Clock::now() >= deadline) {
+				fprintf(stderr, "rifts-desktop: SteamVR has no headset; continuing\n");
+				break;
+			}
+			wait("SteamVR has no headset yet");
+		}
+		if (!reported.empty()) fprintf(stderr, "rifts-desktop: connected to SteamVR\n");
+		return true;
+	}
+
 	int
 	loop()
 	{

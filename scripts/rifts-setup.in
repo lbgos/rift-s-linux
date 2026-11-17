@@ -447,7 +447,8 @@ def triage_context(home, registry_path, state, directory):
             if log.name.startswith(('vrserver', 'vrcompositor', 'vrclient_monado'))]
     section('Logs', [f'{log} ({time.strftime("%Y-%m-%d %H:%M", time.localtime(log.stat().st_mtime))})'
                      for log in logs] + [
-        'journalctl --user -b -u rifts-steamvr-registration.service', 'journalctl -k -b'])
+        'journalctl --user -b -u rifts-steamvr-registration.service', 'journalctl --user -b -t rifts-desktop',
+        'journalctl -k -b'])
     section('State and configuration', [
         state, Path(os.environ.get('XDG_CONFIG_HOME', home / '.config')) / 'monado',
         *(root / 'config' for root in roots)])
