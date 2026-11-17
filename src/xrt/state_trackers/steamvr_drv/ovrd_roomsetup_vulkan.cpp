@@ -63,9 +63,10 @@ struct Mapping
 	VkDeviceSize offset;
 	VkDeviceSize size;
 };
-// SteamVR 2.17.10 Linux x86-64 stores the mapped pointer, buffer, memory,
-// and used bytes consecutively. The Vulkan objects provide the capacity.
-// Only this exact executable build is supported; no executable bytes change.
+// SteamVR 2.17.10 and 2.18.4 Linux x86-64 store the mapped pointer, buffer,
+// memory and used bytes consecutively. The Vulkan objects provide the capacity.
+// Only these exact executable builds are supported, and each allocation is
+// validated against this layout before use; no executable bytes change.
 struct RingFields
 {
 	uintptr_t mapped;
@@ -90,10 +91,16 @@ bool local_write(uintptr_t address, uint64_t value)
 
 bool supported_ring_build()
 {
-	// GNU build IDs identify the supported SteamVR executable without a code signature.
-	constexpr std::array<unsigned char, 20> supported{
-	    0xf5, 0xc5, 0x60, 0xdc, 0xaa, 0x16, 0xd7, 0xb2, 0x62, 0x5e,
-	    0xce, 0x68, 0x4b, 0x02, 0x39, 0x65, 0x05, 0xe0, 0x76, 0x8f};
+	// GNU build IDs identify the supported SteamVR executables without a code signature.
+	using BuildId = std::array<unsigned char, 20>;
+	constexpr std::array<BuildId, 2> supported{{
+	    // vrcompositor 2.17.10
+	    {0xf5, 0xc5, 0x60, 0xdc, 0xaa, 0x16, 0xd7, 0xb2, 0x62, 0x5e,
+	     0xce, 0x68, 0x4b, 0x02, 0x39, 0x65, 0x05, 0xe0, 0x76, 0x8f},
+	    // vrcompositor 2.18.4
+	    {0x90, 0x43, 0x76, 0x69, 0x64, 0xb1, 0x83, 0x1d, 0x8d, 0xf8,
+	     0x49, 0xa8, 0x67, 0xc1, 0xdf, 0x04, 0x18, 0x41, 0x3c, 0xd4},
+	}};
 	int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
 	if (fd < 0) return false;
 	Elf64_Ehdr header{};
@@ -116,9 +123,12 @@ bool supported_ring_build()
 			uint64_t name_size = (uint64_t(note.n_namesz) + 3) & ~uint64_t{3};
 			uint64_t data_size = (uint64_t(note.n_descsz) + 3) & ~uint64_t{3};
 			if (name_size > bytes.size() - offset || data_size > bytes.size() - offset - name_size) break;
-			if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 && note.n_descsz == supported.size() &&
-			    memcmp(bytes.data() + offset, "GNU", 4) == 0 &&
-			    memcmp(bytes.data() + offset + name_size, supported.data(), supported.size()) == 0) matched = true;
+			if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 && note.n_descsz == sizeof(BuildId) &&
+			    memcmp(bytes.data() + offset, "GNU", 4) == 0) {
+				for (const BuildId &id : supported) {
+					if (memcmp(bytes.data() + offset + name_size, id.data(), id.size()) == 0) matched = true;
+				}
+			}
 			offset += name_size + data_size;
 		}
 	}
