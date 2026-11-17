@@ -26,7 +26,9 @@
 #
 # Environment:
 #   RELEASE_WORK   scratch directory, default build-release/ in the checkout; removed on exit unless KEEP_WORK=1
-#   RELEASE_CACHE  checksum-pinned downloads and Arch packages kept between runs, default build-release-cache/ in the checkout
+#   RELEASE_CACHE  kept between runs, default build-release-cache/ in the checkout: checksum-pinned downloads, Arch
+#                  packages, makepkg sources, the Basalt package and the sniper prefix of bundled libraries with Basalt.
+#                  Entries are keyed by their inputs; removing the directory forces a full build.
 #   DIST           output directory, default dist/ in the checkout; emptied first
 #   JOBS           parallel compile jobs, default 4; in CI it comes from the runner's environment
 set -euo pipefail
@@ -119,7 +121,8 @@ if ((${#problems[@]})); then
 	printf 'cannot build: %s\n' "${problems[@]}" >&2
 	exit 1
 fi
-mkdir -p "$cache/pacman" "$roots" "$work/arch/home" "$universal/src" "$universal/home"
+mkdir -p "$cache/pacman" "$cache/srcdest" "$cache/arch" "$roots" "$work/arch/home" "$work/arch/srcdest" \
+	"$universal/src" "$universal/home"
 trap '[[ ${KEEP_WORK:-0} == 1 ]] || wipe "$work"' EXIT
 [[ -z $(git -C "$repo" status --porcelain) ]] || echo "Uncommitted changes are not built; building $commit." >&2
 
@@ -141,8 +144,8 @@ unpack "$cache/ubuntu-base-22.04.5.tar.gz" "$roots/jammy" usr/bin/apt-get -z
 
 step "arch packages"
 in_arch() {
-	enter "$roots/arch" "$1" "$work/arch" --ro-bind "$src" /repo --bind "$cache/pacman" /var/cache/pacman/pkg -- \
-		bash /repo/packaging/release/arch.sh "${@:2}"
+	enter "$roots/arch" "$1" "$work/arch" --ro-bind "$src" /repo --bind "$cache/pacman" /var/cache/pacman/pkg \
+		--bind "$cache/srcdest" /work/srcdest --bind "$cache/arch" /cache -- bash /repo/packaging/release/arch.sh "${@:2}"
 }
 in_arch 0 setup
 in_arch 1000 package basalt-monado-rifts
@@ -153,21 +156,37 @@ in_arch 1000 payload
 step "universal sources"
 mv "$work/arch/hostdeps" "$universal/hostdeps"
 cp -a "$work/arch/basalt-monado-rifts/src/basalt" "$universal/src/basalt"
+libraries='bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af fmt-11.2.0.tar.gz https://github.com/fmtlib/fmt/archive/refs/tags/11.2.0.tar.gz
+f0f78001c8c8edb4bddc3d4c5ee7428d56ae313254158ad1eec49eced57f6a5b oneTBB-2022.2.0.tar.gz https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2022.2.0.tar.gz
+44c106d5bb47efec04e531fd93008b3fcd1d27138985c5baf4eafac0e1ec9e9d opencv-4.12.0.tar.gz https://github.com/opencv/opencv/archive/refs/tags/4.12.0.tar.gz'
+# The sniper prefix holds the bundled libraries and Basalt, and depends only on these inputs.
+prefix_key=$({
+	echo "$SNIPER_VERSION" "$libraries"
+	cat "$universal/hostdeps/versions" "$src/packaging/universal/deps.sh" "$src/packaging/universal/build.sh" "$src"/packaging/aur/basalt-monado-rifts/*
+} | sha256sum | cut -c1-16)
+prefix_cache=$cache/sniper-prefix-$prefix_key.tar
+if [[ -f $prefix_cache ]]; then
+	echo "sniper prefix from cache $prefix_key"
+	mkdir -p "$universal/prefix"
+	tar -xf "$prefix_cache" -C "$universal/prefix"
+fi
+# package.sh takes the library licenses from the sources.
 while read -r sum name url; do
 	fetch "$url" "$cache/$name" "$sum"
 	tar -xzf "$cache/$name" -C "$universal/src"
-done <<'EOF'
-bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af fmt-11.2.0.tar.gz https://github.com/fmtlib/fmt/archive/refs/tags/11.2.0.tar.gz
-f0f78001c8c8edb4bddc3d4c5ee7428d56ae313254158ad1eec49eced57f6a5b oneTBB-2022.2.0.tar.gz https://github.com/uxlfoundation/oneTBB/archive/refs/tags/v2022.2.0.tar.gz
-44c106d5bb47efec04e531fd93008b3fcd1d27138985c5baf4eafac0e1ec9e9d opencv-4.12.0.tar.gz https://github.com/opencv/opencv/archive/refs/tags/4.12.0.tar.gz
-EOF
+done <<<"$libraries"
 # Free the Arch build trees; the Arch root stays for verify.py.
 wipe "$work/arch/basalt-monado-rifts" "$work/arch/rift-s-linux-git" "$work/arch/rift-s-linux-bin" \
 	"$work/arch/stage" "$work/arch/srcdest"
 
 step "universal sniper build"
-enter "$roots/sniper" 1000 "$universal" -- sh /work/src/monado/packaging/universal/deps.sh
+[[ -f $prefix_cache ]] || enter "$roots/sniper" 1000 "$universal" -- sh /work/src/monado/packaging/universal/deps.sh
 enter "$roots/sniper" 1000 "$universal" -- sh /work/src/monado/packaging/universal/build.sh
+if [[ ! -f $prefix_cache ]]; then
+	rm -f "$cache"/sniper-prefix-*.tar
+	tar -C "$universal/prefix" -cf "$prefix_cache.part" .
+	mv "$prefix_cache.part" "$prefix_cache"
+fi
 wipe "$roots/sniper"
 
 step "universal settings and tarball"

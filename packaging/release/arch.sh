@@ -43,6 +43,8 @@ setup() {
 	for file in $(pacman -Sp --print-format %f boost eigen vulkan-headers plasma-wayland-protocols); do
 		bsdtar -xf "/var/cache/pacman/pkg/$file" -C /work/hostdeps usr
 	done
+	# Part of build.sh's cache key for the sniper prefix, which compiles Basalt against these headers.
+	pacman -Q boost eigen >/work/hostdeps/versions
 	# build.sh keeps the package cache between runs; keep only the installed versions in it.
 	pacman -Sc --noconfirm
 }
@@ -57,7 +59,33 @@ package() {
 		sed -i 's|git+https://github.com/lbgos/rift-s-linux.git#branch=main|git+file:///repo#branch=release|' PKGBUILD
 		grep -q 'git+file:///repo#branch=release' PKGBUILD
 	fi
+	if [[ $recipe == basalt-monado-rifts ]]; then
+		package_basalt
+		return
+	fi
 	PKGDEST=$out SRCDEST=/work/srcdest makepkg -f --noconfirm
+}
+
+# Basalt changes only with its recipe and the Arch libraries it builds against, so /cache keeps its
+# package between runs. The prepared sources are extracted every run: the universal build uses them.
+package_basalt() {
+	local key cached
+	key=$({
+		cat ./*
+		pacman -Q glibc gcc opencv onetbb fmt eigen boost cmake
+	} | sha256sum | cut -c1-16)
+	cached=(/cache/basalt-"$key"/*.pkg.tar.zst)
+	if [[ -f ${cached[0]} ]]; then
+		echo "Basalt package from cache $key"
+		SRCDEST=/work/srcdest makepkg -o --noconfirm
+		cp "${cached[0]}" "$out/"
+		return
+	fi
+	PKGDEST=$out SRCDEST=/work/srcdest makepkg -f --noconfirm
+	rm -rf /cache/basalt-*
+	mkdir -p "/cache/basalt-$key.part"
+	cp "$out"/basalt-monado-rifts-[0-9]*.pkg.tar.zst "/cache/basalt-$key.part/"
+	mv "/cache/basalt-$key.part" "/cache/basalt-$key"
 }
 
 install_package() {
