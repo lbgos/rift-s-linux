@@ -2223,93 +2223,6 @@ CServerDriver_Monado::RunFrame()
 
 /*
  *
- * Watchdog code
- *
- */
-
-class CWatchdogDriver_Monado : public vr::IVRWatchdogProvider
-{
-public:
-	CWatchdogDriver_Monado()
-	{
-		ovrd_log("Created watchdog object\n");
-		m_pWatchdogThread = nullptr;
-	}
-
-	// clang-format off
-	virtual ~CWatchdogDriver_Monado() {};
-	virtual vr::EVRInitError Init(vr::IVRDriverContext *pDriverContext);
-	virtual void Cleanup();
-	// clang-format on
-
-private:
-	std::thread *m_pWatchdogThread;
-};
-
-CWatchdogDriver_Monado g_watchdogDriverMonado;
-std::atomic<bool> g_bExiting{false};
-
-void
-WatchdogThreadFunction()
-{
-	while (!g_bExiting) {
-#if defined(_WINDOWS)
-		// on windows send the event when the Y key is pressed.
-		if ((0x01 & GetAsyncKeyState('Y')) != 0) {
-			// Y key was pressed.
-			vr::VRWatchdogHost()->WatchdogWakeUp(vr::TrackedDeviceClass_HMD);
-		}
-		std::this_thread::sleep_for(std::chrono::microseconds(500));
-#else
-		ovrd_log("Watchdog wakeup\n");
-		// for the other platforms, just send one every five seconds
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-		vr::VRWatchdogHost()->WatchdogWakeUp(vr::ETrackedDeviceClass::TrackedDeviceClass_HMD);
-#endif
-	}
-
-	ovrd_log("Watchdog exit\n");
-}
-
-vr::EVRInitError
-CWatchdogDriver_Monado::Init(vr::IVRDriverContext *pDriverContext)
-{
-	VR_INIT_WATCHDOG_DRIVER_CONTEXT(pDriverContext);
-	ovrd_log_init(vr::VRDriverLog());
-
-	// Watchdog mode on Windows starts a thread that listens for the 'Y' key
-	// on the keyboard to be pressed. A real driver should wait for a system
-	// button event or something else from the the hardware that signals
-	// that the VR system should start up.
-	g_bExiting = false;
-
-	ovrd_log("starting watchdog thread\n");
-
-	m_pWatchdogThread = new std::thread(WatchdogThreadFunction);
-	if (!m_pWatchdogThread) {
-		ovrd_log("Unable to create watchdog thread\n");
-		return vr::VRInitError_Driver_Failed;
-	}
-
-	return vr::VRInitError_None;
-}
-
-void
-CWatchdogDriver_Monado::Cleanup()
-{
-	g_bExiting = true;
-	if (m_pWatchdogThread) {
-		m_pWatchdogThread->join();
-		delete m_pWatchdogThread;
-		m_pWatchdogThread = nullptr;
-	}
-
-	ovrd_log_cleanup();
-}
-
-
-/*
- *
  * 'Exported' functions.
  *
  */
@@ -2321,10 +2234,15 @@ ovrd_hmd_driver_impl(const char *pInterfaceName, int *pReturnCode)
 	if (0 == strcmp(vr::IServerTrackedDeviceProvider_Version, pInterfaceName)) {
 		return &g_serverDriverMonado;
 	}
-	if (0 == strcmp(vr::IVRWatchdogProvider_Version, pInterfaceName)) {
-		return &g_watchdogDriverMonado;
-	}
 	// clang-format on
+	// No IVRWatchdogProvider: Steam loads watchdogs and starts SteamVR on every wake-up,
+	// and the driver has no hardware signal for a deliberate start.
+	if (0 == strcmp(vr::IVRWatchdogProvider_Version, pInterfaceName)) {
+		if (pReturnCode) {
+			*pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
+		}
+		return NULL;
+	}
 
 	ovrd_log("Unimplemented interface: %s\n", pInterfaceName);
 
