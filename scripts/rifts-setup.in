@@ -83,6 +83,24 @@ def pathreg(tool, *arguments):
         raise RuntimeError('SteamVR driver registration failed; will retry.')
 
 
+def other_monado_drivers(drivers):
+    """Registered driver paths, other than ours, whose manifest is named "monado".
+
+    SteamVR loads one driver per name, so a system-wide Monado build registered under the
+    same name can load in place of this one."""
+    others = []
+    for path in drivers:
+        if not isinstance(path, str) or Path(path) == DRIVER:
+            continue
+        try:
+            manifest = json.loads((Path(path) / 'driver.vrdrivermanifest').read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(manifest, dict) and manifest.get('name') == 'monado':
+            others.append(path)
+    return others
+
+
 def register(home, registry_path, uninstall=False):
     registry = read_registry(registry_path)
     tool, roots, libraries = find_runtime(home, registry)
@@ -96,6 +114,11 @@ def register(home, registry_path, uninstall=False):
         return True, roots, libraries, host_launch(roots, runtime, uninstall=True)
     if not (DRIVER / 'driver.vrdrivermanifest').is_file():
         raise RuntimeError('Installed Rift S driver manifest is missing.')
+    for path in other_monado_drivers(drivers):
+        pathreg(tool, 'removedriver', path)
+        print(f'Unregistered another SteamVR driver named monado so the Rift S driver loads: {path}. '
+              f'To use it again, uninstall rift-s-linux and run vrpathreg adddriver {path}.',
+              file=sys.stderr, flush=True)
     if str(DRIVER) not in drivers:
         # Bootstrap only missing native paths. Existing runtime/config/log paths remain intact.
         if not registry.get('runtime'):

@@ -110,6 +110,19 @@ class ReleaseAsset(unittest.TestCase):
         self.assertIsNone(setup.release_asset('Arch package rift-s-linux-git', 'r32', self.NAMES))
 
 
+class OtherMonadoDrivers(unittest.TestCase):
+    def test_selects_other_drivers_named_monado(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, manifest in [('system', '{"name": "monado"}'), ('lighthouse', '{"name": "lighthouse"}'),
+                                   ('broken', '{')]:
+                (root / name).mkdir()
+                (root / name / 'driver.vrdrivermanifest').write_text(manifest)
+            drivers = [str(setup.DRIVER), str(root / 'system'), str(root / 'lighthouse'), str(root / 'broken'),
+                       str(root / 'missing'), 7]
+            self.assertEqual(setup.other_monado_drivers(drivers), [str(root / 'system')])
+
+
 class SafeMode(unittest.TestCase):
     def test_warns_without_editing_settings_or_exposing_other_values(self):
         with tempfile.TemporaryDirectory() as directory:

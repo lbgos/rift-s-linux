@@ -45,8 +45,10 @@ if [ "${1:-}" = --uninstall ]; then
 	exit
 fi
 
-if [ -d /usr/share/steamvr-monado ]; then
-	echo 'A system-wide rift-s-linux package is installed. Remove it first.' >&2
+# rift-s-linux system packages ship rifts-setup. Other system-wide Monado builds may also have
+# /usr/share/steamvr-monado; rifts-setup takes over their SteamVR driver registration.
+if [ -e /usr/bin/rifts-setup ]; then
+	echo 'A system-wide rift-s-linux package is installed (/usr/bin/rifts-setup). Remove it first.' >&2
 	exit 1
 fi
 
