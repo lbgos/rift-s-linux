@@ -144,7 +144,12 @@ vr_connect(vr::EVRApplicationType type, Vr &out, std::string &error)
 	vr::EVRInitError init = g_core->Init(type, nullptr);
 	if (init != vr::VRInitError_None) {
 		error = std::string("VR init failed: ") + g_core->GetIDForVRInitError(init);
+		// As openvr_api does: without Cleanup and unload, a retry from this process leaves
+		// vrserver an old connection to force out.
+		g_core->Cleanup();
 		g_core = nullptr;
+		dlclose(g_library);
+		g_library = nullptr;
 		return false;
 	}
 	auto get = [](const char *version) {
