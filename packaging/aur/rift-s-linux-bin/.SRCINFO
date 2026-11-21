@@ -24,9 +24,10 @@ pkgbase = rift-s-linux-bin
 	depends = libgcc
 	depends = libstdc++
 	depends = libusb
-	depends = opencv
+	depends = opencv>=5.1
+	depends = opencv<5.2
 	depends = onetbb
-	depends = fmt
+	depends = libfmt.so=12-64
 	depends = sdl2
 	depends = libglvnd
 	depends = vulkan-icd-loader

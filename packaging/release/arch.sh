@@ -110,6 +110,16 @@ payload() {
 	sum=$(sha256sum "$out/$name" | cut -d' ' -f1)
 	sed -i -e "s/^pkgver=.*/pkgver=$BINVER/" -e 's/^pkgrel=.*/pkgrel=1/' \
 		-e "s/^sha256sums=.*/sha256sums=('$sum')/" "$recipe/PKGBUILD"
+	# The payload links opencv's minor-versioned and fmt's major-versioned sonames. Pin the builds
+	# it links, so pacman refuses an upgrade that would leave the driver unloadable.
+	local opencv major minor fmt
+	opencv=$(pacman -Q opencv | cut -d' ' -f2)
+	IFS=. read -r major minor _ <<<"$opencv"
+	fmt=$(pacman -Q fmt | cut -d' ' -f2 | cut -d. -f1)
+	sed -i -E -e "s/'opencv[^']*'( 'opencv[^']*')?/'opencv>=$major.$minor' 'opencv<$major.$((minor + 1))'/" \
+		-e "s/'(fmt|libfmt\.so[^']*)'/'libfmt.so=$fmt-64'/" "$recipe/PKGBUILD"
+	grep -F "'opencv>=$major.$minor' 'opencv<$major.$((minor + 1))'" "$recipe/PKGBUILD" | grep -qF "'libfmt.so=$fmt-64'"
+	echo "rift-s-linux-bin pins opencv $major.$minor and libfmt.so=$fmt-64"
 	cd "$recipe"
 	# -bin only repacks the payload, so its runtime dependencies need not be installed here.
 	PKGDEST=$out makepkg -d -f --noconfirm
