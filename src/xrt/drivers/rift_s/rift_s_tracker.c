@@ -1241,6 +1241,18 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	paused = paused || t->standby || t->slam_paused || t->slam_restart_pending ||
 	         sample_generation != t->slam_generation;
 	slam_valid = slam_valid && sample_ts >= t->slam_min_sample_ns;
+	// A CPU-bound backend delivers every sample late but keeps delivering. Holding the position for
+	// such a sample is not a SLAM loss: restarting a late backend only adds its re-initialisation.
+	bool sample_late = false;
+	if (sample_ts != 0 && sample_ts >= t->slam_min_sample_ns && !paused) {
+		timepoint_ns now_ns = os_monotonic_get_ns();
+		if (sample_ts > t->slam_newest_sample_ns) {
+			t->slam_newest_sample_ns = sample_ts;
+			t->slam_sample_arrived_ns = now_ns;
+		}
+		sample_late = sample_stale && sample_ts <= now_ns &&
+		              now_ns - t->slam_sample_arrived_ns < RIFT_S_SLAM_GUARD_RESET_INTERVAL_NS;
+	}
 	struct xrt_quat sample_fusion = t->pose.orientation;
 	struct xrt_quat query_fusion = t->pose.orientation;
 	if (t->fusion.history) {
@@ -1272,7 +1284,7 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 	bool hold = paused || (query_slam && t->feature_gate.lost);
 	if (query_slam && !paused && t->feature_gate.lost) {
 		// Keep the health clock running through a feature hold without accepting new world poses.
-		if (slam_valid && rift_s_slam_guard_pose_usable(&slam_relation.pose, &sample_fusion)) {
+		if (sample_late || (slam_valid && rift_s_slam_guard_pose_usable(&slam_relation.pose, &sample_fusion))) {
 			g->invalid_since_ns = 0;
 		} else {
 			struct xrt_pose ignored;
@@ -1305,7 +1317,9 @@ rift_s_tracker_get_tracked_pose(struct rift_s_tracker *t,
 		if (g->have_good) g->good = imu_relation.pose;
 	} else {
 		bool use_slam = false;
-		if (query_slam) {
+		if (query_slam && sample_late) {
+			// Hold below without touching the guard: the next timely sample continues tracking.
+		} else if (query_slam) {
 			use_slam = rift_s_slam_guard_update(g, slam_valid, &slam_relation.pose,
 			                                    slam_valid ? sample_ts : os_monotonic_get_ns(), &sample_fusion,
 			                                    &no_pose_position, &imu_relation.pose, &reason);

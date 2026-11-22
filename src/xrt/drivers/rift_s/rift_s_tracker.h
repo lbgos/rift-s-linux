@@ -125,6 +125,10 @@ struct rift_s_tracker
 	uint32_t slam_restarts;
 	uint64_t slam_generation;
 	timepoint_ns slam_min_sample_ns;
+	//! Newest SLAM sample seen by a pose query and when it arrived, to tell a late backend from a
+	//! stalled one. Under @ref mutex.
+	timepoint_ns slam_newest_sample_ns;
+	timepoint_ns slam_sample_arrived_ns;
 
 	//! Whether the SLAM cameras see enough features. Under @ref mutex.
 	struct rift_s_slam_feature_gate feature_gate;
