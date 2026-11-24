@@ -106,6 +106,8 @@ sudo udevadm control --reload-rules
 
 The install registers the SteamVR driver automatically through a systemd user service, including when SteamVR is installed later or in another library. The same service sets SteamVR's launch option to `vrmonitor.sh %command%`, because Steam otherwise starts SteamVR in the Steam Linux Runtime container, where the driver is not visible. Prefixed options that still end in that command (for example `QT_QPA_PLATFORM=xcb …/vrmonitor.sh %command%`) are left alone; other custom options are left alone and the service logs the command to add. It also installs the Room Setup layer, session guard and Desktop overlay. Check that CMake enables `rifts-desktop`; it skips the overlay if its dependencies are missing. SteamVR loads the driver in-process, so no separate `monado-service` needs to run.
 
+System installs enable the service for every user from `/usr/lib/systemd/user`, so `systemctl --user disable` leaves it running. Turn it off with `systemctl --user mask --now rifts-steamvr-registration.service`. The driver stays registered; run `rifts-setup` once by hand after reinstalling SteamVR or moving its library.
+
 Build and install Settings:
 
 ```sh
